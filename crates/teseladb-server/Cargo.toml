@@ -77,6 +77,14 @@ harness = false
 name = "enroll"
 harness = false
 
+[[test]]
+name = "mcp"
+harness = false
+
+[[test]]
+name = "large_history"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

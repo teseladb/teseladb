@@ -5,6 +5,8 @@
 //! steps 8, 9 and 11; `cs-split-large` steps 6 to 9 came back empty).
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::time::{Duration, Instant};
 
@@ -13,6 +15,32 @@ use teseladb_bson::{Document, Value};
 use teseladb_lsm::LsmConfig;
 use teseladb_raftlog::MemDisk;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::procs::NodeProc;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "every_node_reads_large_versions_from_the_oplog",
+                every_node_reads_large_versions_from_the_oplog,
+            ),
+            ("a_stream_on_every_node_gets_large_events", a_stream_on_every_node_gets_large_events),
+            (
+                "a_stream_on_every_node_gets_a_transaction_s_large_writes",
+                a_stream_on_every_node_gets_a_transaction_s_large_writes,
+            ),
+            (
+                "every_node_gives_the_events_of_cs_split_large",
+                every_node_gives_the_events_of_cs_split_large,
+            ),
+            (
+                "compact_frees_the_versions_the_history_no_longer_keeps",
+                compact_frees_the_versions_the_history_no_longer_keeps,
+            ),
+        ],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
 
 const DB: &str = "big";
 /// Bytes of the string each large document carries: two versions pass a frame's 16 MiB.
@@ -23,8 +51,8 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(4);
 const GET_MORE_MS: i32 = 3_000;
 
 /// Three nodes of two cores, the second and third joining the first.
-fn cluster() -> Vec<Node<MemDisk>> {
-    let start = |join| Node::start(config(join), || Ok(MemDisk::new()), None).expect("starts");
+fn cluster() -> Vec<NodeProc> {
+    let start = |join: Vec<String>| procs::node("node", &join, None, &[]);
     let first = start(Vec::new());
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
@@ -131,7 +159,6 @@ fn kinds(events: &[Document]) -> Vec<String> {
 
 /// Small documents and two versions of 9 MiB: every node reads the first insert and the
 /// replacement of the collection from the oplog in time.
-#[test]
 fn every_node_reads_large_versions_from_the_oplog() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -148,12 +175,11 @@ fn every_node_reads_large_versions_from_the_oplog() {
             assert_eq!(e.get("op"), Some(&Value::from(op)), "node {k}: {e:?}");
         }
     }
-    nodes.into_iter().for_each(|n| drop(n.stop()));
+    nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
 /// A stream on each node gets the insert and the replacement of 9 MiB written within a second,
 /// each `getMore` within its `maxTimeMS`.
-#[test]
 fn a_stream_on_every_node_gets_large_events() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -172,7 +198,7 @@ fn a_stream_on_every_node_gets_large_events() {
         let got = events(c, "s", *id, 2);
         assert_eq!(kinds(&got), ["insert", "replace"], "node {k}");
     }
-    nodes.into_iter().for_each(|n| drop(n.stop()));
+    nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
 fn lsid() -> Document {
@@ -181,7 +207,6 @@ fn lsid() -> Document {
 
 /// Two documents of 9 MiB written by one transaction share their range's commit mark, so no
 /// answer cut by marks keeps them apart: a stream on every node still gets both.
-#[test]
 fn a_stream_on_every_node_gets_a_transaction_s_large_writes() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -211,7 +236,7 @@ fn a_stream_on_every_node_gets_a_transaction_s_large_writes() {
         let got = events(c, "t", *id, 2);
         assert_eq!(kinds(&got), ["insert", "insert"], "node {k}");
     }
-    nodes.into_iter().for_each(|n| drop(n.stop()));
+    nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
 /// The stream of `cs-split-large` on `coll`, with `$changeStreamSplitLargeEvent` if `split`.
@@ -271,7 +296,6 @@ fn the_event(r: &Document) -> Document {
 /// its event within its `maxTimeMS` (before, the stream on a node that did not lead the range
 /// came back empty); without the stage the first `getMore` fails with 10334, as on a reference
 /// router.
-#[test]
 fn every_node_gives_the_events_of_cs_split_large() {
     let nodes = cluster();
     let mut writer = Client::new(&nodes[0]);
@@ -339,7 +363,7 @@ fn every_node_gives_the_events_of_cs_split_large() {
         let gone = one_more(c, "split", *whole);
         assert_eq!(gone.get("code"), Some(&Value::Int32(43)), "node {k}: {gone:?}");
     }
-    nodes.into_iter().for_each(|n| drop(n.stop()));
+    nodes.into_iter().for_each(|n| assert!(n.stop().success()));
 }
 
 // `compact` frees the files the history no longer needs (DV-017, H-054): before, it answered
@@ -354,7 +378,6 @@ const HISTORY_FREED: i64 = 64 << 10;
 /// Most time the compactions may take to collect the versions.
 const HISTORY_WAIT: Duration = Duration::from_secs(20);
 
-#[test]
 fn compact_frees_the_versions_the_history_no_longer_keeps() {
     // Small memtables, so that the versions reach files; less than the space floor, so that no
     // compaction of everything runs by itself.
