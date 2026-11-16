@@ -14,11 +14,13 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::future::{Future, make_ready_future};
+use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::loop_::{StopIteration, repeat};
+use teseladb::engine::core::sharded::this_shard_id;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
+use teseladb::engine::net::api::{ListenOptions, LoadBalancingAlgorithm};
 use teseladb::engine::net::inet_address::InetAddress;
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine::websocket::common::websocket::{
@@ -234,7 +236,15 @@ engine_thread_test_case!(a_tcp_server_echoes_long_messages_and_closes, {
     unsafe { server.as_mut().get_unchecked_mut() }.register_handler("", echo_handler());
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let ip = InetAddress::from_sstring(&"127.0.0.1".into()).unwrap();
-    server.as_mut().listen(SocketAddress::from_inet_address(&ip, port)).unwrap();
+    // Every connection goes to this shard, where the server listens: with the default
+    // distribution a connection may go to another shard, which has no listener to take it.
+    let lo = ListenOptions {
+        reuse_address: true,
+        lba: LoadBalancingAlgorithm::Fixed,
+        fixed_cpu: this_shard_id(),
+        ..ListenOptions::default()
+    };
+    server.as_mut().listen_opts(SocketAddress::from_inet_address(&ip, port), lo).unwrap();
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // A client that leaves before sending its upgrade request.

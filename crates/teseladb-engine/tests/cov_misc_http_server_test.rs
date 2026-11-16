@@ -120,16 +120,19 @@ fn ss(s: &str) -> Sstring {
 
 /// Installs the handlers of these tests on every shard.
 fn install(routes: &mut Routes, root: &str) {
+    // A directory handler appends the path after the matched prefix, without its leading
+    // slash, to its document root: the root ends with one.
+    let doc_root = format!("{root}/");
     let mut url = Url::new(&ss("/static"));
     url.remainder(&ss("path"));
-    routes.add(OperationType::Get, &url, Box::new(DirectoryHandler::new(&ss(root), None)));
+    routes.add(OperationType::Get, &url, Box::new(DirectoryHandler::new(&ss(&doc_root), None)));
     let mut url = Url::new(&ss("/replaced"));
     url.remainder(&ss("path"));
     routes.add(
         OperationType::Get,
         &url,
         Box::new(DirectoryHandler::new(
-            &ss(root),
+            &ss(&doc_root),
             Some(Box::new(ContentReplace::new(&ss("json")))),
         )),
     );

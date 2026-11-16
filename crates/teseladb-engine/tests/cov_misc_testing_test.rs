@@ -65,7 +65,10 @@ impl PerfTestBody for AsyncMixed {
     }
 }
 
-/// Fails on the third call.
+/// Fails on the third call, after a reactor round. A run awaits only a future that is not
+/// available yet: a failed future that is already available counts as an iteration and its
+/// error is dropped (reported as an ignored exceptional future), as in the reference
+/// microbenchmark runner.
 #[derive(Default)]
 struct AsyncFailing(u64);
 impl PerfTestBody for AsyncFailing {
@@ -73,7 +76,10 @@ impl PerfTestBody for AsyncFailing {
     fn run(&mut self) -> Future<()> {
         self.0 += 1;
         if self.0 == 3 {
-            return make_exception_future(ExceptionPtr::new(RuntimeError::new("third run")));
+            return make_coroutine(async move {
+                later().await?;
+                Err(ExceptionPtr::new(RuntimeError::new("third run")))
+            });
         }
         make_ready_future(())
     }

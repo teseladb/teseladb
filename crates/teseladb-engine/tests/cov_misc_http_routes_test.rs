@@ -762,7 +762,9 @@ engine_thread_test_case!(file_handlers_choose_the_file_and_the_reply_kind, {
     let mut routes = Routes::new();
     let mut url = Url::new(&ss("/static"));
     url.remainder(&ss("path"));
-    routes.add(OperationType::Get, &url, Box::new(DirectoryHandler::new(&ss(&d.root()), None)));
+    // The handler appends the path after the prefix, without its leading slash, to the root.
+    let doc_root = format!("{}/", d.root());
+    routes.add(OperationType::Get, &url, Box::new(DirectoryHandler::new(&ss(&doc_root), None)));
     let single = format!("{}/page.HTML", d.root());
     routes
         .put(OperationType::Get, "/one", Box::new(FileHandler::new(&ss(&single), None, false)))

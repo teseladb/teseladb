@@ -224,8 +224,14 @@ fn posix_threads_run_with_their_attributes() {
     assert!(!cpus.is_set(1));
     assert!(!cpus.is_set(CpuSetT::SETSIZE));
     assert_eq!(cpus.count(), 1);
+    // The thread is pinned to a CPU the process may run on (the one it runs on now): a CPU
+    // outside the process's cpuset is refused with EINVAL.
+    // SAFETY: plain libc call.
+    let here = usize::try_from(unsafe { sched_getcpu() }).expect("sched_getcpu");
+    let mut pin = CpuSetT::default();
+    pin.set(here);
     let attr =
-        PosixThreadAttr::default().set_stack_size(StackSize { size: 4 << 20 }).set_affinity(cpus);
+        PosixThreadAttr::default().set_stack_size(StackSize { size: 4 << 20 }).set_affinity(pin);
     let on_cpu = Arc::new(std::sync::atomic::AtomicI32::new(-1));
     let o = on_cpu.clone();
     PosixThread::with_attr(
@@ -240,7 +246,7 @@ fn posix_threads_run_with_their_attributes() {
     )
     .unwrap()
     .join();
-    assert_eq!(on_cpu.load(Ordering::SeqCst), 0);
+    assert_eq!(on_cpu.load(Ordering::SeqCst), i32::try_from(here).expect("a CPU number"));
 }
 
 unsafe extern "C" {

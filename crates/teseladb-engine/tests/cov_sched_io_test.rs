@@ -31,8 +31,9 @@ engine_thread_test_case!(groups_have_names_shares_and_bandwidth, {
     sg.set_shares(250.0);
     assert_eq!(sg.get_shares(), 250.0);
     sg.update_io_bandwidth(64 << 20).get().unwrap();
-    // Zero lifts the limit.
-    sg.update_io_bandwidth(0).get().unwrap();
+    // A rate no device reaches lifts the limit in practice. (Zero is a rate too: the class
+    // would wait for tokens that never come, as in the reference.)
+    sg.update_io_bandwidth(1 << 40).get().unwrap();
 
     // File I/O issued from the group goes through its I/O class.
     let path = std::env::temp_dir().join(format!("cov_sched_io_{}", std::process::id()));

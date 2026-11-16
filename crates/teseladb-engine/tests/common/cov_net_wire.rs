@@ -18,6 +18,13 @@
 //!
 //! Every waiting helper sleeps on the reactor, so they must run inside an engine thread
 //! (`engine_thread_test_case!`).
+//!
+//! The binaries that include this harness run on the linux-aio reactor backend. The device's
+//! transmit poller never lets the reactor sleep, and the io_uring backend re-arms its
+//! high-resolution timer only on the way to sleep: there the stack's timers and the tests'
+//! sleeps stop firing after the first expiry (spec 023, research R15). The backend is chosen
+//! through the configuration file every engine application reads, under a `HOME` of the
+//! process's own, set before `main` (see [`SELECT_LINUX_AIO`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,6 +43,22 @@ use teseladb::engine::net::node_ptr::NodePtr;
 use teseladb::engine::net::packet::{OffloadInfo, Packet};
 use teseladb::engine::net::socket_defs::{Ipv4Addr, SocketAddress};
 use teseladb::engine::net::tcp::Tcp;
+
+/// Points `HOME` at a directory whose `.config/engine/engine.conf` selects the linux-aio
+/// backend, before `main`, so the test runner's reactor starts on it.
+#[used]
+#[unsafe(link_section = ".init_array")]
+static SELECT_LINUX_AIO: extern "C" fn() = select_linux_aio;
+
+extern "C" fn select_linux_aio() {
+    let home = std::env::temp_dir().join(format!("cov_net_home_{}", std::process::id()));
+    let dir = home.join(".config").join("engine");
+    std::fs::create_dir_all(&dir).expect("the configuration directory");
+    std::fs::write(dir.join("engine.conf"), "reactor-backend = linux-aio\n")
+        .expect("the engine configuration");
+    // SAFETY: runs from `.init_array`, before `main`, while the process has a single thread.
+    unsafe { std::env::set_var("HOME", &home) };
+}
 
 /// The MAC address of the stack under test.
 pub const STACK_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x01];
@@ -94,11 +117,13 @@ pub fn sleep_ms(ms: u64) {
 }
 
 /// Waits (inside an engine thread) until `f` resolves, failing the test after [`WAIT`].
+#[track_caller]
 pub fn wait<T: 'static>(f: Future<T>) -> Result<T, ExceptionPtr> {
     wait_for(f, WAIT)
 }
 
 /// Waits until `f` resolves, failing the test after `limit`.
+#[track_caller]
 pub fn wait_for<T: 'static>(f: Future<T>, limit: Duration) -> Result<T, ExceptionPtr> {
     let deadline = Instant::now() + limit;
     while !f.available() {
@@ -331,6 +356,7 @@ impl Wire {
 
     /// The next recorded frame that satisfies `pred`, skipping the others; fails the test if
     /// none comes within `limit`.
+    #[track_caller]
     pub fn next_where(&self, limit: Duration, pred: impl Fn(&Frame) -> bool) -> Frame {
         let deadline = Instant::now() + limit;
         loop {
@@ -345,31 +371,37 @@ impl Wire {
     }
 
     /// The next frame, whatever it is.
+    #[track_caller]
     pub fn next(&self) -> Frame {
         self.next_where(WAIT, |_| true)
     }
 
     /// The next IPv4 frame.
+    #[track_caller]
     pub fn next_ip(&self) -> Frame {
         self.next_where(WAIT, |f| f.is_ipv4())
     }
 
     /// The next ARP frame.
+    #[track_caller]
     pub fn next_arp(&self) -> Frame {
         self.next_where(WAIT, |f| f.is_arp())
     }
 
     /// The next TCP segment.
+    #[track_caller]
     pub fn next_tcp(&self) -> TcpView {
         self.next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP).tcp()
     }
 
     /// The next TCP segment that satisfies `pred`.
+    #[track_caller]
     pub fn next_tcp_where(&self, pred: impl Fn(&TcpView) -> bool) -> TcpView {
         self.next_where(WAIT, |f| f.is_ipv4() && f.ip().proto == PROTO_TCP && pred(&f.tcp())).tcp()
     }
 
     /// Asserts that no TCP segment is sent within `d`.
+    #[track_caller]
     pub fn assert_no_tcp_for(&self, d: Duration) {
         let frames = self.quiet_for(d);
         let tcp: Vec<TcpView> = frames
