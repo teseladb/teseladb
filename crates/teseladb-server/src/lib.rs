@@ -69,6 +69,7 @@ pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
 pub mod outbound;
+pub mod outlet;
 pub mod pki;
 pub mod pressure;
 pub mod procs;

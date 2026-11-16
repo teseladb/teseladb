@@ -1718,6 +1718,9 @@ impl Node {
         self.clock.stop();
         // Nothing reaches the shards any more.
         crate::outbound::uninstall();
+        // The log lines and audit messages the shards handed to their writers are written
+        // before the engine stops; later ones are written at once (023 FR-018).
+        crate::outlet::flush_all();
         engine.stop();
     }
 }
