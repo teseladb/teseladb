@@ -12,9 +12,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::future::{ExceptionPtr, Promise, make_ready_future};
@@ -128,8 +128,9 @@ pub struct DeviceLog {
     recovered_files: usize,
     post: ShardPost,
     log: u64,
-    /// The writer's end, with the disk in memory it ran on.
-    stopped: mpsc::Receiver<Stopped>,
+    /// The writer's end, with the disk in memory it ran on. In a mutex only so that a node
+    /// holding the log can be shared between threads; `stop` takes it.
+    stopped: Mutex<mpsc::Receiver<Stopped>>,
 }
 
 /// What the writer found on start, for the ports.
@@ -184,8 +185,13 @@ impl DeviceLog {
                 LogPort::new(core, (post.clone(), log), wals, answers, shared.clone())
             })
             .collect();
-        let dl =
-            DeviceLog { shared, recovered_files: started.files, post, log, stopped: stopped_rx };
+        let dl = DeviceLog {
+            shared,
+            recovered_files: started.files,
+            post,
+            log,
+            stopped: Mutex::new(stopped_rx),
+        };
         Ok((dl, ports))
     }
 
@@ -205,7 +211,8 @@ impl DeviceLog {
     /// without a sync is made durable. Gives back the model of a disk it ran on.
     pub fn stop(self) -> Option<Box<dyn Disk + Send>> {
         self.halt();
-        self.stopped.recv().ok().flatten()
+        let stopped = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
+        stopped.recv().ok().flatten()
     }
 
     fn halt(&self) {

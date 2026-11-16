@@ -91,7 +91,7 @@ engine_test_case!(a_silent_server_fails_the_step_at_its_deadline, {
         let mut link = Link::open(addr, None, Duration::from_millis(200)).await?;
         link.send(b"anyone?").await?;
         let began = Instant::now();
-        let e = link.recv().await.expect_err("nothing came");
+        let e = link.recv().await.err().expect("nothing came");
         let took = began.elapsed();
         assert_eq!(io_kind(&e), Some(ErrorKind::TimedOut), "{e:?}");
         assert!(took >= Duration::from_millis(150) && took < Duration::from_secs(3), "{took:?}");

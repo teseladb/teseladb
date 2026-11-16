@@ -259,6 +259,16 @@ pub fn core_channel_with<M: Send + 'static>(cap: usize) -> (CoreSender<M>, CoreR
     (CoreSender { route: Route::Queue(tx) }, CoreReceiver { rx })
 }
 
+impl<M: PartialEq> PartialEq for CoreInput<M> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CoreInput::App(a), CoreInput::App(b)) => a == b,
+            (CoreInput::Stop, CoreInput::Stop) => true,
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
@@ -292,15 +302,5 @@ mod tests {
             tx.send(CoreInput::App(i)).unwrap();
         }
         assert!(matches!(rx.recv_timeout(Duration::from_millis(1)), Some(CoreInput::App(0))));
-    }
-}
-
-impl<M: PartialEq> PartialEq for CoreInput<M> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (CoreInput::App(a), CoreInput::App(b)) => a == b,
-            (CoreInput::Stop, CoreInput::Stop) => true,
-            _ => false,
-        }
     }
 }

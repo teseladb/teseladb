@@ -184,7 +184,7 @@ mod rt {
         let saved = HOOKS.get().map(|h| (h, (h.save)()));
         let mut timer = until.map(|at| {
             let w = Rc::downgrade(&p.wake);
-            let mut t = Box::pin(Timer::with_callback(move || {
+            let mut t = Box::pin(<Timer>::with_callback(move || {
                 if let Some(w) = w.upgrade() {
                     w.wake();
                 }

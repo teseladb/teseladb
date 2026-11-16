@@ -249,7 +249,7 @@ teseladb::engine_test_case!(a_port_serves_its_connections_as_tasks_of_the_shards
             });
             let (mut a, mut c, blocked) = served;
             assert!(blocked, "the port stopped reading a client that does not read");
-            assert!(PAUSE_AT < 512 * (128 << 10));
+            const { assert!(PAUSE_AT < 512 * (128 << 10)) };
             assert!(port.open_by_shard().iter().sum::<usize>() >= 2);
             port.stop();
             let closed = on_a_thread(move || {

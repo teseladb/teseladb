@@ -144,7 +144,7 @@ engine_test_case!(the_bytes_of_a_file_for_an_answer_come_from_the_executor_s_rea
 
 engine_test_case!(the_classes_are_scheduling_groups_with_their_shares, {
     on_engine(|g| {
-        assert!(LOG_SHARES > DATA_SHARES && DATA_SHARES > BACKGROUND_SHARES);
+        const { assert!(LOG_SHARES > DATA_SHARES && DATA_SHARES > BACKGROUND_SHARES) };
         assert_eq!(g.of(IoClass::Log).get_shares(), LOG_SHARES);
         assert_eq!(g.of(IoClass::Data).get_shares(), DATA_SHARES);
         assert_eq!(g.of(IoClass::Background).get_shares(), BACKGROUND_SHARES);

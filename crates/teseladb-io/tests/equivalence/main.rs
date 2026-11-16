@@ -276,7 +276,7 @@ fn data(_: usize) -> IoClass {
 /// The data's and the background's classes, mixed: they share files, so an operation of one
 /// waits for what it conflicts with in the other.
 fn mixed(i: usize) -> IoClass {
-    if (i * 7919) % 3 == 0 { IoClass::Background } else { IoClass::Data }
+    if (i * 7919).is_multiple_of(3) { IoClass::Background } else { IoClass::Data }
 }
 
 engine_test_case!(the_scripted_sequence_is_equivalent, {

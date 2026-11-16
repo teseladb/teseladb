@@ -48,12 +48,15 @@ struct XConn {
     paused: bool,
 }
 
+/// Sessions whose work ended, with their token and whether their connection stays open.
+type Finished = Rc<RefCell<Vec<(u64, Box<dyn Session>, bool)>>>;
+
 /// The sessions of one queue's connections.
 struct Handler {
     service: Arc<dyn Service>,
     conns: HashMap<u64, XConn>,
     /// Sessions whose work ended, with whether their connection stays open.
-    done: Rc<RefCell<Vec<(u64, Box<dyn Session>, bool)>>>,
+    done: Finished,
     /// Connections to look at in the next round: something arrived or their work ended.
     dirty: Vec<u64>,
     /// The waits of the sessions, by deadline.

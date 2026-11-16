@@ -13,7 +13,8 @@ use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
 
 use teseladb::engine::core::thread::Thread;
 
-use super::writer::{Req, Shared, Sink, deliver};
+use super::bound::Sink;
+use super::writer::{Req, Shared, deliver};
 use crate::engine::post::ShardPost;
 
 /// The next value of `rx`, `None` once its sender is gone. In an engine thread (a core's recovery

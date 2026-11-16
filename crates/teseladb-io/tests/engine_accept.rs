@@ -63,26 +63,24 @@ impl Side for Echo {
         self.sniff.clone()
     }
 
-    fn serve(self: Rc<Self>, conn: Taken) -> impl std::future::Future<Output = ()> + 'static {
-        async move {
-            let c = &self.counts;
-            c.served.fetch_add(1, Ordering::AcqRel);
-            c.shards.fetch_or(1 << (this_shard_id() % 64), Ordering::AcqRel);
-            let peer_ok = conn.peer.is_some_and(|p| p.ip().is_loopback());
-            let local_ok = !self.want_local || conn.local.is_some_and(|l| l.ip().is_loopback());
-            if peer_ok && local_ok {
-                c.addressed.fetch_add(1, Ordering::AcqRel);
-            }
-            if conn.tls.is_some() {
-                c.tls.fetch_add(1, Ordering::AcqRel);
-            }
-            let mut sock = conn.socket;
-            let input = sock.input(ConnectedSocketInputStreamConfig::default());
-            let output = sock.output(4096);
-            self.open.borrow_mut().push(Rc::new(RefCell::new(sock)));
-            let _ = echo(input, output).await;
-            c.ended.fetch_add(1, Ordering::AcqRel);
+    async fn serve(self: Rc<Self>, conn: Taken) {
+        let c = &self.counts;
+        c.served.fetch_add(1, Ordering::AcqRel);
+        c.shards.fetch_or(1 << (this_shard_id() % 64), Ordering::AcqRel);
+        let peer_ok = conn.peer.is_some_and(|p| p.ip().is_loopback());
+        let local_ok = !self.want_local || conn.local.is_some_and(|l| l.ip().is_loopback());
+        if peer_ok && local_ok {
+            c.addressed.fetch_add(1, Ordering::AcqRel);
         }
+        if conn.tls.is_some() {
+            c.tls.fetch_add(1, Ordering::AcqRel);
+        }
+        let mut sock = conn.socket;
+        let input = sock.input(ConnectedSocketInputStreamConfig::default());
+        let output = sock.output(4096);
+        self.open.borrow_mut().push(Rc::new(RefCell::new(sock)));
+        let _ = echo(input, output).await;
+        c.ended.fetch_add(1, Ordering::AcqRel);
     }
 
     fn stop(&self) {
