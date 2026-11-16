@@ -324,17 +324,18 @@ impl NodeEngine {
             gate: self.gate.clone(),
             shard: u32::from(shard),
         };
-        // Shard 0 owns the listening socket.
+        // Shard 0 owns the listening socket; the others listen on the concrete address it took,
+        // by which it hands their connections over.
         let c = ctx(0);
         let bound = self
-            .run_on(0, move || peers::listen_here(at, true, cores, c))??
+            .run_on(0, move || peers::listen_here(at, None, cores, c))??
             .ok_or_else(|| io::Error::other("the listening socket has no address"))?;
         for shard in base..base + cores {
             if shard == 0 {
                 continue;
             }
             let c = ctx(shard);
-            self.run_on(shard, move || peers::listen_here(at, false, cores, c))??;
+            self.run_on(shard, move || peers::listen_here(at, Some(bound), cores, c))??;
         }
         Ok(bound)
     }
