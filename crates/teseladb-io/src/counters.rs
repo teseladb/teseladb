@@ -47,6 +47,7 @@ pub fn device_flush_micros() -> u64 {
 
 /// Counts an outbound link to another node that went down (012 FR-015): what was queued on it
 /// is dropped and waits for the next connection.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn record_peer_link_failed() {
     PEER_LINKS_FAILED.0.fetch_add(1, Ordering::Relaxed);
 }

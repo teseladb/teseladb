@@ -1,5 +1,5 @@
 //! Per-core disk thread: it executes the core's [`IoOp`]s one after another, in the
-//! order they were submitted, and hands every [`IoDone`] back through the core's mailbox. The
+//! order they were submitted, and hands every [`IoDone`] back through a [`DoneSink`]. The
 //! core thread never blocks on disk. The sync of a store's batch on a real disk (`IoOp::Sync` with
 //! `batch > 0`) goes to the core's sync thread, which waits for the drive's flush and hands its
 //! result back on its own: the disk thread writes the next batches meanwhile, and each of them
@@ -16,8 +16,11 @@ use std::time::Instant;
 use teseladb_raftlog::{Disk, IoDone, IoOp};
 
 use crate::file_disk::{DetachedSync, FileDisk};
-use crate::mailbox::MailboxSender;
 use crate::node_disk::NodeDisk;
+
+/// Where a disk thread hands its results; `false` when nobody listens any more, which ends the
+/// thread.
+pub type DoneSink = std::sync::Arc<dyn Fn(IoDone) -> bool + Send + Sync>;
 
 /// Handle of a running disk thread.
 #[derive(Debug)]
@@ -28,21 +31,16 @@ pub struct DiskThread<D> {
 }
 
 impl<D: Disk + Send + 'static> DiskThread<D> {
-    /// Starts a thread named `name` that owns `disk`. Every result is wrapped with `wrap` and
-    /// sent to `done`; the thread stops when the handle is shut down or when `done`'s receiver is
-    /// gone (then the remaining operations are not executed).
-    pub fn spawn<M: Send + 'static>(
-        name: String,
-        disk: D,
-        done: MailboxSender<M>,
-        wrap: fn(IoDone) -> M,
-    ) -> io::Result<DiskThread<D>> {
+    /// Starts a thread named `name` that owns `disk`. Every result goes to `done`; the thread
+    /// stops when the handle is shut down or when `done` says nobody listens (then the remaining
+    /// operations are not executed).
+    pub fn spawn(name: String, disk: D, done: DoneSink) -> io::Result<DiskThread<D>> {
         let (tx, rx) = mpsc::channel();
         let sync_name = format!("{name}-sync");
         let handle = thread::Builder::new().name(name).spawn(move || {
             // A write waits on this thread: on the fast cores (H-049 of the native tests).
             let _ = teseladb_sys::favor_current_thread();
-            run(disk, rx, (done, wrap), &sync_name)
+            run(disk, rx, &done, &sync_name)
         })?;
         Ok(DiskThread { ops: tx, handle: Some(handle) })
     }
@@ -86,10 +84,10 @@ impl<D> Drop for DiskThread<D> {
     }
 }
 
-fn run<D: Disk + 'static, M: Send + 'static>(
+fn run<D: Disk + 'static>(
     mut disk: D,
     ops: Receiver<(Instant, IoOp)>,
-    (done, wrap): (MailboxSender<M>, fn(IoDone) -> M),
+    done: &DoneSink,
     sync_name: &str,
 ) -> D {
     let mut syncs: Option<Syncs> = None;
@@ -102,11 +100,11 @@ fn run<D: Disk + 'static, M: Send + 'static>(
         if let Some(job) = detach_chore(&disk, &op) {
             let helper = match &mut chores {
                 Some(h) => h,
-                None => match Chores::spawn(&format!("{sync_name}-chores"), done.clone(), wrap) {
+                None => match Chores::spawn(&format!("{sync_name}-chores"), done.clone()) {
                     Ok(h) => chores.insert(h),
                     // Without a third thread the chore runs here, in order.
                     Err(_) => {
-                        if done.send_waiting(wrap(job.run())).is_err() {
+                        if !done(job.run()) {
                             break;
                         }
                         continue;
@@ -120,12 +118,12 @@ fn run<D: Disk + 'static, M: Send + 'static>(
         if let Some(job) = detached {
             let helper = match &mut syncs {
                 Some(h) => h,
-                None => match Syncs::spawn(sync_name, done.clone(), wrap) {
+                None => match Syncs::spawn(sync_name, done.clone()) {
                     Ok(h) => syncs.insert(h),
                     // Without a second thread the sync runs here, in order.
                     Err(_) => {
                         let answers = DetachedSync::run_all(vec![job]);
-                        if answers.into_iter().any(|d| done.send_waiting(wrap(d)).is_err()) {
+                        if !answers.into_iter().all(|d| done(d)) {
                             break;
                         }
                         continue;
@@ -135,7 +133,7 @@ fn run<D: Disk + 'static, M: Send + 'static>(
             helper.submit(job);
             continue;
         }
-        if done.send_waiting(wrap(disk.execute(op))).is_err() {
+        if !done(disk.execute(op)) {
             break;
         }
     }
@@ -177,15 +175,11 @@ struct Chores {
 }
 
 impl Chores {
-    fn spawn<M: Send + 'static>(
-        name: &str,
-        done: MailboxSender<M>,
-        wrap: fn(IoDone) -> M,
-    ) -> io::Result<Chores> {
+    fn spawn(name: &str, done: DoneSink) -> io::Result<Chores> {
         let (jobs, rx) = mpsc::channel::<crate::log_chore::DetachedChore>();
         let handle = thread::Builder::new().name(name.to_owned()).spawn(move || {
             for job in rx {
-                if done.send_waiting(wrap(job.run())).is_err() {
+                if !done(job.run()) {
                     return;
                 }
             }
@@ -204,11 +198,7 @@ struct Syncs {
 }
 
 impl Syncs {
-    fn spawn<M: Send + 'static>(
-        name: &str,
-        done: MailboxSender<M>,
-        wrap: fn(IoDone) -> M,
-    ) -> io::Result<Syncs> {
+    fn spawn(name: &str, done: DoneSink) -> io::Result<Syncs> {
         let (jobs, rx) = mpsc::channel::<DetachedSync>();
         let handle = thread::Builder::new().name(name.to_owned()).spawn(move || {
             // Every confirmed write waits for a sync of this thread.
@@ -220,7 +210,7 @@ impl Syncs {
                 // may be in a later flush of the drive (012 FR-020).
                 let mut listened = true;
                 DetachedSync::run_each(turn, |d| {
-                    listened = done.send_waiting(wrap(d)).is_ok();
+                    listened = done(d);
                     listened
                 });
                 if !listened {

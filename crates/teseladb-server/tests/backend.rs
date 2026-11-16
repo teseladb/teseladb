@@ -7,8 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use teseladb_hlc::Hlc;
-use teseladb_io::mailbox::{self, Notify};
-use teseladb_io::runtime::CoreInput;
+use teseladb_io::engine::{CoreInput, core_channel};
 use teseladb_meta::catalog::{Catalog, CatalogCommand, CollectionEntry, Namespace};
 use teseladb_meta::group0::{Group0Error, RangeDesc, ReplicaRole};
 use teseladb_meta::indexes::{IndexEntry, IndexState};
@@ -30,16 +29,10 @@ use teseladb_session::retry::StatementKey;
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
 use teseladb_wire::commands::{Backend, WriteOp};
 
-struct Quiet;
-
 /// The wall clock in milliseconds.
 fn wall_ms() -> u64 {
     let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     u64::try_from(since.as_millis()).unwrap()
-}
-
-impl Notify for Quiet {
-    fn notify(&self) {}
 }
 
 /// How long a core's compaction takes here: more than the deadline of a request.
@@ -64,7 +57,7 @@ fn cores_with_ops(
 ) -> NodeHandle {
     let mut senders = Vec::new();
     for core in 0..2 {
-        let (tx, mut rx) = mailbox::channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+        let (tx, mut rx) = core_channel::<NodeMsg>();
         senders.push(tx.senders());
         let (data, catalog, kills) = (data.clone(), catalog.clone(), kills.clone());
         let ops = ops.clone();
@@ -453,7 +446,7 @@ fn recording_core(
     catalog: CatalogScript,
     answers: DataScript,
 ) -> NodeHandle {
-    let (tx, mut rx) = mailbox::channel::<CoreInput<NodeMsg>>(Arc::new(Quiet));
+    let (tx, mut rx) = core_channel::<NodeMsg>();
     thread::spawn(move || {
         let mut inbox = Vec::new();
         for _ in 0..4000 {
