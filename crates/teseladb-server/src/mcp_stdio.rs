@@ -5,9 +5,9 @@
 //! end of the input. The credential is the API key of `TESELADB_API_KEY` or the client
 //! certificate of `--tlsCertificateKeyFile`; none goes in the arguments.
 
-use std::io::{BufRead, Write};
 #[cfg(not(target_os = "linux"))]
 use std::io::Read;
+use std::io::{BufRead, Write};
 #[cfg(not(target_os = "linux"))]
 use std::net::TcpStream;
 use std::path::PathBuf;

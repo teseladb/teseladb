@@ -178,9 +178,7 @@ impl Port {
     /// listening then.
     pub fn start(cfg: PortConfig, make: MakeHandler) -> Future<Port> {
         if this_shard_id() != 0 {
-            return make_exception_future(io_error(
-                "a port starts on shard 0".into(),
-            ));
+            return make_exception_future(io_error("a port starts on shard 0".into()));
         }
         let id = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
         let open = Arc::new(AtomicUsize::new(0));

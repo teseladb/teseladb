@@ -162,21 +162,29 @@ fn with_port<T: Send + 'static>(
 
 #[test]
 fn http1_requests_get_their_answers() {
-    with_port(None, |_| {}, |at, _, _| {
-        let r = h1(at, "GET /v1/x HTTP/1.1\r\nHost: h\r\n\r\n");
-        assert_eq!((r.status, r.body.as_slice()), (200, &b"GET /v1/x tls=false"[..]));
-        let r = h1(at, "GET / HTTP/1.1\r\n\r\n");
-        assert_eq!(r.status, 400);
-    });
+    with_port(
+        None,
+        |_| {},
+        |at, _, _| {
+            let r = h1(at, "GET /v1/x HTTP/1.1\r\nHost: h\r\n\r\n");
+            assert_eq!((r.status, r.body.as_slice()), (200, &b"GET /v1/x tls=false"[..]));
+            let r = h1(at, "GET / HTTP/1.1\r\n\r\n");
+            assert_eq!(r.status, 400);
+        },
+    );
 }
 
 #[test]
 fn answers_in_pieces_arrive_as_chunks() {
-    with_port(None, |_| {}, |at, _, _| {
-        let r = h1(at, "GET /events HTTP/1.1\r\nHost: h\r\n\r\n");
-        assert_eq!(r.body, b"data: 1\n\ndata: 2\n\ndata: 3\n\n");
-        assert_eq!(r.header("content-type"), Some("text/event-stream"));
-    });
+    with_port(
+        None,
+        |_| {},
+        |at, _, _| {
+            let r = h1(at, "GET /events HTTP/1.1\r\nHost: h\r\n\r\n");
+            assert_eq!(r.body, b"data: 1\n\ndata: 2\n\ndata: 3\n\n");
+            assert_eq!(r.header("content-type"), Some("text/event-stream"));
+        },
+    );
 }
 
 /// A request whose service fails without answering gets `503`; a stream it began ends; and the
@@ -271,21 +279,25 @@ fn h2_answer(bytes: &[u8]) -> Option<(String, Vec<u8>)> {
 
 #[test]
 fn http2_by_prior_knowledge_without_tls() {
-    with_port(None, |_| {}, |at, _, _| {
-        let mut s = connect(at);
-        s.write_all(&h2_request("/v1/y")).unwrap();
-        let mut all = Vec::new();
-        let mut buf = [0u8; 4096];
-        let answer = loop {
-            let n = s.read(&mut buf).unwrap();
-            assert!(n > 0);
-            all.extend_from_slice(&buf[..n]);
-            if let Some(a) = h2_answer(&all) {
-                break a;
-            }
-        };
-        assert_eq!(answer, ("200".to_owned(), b"GET /v1/y tls=false".to_vec()));
-    });
+    with_port(
+        None,
+        |_| {},
+        |at, _, _| {
+            let mut s = connect(at);
+            s.write_all(&h2_request("/v1/y")).unwrap();
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            let answer = loop {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0);
+                all.extend_from_slice(&buf[..n]);
+                if let Some(a) = h2_answer(&all) {
+                    break a;
+                }
+            };
+            assert_eq!(answer, ("200".to_owned(), b"GET /v1/y tls=false".to_vec()));
+        },
+    );
 }
 
 fn now_ms() -> i64 {
@@ -327,8 +339,9 @@ fn tls_pair() -> (TlsPort, ClientConfig) {
 /// A TLS client over `s` with `cc`, its handshake done.
 fn handshake(s: &mut TcpStream, cc: ClientConfig, entropy: u8) -> Connection {
     let entropy = [entropy; ENTROPY_LEN];
-    let mut c = Connection::client(Arc::new(cc), Some("node1.cluster.test"), now_ms(), &entropy, None)
-        .unwrap();
+    let mut c =
+        Connection::client(Arc::new(cc), Some("node1.cluster.test"), now_ms(), &entropy, None)
+            .unwrap();
     let mut buf = [0u8; 16_384];
     while c.is_handshaking() {
         let out = c.take_output();
@@ -352,25 +365,29 @@ fn handshake(s: &mut TcpStream, cc: ClientConfig, entropy: u8) -> Connection {
 fn http2_chosen_by_alpn_over_tls() {
     let (port, mut cc) = tls_pair();
     cc.alpn = vec![http2::ALPN_H2.to_vec(), http2::ALPN_HTTP11.to_vec()];
-    with_port(Some(port), |_| {}, move |at, _, _| {
-        let mut s = connect(at);
-        let mut c = handshake(&mut s, cc, 9);
-        assert_eq!(c.alpn_protocol(), Some(http2::ALPN_H2));
-        c.write(&h2_request("/v1/z")).unwrap();
-        s.write_all(&c.take_output()).unwrap();
-        let mut buf = [0u8; 16_384];
-        let mut all = Vec::new();
-        let answer = loop {
-            let n = s.read(&mut buf).unwrap();
-            assert!(n > 0, "the port closed");
-            c.feed(&buf[..n]).unwrap();
-            all.extend(c.read());
-            if let Some(a) = h2_answer(&all) {
-                break a;
-            }
-        };
-        assert_eq!(answer, ("200".to_owned(), b"GET /v1/z tls=true".to_vec()));
-    });
+    with_port(
+        Some(port),
+        |_| {},
+        move |at, _, _| {
+            let mut s = connect(at);
+            let mut c = handshake(&mut s, cc, 9);
+            assert_eq!(c.alpn_protocol(), Some(http2::ALPN_H2));
+            c.write(&h2_request("/v1/z")).unwrap();
+            s.write_all(&c.take_output()).unwrap();
+            let mut buf = [0u8; 16_384];
+            let mut all = Vec::new();
+            let answer = loop {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "the port closed");
+                c.feed(&buf[..n]).unwrap();
+                all.extend(c.read());
+                if let Some(a) = h2_answer(&all) {
+                    break a;
+                }
+            };
+            assert_eq!(answer, ("200".to_owned(), b"GET /v1/z tls=true".to_vec()));
+        },
+    );
 }
 
 /// Waits until the request saw its cancellation, then checks the metrics counted it as 499.
@@ -391,46 +408,54 @@ fn assert_cancelled(k: &Knobs, metrics: &Mutex<HttpMetrics>) {
 
 #[test]
 fn a_client_that_gives_up_cancels_its_request() {
-    with_port(None, |_| {}, |at, k, metrics| {
-        let mut s = connect(at);
-        s.write_all(b"GET /slow HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        drop(s);
-        assert_cancelled(&k, &metrics);
-    });
+    with_port(
+        None,
+        |_| {},
+        |at, k, metrics| {
+            let mut s = connect(at);
+            s.write_all(b"GET /slow HTTP/1.1\r\nHost: h\r\n\r\n").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            drop(s);
+            assert_cancelled(&k, &metrics);
+        },
+    );
 }
 
 /// Over HTTP/2 the client cancels one request with `RST_STREAM` and keeps its connection: the
 /// request sees its cancellation, and the connection still answers.
 #[test]
 fn an_http2_reset_cancels_its_request_and_keeps_the_connection() {
-    with_port(None, |_| {}, |at, k, metrics| {
-        let mut s = connect(at);
-        s.write_all(&h2_request("/v1/slow")).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        // CANCEL (0x8), RFC 9113 section 7.
-        s.write_all(&frame(kind::RST_STREAM, 0, 1, &8u32.to_be_bytes())).unwrap();
-        assert_cancelled(&k, &metrics);
-        // A request whose body has not come yet, cancelled: nothing ran for it.
-        let block = Encoder::new().encode(&[
-            Field::new(":method", "POST"),
-            Field::new(":scheme", "http"),
-            Field::new(":path", "/v1/later"),
-            Field::new(":authority", "h"),
-        ]);
-        s.write_all(&frame(kind::HEADERS, flag::END_HEADERS, 3, &block)).unwrap();
-        s.write_all(&frame(kind::RST_STREAM, 0, 3, &8u32.to_be_bytes())).unwrap();
-        // The connection is still open: a PING gets its ACK.
-        s.write_all(&frame(kind::PING, 0, 0, &[7; 8])).unwrap();
-        let mut all = Vec::new();
-        let mut buf = [0u8; 4096];
-        let ack = frame(kind::PING, flag::ACK, 0, &[7; 8]);
-        while !all.windows(ack.len()).any(|w| w == ack.as_slice()) {
-            let n = s.read(&mut buf).unwrap();
-            assert!(n > 0, "the connection closed");
-            all.extend_from_slice(&buf[..n]);
-        }
-    });
+    with_port(
+        None,
+        |_| {},
+        |at, k, metrics| {
+            let mut s = connect(at);
+            s.write_all(&h2_request("/v1/slow")).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            // CANCEL (0x8), RFC 9113 section 7.
+            s.write_all(&frame(kind::RST_STREAM, 0, 1, &8u32.to_be_bytes())).unwrap();
+            assert_cancelled(&k, &metrics);
+            // A request whose body has not come yet, cancelled: nothing ran for it.
+            let block = Encoder::new().encode(&[
+                Field::new(":method", "POST"),
+                Field::new(":scheme", "http"),
+                Field::new(":path", "/v1/later"),
+                Field::new(":authority", "h"),
+            ]);
+            s.write_all(&frame(kind::HEADERS, flag::END_HEADERS, 3, &block)).unwrap();
+            s.write_all(&frame(kind::RST_STREAM, 0, 3, &8u32.to_be_bytes())).unwrap();
+            // The connection is still open: a PING gets its ACK.
+            s.write_all(&frame(kind::PING, 0, 0, &[7; 8])).unwrap();
+            let mut all = Vec::new();
+            let mut buf = [0u8; 4096];
+            let ack = frame(kind::PING, flag::ACK, 0, &[7; 8]);
+            while !all.windows(ack.len()).any(|w| w == ack.as_slice()) {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "the connection closed");
+                all.extend_from_slice(&buf[..n]);
+            }
+        },
+    );
 }
 
 /// A TLS connection whose client sends a record that does not decrypt right after a request ends
@@ -509,15 +534,19 @@ fn stopping_the_port_closes_its_idle_connections() {
 /// on the engine's timers (019 FR-003).
 #[test]
 fn a_request_whose_fields_never_end_is_closed_after_the_header_timeout() {
-    let waited = with_port(None, |_| {}, |at, _, _| {
-        let mut s = connect(at);
-        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-        let start = Instant::now();
-        s.write_all(b"GET /v1/a HTTP/1.1\r\nHost: h\r\n").unwrap();
-        let mut buf = [0u8; 4096];
-        assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "an answer came");
-        start.elapsed()
-    });
+    let waited = with_port(
+        None,
+        |_| {},
+        |at, _, _| {
+            let mut s = connect(at);
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let start = Instant::now();
+            s.write_all(b"GET /v1/a HTTP/1.1\r\nHost: h\r\n").unwrap();
+            let mut buf = [0u8; 4096];
+            assert!(matches!(s.read(&mut buf), Ok(0) | Err(_)), "an answer came");
+            start.elapsed()
+        },
+    );
     let timeout = Duration::from_millis(teseladb_http::limits::HEADER_TIMEOUT_MS);
     assert!(waited >= timeout && waited < timeout * 2, "{waited:?}");
 }

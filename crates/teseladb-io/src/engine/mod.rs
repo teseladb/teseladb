@@ -54,11 +54,11 @@ mod place;
 #[cfg(target_os = "linux")]
 pub(crate) mod post;
 #[cfg(target_os = "linux")]
-pub mod stacks;
-#[cfg(target_os = "linux")]
 pub mod resources;
 #[cfg(target_os = "linux")]
 pub mod signals;
+#[cfg(target_os = "linux")]
+pub mod stacks;
 #[cfg(target_os = "linux")]
 pub mod stats;
 #[cfg(target_os = "linux")]

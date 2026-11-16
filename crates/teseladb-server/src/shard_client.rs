@@ -75,9 +75,8 @@ pub fn exchange(target: Target, request: Vec<u8>) -> Future<Response> {
                 server_name: Some(target.host.clone()),
                 resume: None,
             };
-            dial_tls(&target.host, target.port, target.connect, tls).then(
-                |t| -> Result<ConnectedSocket, ExceptionPtr> { Ok(t.socket) },
-            )
+            dial_tls(&target.host, target.port, target.connect, tls)
+                .then(|t| -> Result<ConnectedSocket, ExceptionPtr> { Ok(t.socket) })
         }
     };
     let answer = target.answer;

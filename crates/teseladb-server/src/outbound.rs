@@ -69,11 +69,8 @@ pub fn with_engine<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     if runner().is_ok() {
         return Ok(f());
     }
-    let cfg = EngineConfig {
-        shards: 1,
-        memory: Some(START_ENGINE_MEMORY),
-        ..EngineConfig::default()
-    };
+    let cfg =
+        EngineConfig { shards: 1, memory: Some(START_ENGINE_MEMORY), ..EngineConfig::default() };
     let engine = NodeEngine::start(&cfg).map_err(|e| format!("the engine: {e}"))?;
     install(Arc::new(NodeRunner(engine.poster())));
     let out = f();

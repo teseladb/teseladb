@@ -724,9 +724,10 @@ pub fn start(
     });
     let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let poller = match polling.clone().map(|(id, k, every)| {
-        kmip::poll(k, id, every, done.clone(), lost.clone())
-    }) {
+    let poller = match polling
+        .clone()
+        .map(|(id, k, every)| kmip::poll(k, id, every, done.clone(), lost.clone()))
+    {
         Some(Err(e)) => {
             let _ = writeln!(err, "teseladb: {e}");
             drop(node.stop());
