@@ -125,6 +125,10 @@ harness = false
 name = "transactions"
 harness = false
 
+[[test]]
+name = "work_on_leaders"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
