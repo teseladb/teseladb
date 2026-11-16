@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -56,11 +56,48 @@ thread_local! {
     static EXIT: RefCell<Option<Rc<Wake>>> = const { RefCell::new(None) };
 }
 
+/// How long a start waits for the node engine running in the process to stop.
+const TURN_WAIT: Duration = Duration::from_secs(600);
+
+/// Whether a node engine runs in the process (D4: one at a time).
+static RUNNING: Mutex<bool> = Mutex::new(false);
+/// Signalled when the node engine of the process stops.
+static STOPPED: Condvar = Condvar::new();
+
+/// The process's turn to run a node engine, from its start until its thread ended. Starts in
+/// threads of their own (the tests of one binary) take turns instead of racing for the
+/// process's single `alien` instance.
+struct Turn;
+
+impl Turn {
+    /// Waits up to [`TURN_WAIT`] for the node engine running in the process to stop.
+    fn take() -> io::Result<Turn> {
+        let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut running, _) = STOPPED
+            .wait_timeout_while(running, TURN_WAIT, |r| *r)
+            .unwrap_or_else(PoisonError::into_inner);
+        if *running {
+            return Err(io::Error::other("an engine already runs in this process"));
+        }
+        *running = true;
+        Ok(Turn)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        STOPPED.notify_one();
+    }
+}
+
 /// A running engine.
 pub struct NodeEngine {
     thread: Option<JoinHandle<i32>>,
     gate: Arc<Gate>,
     shards: u16,
+    /// Released once the engine's thread ended.
+    turn: Option<Turn>,
 }
 
 impl std::fmt::Debug for NodeEngine {
@@ -113,6 +150,7 @@ impl NodeEngine {
     /// When another engine runs in the process, or the engine cannot start (its options, its
     /// memory or its CPUs).
     pub fn start(cfg: &EngineConfig) -> io::Result<NodeEngine> {
+        let turn = Turn::take()?;
         if !alien::internal::default_instance().is_null() {
             return Err(io::Error::other("an engine already runs in this process"));
         }
@@ -148,6 +186,7 @@ impl NodeEngine {
                 thread: Some(thread),
                 gate: Arc::default(),
                 shards: cfg.shards.max(1),
+                turn: Some(turn),
             }),
             Ok(Err(e)) => {
                 // The engine runs: it is stopped like any other before the error goes back.
@@ -155,6 +194,7 @@ impl NodeEngine {
                     thread: Some(thread),
                     gate: Arc::default(),
                     shards: cfg.shards.max(1),
+                    turn: Some(turn),
                 };
                 failed.stop();
                 Err(e)
@@ -370,6 +410,8 @@ impl NodeEngine {
             }
         });
         let _ = thread.join();
+        // The thread ended and took its `alien` instance away: the next engine may start.
+        self.turn.take();
     }
 }
 
