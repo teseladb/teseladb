@@ -128,7 +128,7 @@ fn main() -> ExitCode {
         let code = nodes::run_process(&argv[1..]);
         return ExitCode::from(u8::try_from(code).unwrap_or(ERROR));
     }
-    let args = match cli::parse(argv.into_iter()) {
+    let args = match cli::parse(argv) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("{msg}");

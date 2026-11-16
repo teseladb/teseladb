@@ -410,7 +410,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
          document at a time"
     ));
     drop(quiet);
-    drop(cluster.node.stop());
+    let _ = cluster.node.stop();
     Ok(report)
 }
 

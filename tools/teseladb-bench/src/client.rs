@@ -515,7 +515,7 @@ mod tests {
         assert!(Target::open(Some("http://x")).err().expect("error").contains("is host:port"));
         let t = Target::open(Some("127.0.0.1:27017")).expect("target");
         assert_eq!(t.addr().expect("addr").port(), 27017);
-        let refused = t.add_member(Duration::ZERO).err().expect("error");
+        let refused = t.add_member(Duration::ZERO).expect_err("error");
         assert!(refused.contains("only a local cluster"), "{refused}");
         assert!(Client::connect(SocketAddr::from(([127, 0, 0, 1], 1))).is_err());
         assert_eq!(text(std::io::Error::other("x")), "x");

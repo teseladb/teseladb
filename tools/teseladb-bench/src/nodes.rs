@@ -20,8 +20,11 @@ const PROGRAM: &str = "teseladb-bench";
 /// Exit code of a node process with a recipe it does not know or cannot build.
 const USAGE: i32 = 2;
 
+/// What a recipe makes of a node process's arguments.
+type Recipe = fn(&NodeArgs) -> Result<NodeConfig, String>;
+
 /// The recipes, by name: what each makes of its arguments.
-const RECIPES: &[(&str, fn(&NodeArgs) -> Result<NodeConfig, String>)] = &[
+const RECIPES: &[(&str, Recipe)] = &[
     (rest::RECIPE, rest::node_config),
     (noisy_tenant::RECIPE, noisy_tenant::node_config),
     (disk_usage::RECIPE, disk_usage::node_config),
