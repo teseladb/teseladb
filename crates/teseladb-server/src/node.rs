@@ -22,7 +22,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teseladb_auth::clustertime::KeySealer;
@@ -513,29 +513,22 @@ fn random_u64() -> u64 {
     h.finish()
 }
 
-/// Answers the HTTP requests other nodes forward to this node's port (019 FR-008), each on its
-/// own thread, and hands each answer to core 0. The thread ends when core 0 drops its sender.
-fn spawn_http_forwards(
-    forwards: mpsc::Receiver<(NodeId, u64, Vec<u8>)>,
+/// Answers the HTTP requests other nodes forward to this node's port (019 FR-008): each in an
+/// engine thread of core 0's shard, where core 0 hands it, and the answer goes back to core 0.
+fn answer_http_forwards(
+    slot: &crate::logic::HttpForwardSlot,
     service: Arc<crate::http_service::NodeHttp>,
     backend: crate::backend::ServerBackend,
 ) {
+    // Locked only to post the answer to core 0, which never waits.
     let backend = Arc::new(Mutex::new(backend));
-    let run = move || {
-        for (from, req, body) in forwards {
-            let (service, backend) = (service.clone(), backend.clone());
-            let answer = move || {
-                let answer = service.answer_forwarded(&body);
-                backend
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .answer_http(from, req, answer);
-            };
-            // Without a thread the request goes unanswered and its sender's forward times out.
-            let _ = thread::Builder::new().name("http-forwarded".into()).spawn(answer);
-        }
-    };
-    let _ = thread::Builder::new().name("http-forwards".into()).spawn(run);
+    let _ = slot.set(Box::new(move |from, req, body| {
+        let (service, backend) = (service.clone(), backend.clone());
+        crate::engine_jobs::spawn_or_run(move || {
+            let answer = service.answer_forwarded(&body);
+            backend.lock().unwrap_or_else(PoisonError::into_inner).answer_http(from, req, answer);
+        });
+    }));
 }
 
 fn now_ms() -> u64 {
@@ -865,7 +858,8 @@ fn group0_ask(
             return Err("the cluster did not answer".to_owned());
         }
         retried = true;
-        thread::sleep(GROUP0_RETRY);
+        // Parks an engine thread (a handler that asked), sleeps any other.
+        teseladb_io::engine::wait::sleep(GROUP0_RETRY);
     }
 }
 
@@ -1135,9 +1129,9 @@ impl Node {
         // views of its ranges: the client workers read both (005 FR-028).
         let origin = Instant::now();
         let views: Vec<RangeViews> = (0..cores).map(|_| RangeViews::default()).collect();
-        // The HTTP requests other nodes forward to this node's port; without a port, the
-        // receiver drops and core 0 answers them empty.
-        let (http_forwards_tx, http_forwards_rx) = mpsc::channel();
+        // The HTTP requests other nodes forward to this node's port; without a port core 0
+        // answers them empty.
+        let http_forwards = Arc::new(crate::logic::HttpForwardSlot::default());
         let mut senders = Vec::new();
         let mut threads = Vec::new();
         log.step("starting the cores", &[("node_id", &node_id.0), ("cores", &cores)]);
@@ -1210,7 +1204,7 @@ impl Node {
                 loads: loads.clone(),
                 roles: roles.clone(),
                 presence: (k == 0).then(|| presence.clone()),
-                http_forwards: (k == 0).then(|| http_forwards_tx.clone()),
+                http_forwards: (k == 0).then(|| http_forwards.clone()),
                 hosting: hosting.clone(),
                 views: views[usize::from(k)].clone(),
                 origin,
@@ -1387,7 +1381,7 @@ impl Node {
                     crate::http_service::NodeHttp::new(handle, Arc::new(state), auth)
                         .with_auth(oidc, mechanisms),
                 );
-                spawn_http_forwards(http_forwards_rx, service.clone(), backend);
+                answer_http_forwards(&http_forwards, service.clone(), backend);
                 let advertise = service.clone();
                 let certs = cfg.client.as_ref().and_then(|c| c.certificates.as_deref());
                 match crate::node_ports::start_http(h, service, http_metrics.clone(), certs) {
@@ -1573,7 +1567,7 @@ impl Node {
                 report(view.as_ref());
                 next_report = Instant::now() + every;
             }
-            thread::sleep(Duration::from_millis(5));
+            teseladb_io::engine::wait::sleep(Duration::from_millis(5));
         }
     }
 

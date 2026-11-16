@@ -200,9 +200,40 @@ pub enum NodeMsg {
     OutsideLoad(GroupId, u64, Vec<Vec<u8>>),
 }
 
-/// Requests other nodes forward to the node's HTTP port: the node that sent each, its request
-/// number and the request (019 FR-008).
-pub type HttpForwards = std::sync::mpsc::Sender<(NodeId, u64, Vec<u8>)>;
+/// What answers an HTTP request another node forwards to this node's port: the node that sent
+/// it, its request number and the request (019 FR-008). Core 0 calls it on its shard; it starts
+/// the answer and returns at once.
+pub type HttpForwardAnswer = Box<dyn Fn(NodeId, u64, Vec<u8>) + Send + Sync>;
+
+/// Where the node's HTTP port, once it runs, takes the requests other nodes forward (019 FR-008);
+/// until then core 0 answers them empty.
+#[derive(Default)]
+pub struct HttpForwardSlot {
+    answer: std::sync::OnceLock<HttpForwardAnswer>,
+}
+
+impl std::fmt::Debug for HttpForwardSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpForwardSlot").field("set", &self.answer.get().is_some()).finish()
+    }
+}
+
+impl HttpForwardSlot {
+    /// Sets what answers, once; `false` if it was already set.
+    pub fn set(&self, answer: HttpForwardAnswer) -> bool {
+        self.answer.set(answer).is_ok()
+    }
+
+    /// Hands `body` from `from` to the port; `false` while no port takes them.
+    pub fn hand(&self, from: NodeId, req: u64, body: Vec<u8>) -> bool {
+        let Some(answer) = self.answer.get() else { return false };
+        answer(from, req, body);
+        true
+    }
+}
+
+/// The slot core 0 hands the forwarded HTTP requests to.
+pub type HttpForwards = std::sync::Arc<HttpForwardSlot>;
 
 /// Step of a join waiting for an operation.
 #[derive(Debug)]
@@ -1616,10 +1647,10 @@ impl NodeLogic {
                     // The node's HTTP port answers it, then core 0 sends the answer
                     // ([`NodeMsg::HttpAnswer`]); without a port, an empty answer.
                     (Ok(Request::Http(body)), _) => {
-                        let handed = self
-                            .http_forwards
-                            .as_ref()
-                            .is_some_and(|h| h.send((f.from, f.req, body)).is_ok());
+                        let handed = match &self.http_forwards {
+                            Some(h) => h.hand(f.from, f.req, body),
+                            None => false,
+                        };
                         if !handed {
                             self.core.answer_forward(f.from, f.req, Bytes::new());
                         }
@@ -3829,5 +3860,28 @@ mod tests {
             IoSlot::Data(IoOwner::Lsm)
         );
         assert_eq!(IoSlot::Background(IoOwner::Lsm).class(), IoClass::Background);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod http_forward_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn a_forwarded_request_waits_for_the_port_and_then_goes_to_it() {
+        let slot = HttpForwardSlot::default();
+        assert!(!slot.hand(NodeId(2), 1, b"early".to_vec()), "no port takes it yet");
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let seen = got.clone();
+        assert!(slot.set(Box::new(move |from, req, body| {
+            seen.lock().unwrap().push((from, req, body));
+        })));
+        assert!(!slot.set(Box::new(|_, _, _| {})), "set once");
+        assert!(slot.hand(NodeId(3), 9, b"GET /".to_vec()));
+        assert_eq!(*got.lock().unwrap(), vec![(NodeId(3), 9, b"GET /".to_vec())]);
+        assert!(format!("{slot:?}").contains("set: true"));
     }
 }
