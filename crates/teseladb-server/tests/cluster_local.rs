@@ -3,48 +3,59 @@
 //! - Three `teseladb` processes: the first creates the cluster, the other two join with `--join`;
 //!   after a `SIGKILL` of the first (Group 0's leader) the other two elect a leader, which a fourth
 //!   node that joins through them proves. A `SIGTERM` stops a node cleanly.
-//! - Three processes of this test's own binary in node mode ([`CHILD`]: the options of
-//!   `teseladb start`, and the node's handle for the data range on standard input, since the
-//!   reference server protocol arrives with 006): the first creates the cluster and the data range,
-//!   the other two join with `--join` and receive replicas; after a `SIGKILL` of the range's leader
-//!   a write is confirmed again in less than 1 s.
+//! - Three processes of this test's own binary in node mode (`teseladb_server::procs`: the
+//!   configuration `teseladb start` gives, and the node's handle for the data range on standard
+//!   input, since the reference server protocol arrives with 006): the first creates the cluster
+//!   and the data range, the other two join with `--join` and receive replicas; after a `SIGKILL`
+//!   of the range's leader a write is confirmed again in less than 1 s.
 //!
-//! The test runs its own `main` (`harness = false` in `Cargo.toml`) so that the same binary can
-//! be a node.
+//! The test runs the `main` of tests/common/procs.rs (`harness = false` in `Cargo.toml`) so that
+//! the same binary can be a node.
+
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use teseladb_io::FileDisk;
 use teseladb_meta::bootstrap::DATA_START;
 use teseladb_raft::Role;
 use teseladb_server::cli::{self, Command as CliCommand};
-use teseladb_server::log::Format;
-use teseladb_server::node::{Node, lock_dir};
-use teseladb_server::{node_config, ready_line};
-
-/// First argument of this binary in node mode.
-const CHILD: &str = "--node-process";
+use teseladb_server::node::NodeConfig;
+use teseladb_server::node_config;
+use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
+use teseladb_types::NodeId;
 
 /// Longest a node takes to print its ready line.
 const READY: Duration = Duration::from_secs(30);
 /// The start of the line `teseladb start` writes to standard output once the node is ready.
 const READY_LINE: &str = "ready node_id=";
 
+/// The options of `teseladb start` every node of these tests takes. Several nodes on one machine:
+/// none opens the HTTP port of 019.
+const START: &[&str] = &[
+    "start",
+    "--admin-listen",
+    "127.0.0.1:0",
+    "--http-port",
+    "0",
+    "--insecure",
+    "--cores",
+    "1",
+    "--port",
+    "0",
+];
 /// The inter-node port of most nodes of these tests.
 const LOOPBACK_PEER: &[&str] = &["--peer-listen", "127.0.0.1:0"];
 /// Every address, with the one the other nodes call (001 T051): `--insecure` takes it only with
 /// `--insecure-allow-remote`.
 const ANY_PEER: &[&str] =
     &["--insecure-allow-remote", "--peer-listen", "0.0.0.0:0", "--advertise", "127.0.0.1"];
-
-/// Longest a node takes to answer a request of the test.
-const ANSWER: Duration = Duration::from_secs(10);
 
 /// Deadline of a request inside the node.
 const REQUEST: Duration = Duration::from_secs(2);
@@ -53,125 +64,80 @@ const REQUEST: Duration = Duration::from_secs(2);
 const FAILOVER_BUDGET: Duration = Duration::from_secs(1);
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some(CHILD) {
-        node_process(&args[1..]);
-        return;
-    }
-    let tests: [(&str, fn()); 3] = [
-        (
-            "two_nodes_on_every_address_join_with_the_address_they_advertise",
-            two_nodes_on_every_address_join_with_the_address_they_advertise,
-        ),
-        (
-            "three_processes_join_and_survive_the_loss_of_the_leader",
-            three_processes_join_and_survive_the_loss_of_the_leader,
-        ),
-        (
-            "a_write_is_confirmed_within_a_second_of_the_range_leaders_death",
-            a_write_is_confirmed_within_a_second_of_the_range_leaders_death,
-        ),
-    ];
-    for (name, test) in tests {
-        test();
-        println!("test {name} ... ok");
-    }
-    println!("test result: ok. {} passed; 0 failed", tests.len());
+    procs::main(
+        &[
+            (
+                "two_nodes_on_every_address_join_with_the_address_they_advertise",
+                two_nodes_on_every_address_join_with_the_address_they_advertise,
+            ),
+            (
+                "three_processes_join_and_survive_the_loss_of_the_leader",
+                three_processes_join_and_survive_the_loss_of_the_leader,
+            ),
+            (
+                "a_write_is_confirmed_within_a_second_of_the_range_leaders_death",
+                a_write_is_confirmed_within_a_second_of_the_range_leaders_death,
+            ),
+        ],
+        &[("start", start_config)],
+    );
 }
 
 // ----- node mode -----
 
-/// A node that takes `teseladb start`'s options and answers, one line each, the lines of its
-/// standard input: `put <key> <value>`, `get <key>` and `status` (keys inside the data space).
-/// It stops when its standard input ends.
-fn node_process(args: &[String]) {
-    let Ok(CliCommand::Start(o)) = cli::parse(args) else { panic!("start options: {args:?}") };
-    let lock = lock_dir(&o.dbpath).expect("the data directory");
-    let data = o.dbpath.clone();
-    let node = Node::start(node_config(&o), || FileDisk::open(&data), Some(lock)).expect("start");
-    assert!(node.wait_ready(READY), "the cluster did not become ready");
-    let mut out = std::io::stdout();
-    let peer = node.peer_addr().to_string();
-    let line = ready_line(Format::Text, node.node_id().0, &node.cluster_id(), &peer);
-    out.write_all(line.as_bytes()).and_then(|()| out.flush()).expect("stdout");
-    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let key = |w: &str| [&DATA_START[..], w.as_bytes()].concat();
-        let answer = match words.as_slice() {
-            ["put", k, v] => match node.put(&key(k), v.as_bytes(), REQUEST) {
-                Ok(ts) => format!("ok {}", ts.physical),
-                Err(e) => format!("err {e:?}"),
-            },
-            ["get", k] => match node.get(&key(k), REQUEST) {
-                Ok(Some(v)) => format!("ok {}", String::from_utf8_lossy(&v)),
-                Ok(None) => "none".to_owned(),
-                Err(e) => format!("err {e:?}"),
-            },
-            ["status"] => match node.data_status(REQUEST) {
-                Some(s) => {
-                    let ids = |v: &[teseladb_types::NodeId]| {
-                        v.iter().map(|n| n.0.to_string()).collect::<Vec<_>>().join(",")
-                    };
-                    let leader = (s.role == Some(Role::Leader)) as u8;
-                    format!(
-                        "status leads={leader} voters={} learners={}",
-                        ids(&s.voters),
-                        ids(&s.learners)
-                    )
-                }
-                None => "err no status".to_owned(),
-            },
-            _ => format!("err unknown request `{line}`"),
-        };
-        if writeln!(out, "{answer}").and_then(|()| out.flush()).is_err() {
-            break;
-        }
+/// The configuration `teseladb start` gives a node of these tests over its data directory.
+fn start_config(a: &NodeArgs) -> NodeConfig {
+    let dir = a.dir.as_ref().expect("a data directory");
+    let mut args: Vec<String> =
+        START.iter().chain(LOOPBACK_PEER).map(|s| (*s).to_owned()).collect();
+    args.extend(["--dbpath".to_owned(), dir.display().to_string()]);
+    if !a.join.is_empty() {
+        args.extend(["--join".to_owned(), a.join.join(",")]);
     }
-    node.stop();
+    let Ok(CliCommand::Start(o)) = cli::parse(&args) else { panic!("start options: {args:?}") };
+    node_config(&o)
+}
+
+/// A data directory, gone when the test ends.
+struct DataDir(PathBuf);
+
+impl DataDir {
+    fn new(name: &str) -> DataDir {
+        let dir =
+            std::env::temp_dir().join(format!("teseladb-local-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        DataDir(dir)
+    }
+}
+
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 // ----- processes -----
 
-/// A node process and its data directory, both gone when the test ends.
+/// A `teseladb start` process and its data directory, both gone when the test ends.
 struct Proc {
     child: Child,
-    stdin: Option<ChildStdin>,
     lines: Receiver<String>,
-    dir: PathBuf,
+    /// Removed when the process is gone.
+    _dir: DataDir,
 }
 
 impl Proc {
-    /// Starts `program` with `args` and `start`'s options for data directory `name`, listening
-    /// between nodes as `peer` says.
-    fn spawn(
-        program: PathBuf,
-        pre: &[&str],
-        name: &str,
-        join: Option<&str>,
-        peer: &[&str],
-    ) -> Proc {
-        let dir =
-            std::env::temp_dir().join(format!("teseladb-local-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+    /// Starts `teseladb` with `start`'s options for data directory `name`, listening between
+    /// nodes as `peer` says.
+    fn spawn(name: &str, join: Option<&str>, peer: &[&str]) -> Proc {
+        let dir = DataDir::new(name);
+        let program = PathBuf::from(env!("CARGO_BIN_EXE_teseladb"));
         let mut cmd = Command::new(&program);
-        cmd.args(pre)
-            .args([
-                "start",
-                "--admin-listen",
-                "127.0.0.1:0",
-                // Several nodes on one machine: none opens the HTTP port of 019.
-                "--http-port",
-                "0",
-                "--insecure",
-                "--cores",
-                "1",
-                "--port",
-                "0",
-            ])
+        cmd.args(START)
             .args(peer)
             .arg("--dbpath")
-            .arg(&dir)
-            .stdin(Stdio::piped())
+            .arg(&dir.0)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(seed) = join {
@@ -194,24 +160,17 @@ impl Proc {
         thread::spawn(move || {
             BufReader::new(err).lines().map_while(Result::ok).for_each(|l| drop(tx2.send(l)))
         });
-        let stdin = child.stdin.take();
-        Proc { child, stdin, lines, dir }
+        Proc { child, lines, _dir: dir }
     }
 
     /// `teseladb start`.
     fn start(name: &str, join: Option<&str>) -> Proc {
-        Proc::spawn(PathBuf::from(env!("CARGO_BIN_EXE_teseladb")), &[], name, join, LOOPBACK_PEER)
+        Proc::spawn(name, join, LOOPBACK_PEER)
     }
 
     /// `teseladb start` listening between nodes on every address and calling itself `127.0.0.1`.
     fn start_anywhere(name: &str, join: Option<&str>) -> Proc {
-        Proc::spawn(PathBuf::from(env!("CARGO_BIN_EXE_teseladb")), &[], name, join, ANY_PEER)
-    }
-
-    /// This binary in node mode.
-    fn node(name: &str, join: Option<&str>) -> Proc {
-        let me = std::env::current_exe().expect("this test's binary");
-        Proc::spawn(me, &[CHILD], name, join, LOOPBACK_PEER)
+        Proc::spawn(name, join, ANY_PEER)
     }
 
     /// The first line for which `ok` holds.
@@ -277,35 +236,11 @@ impl Proc {
         (field("node_id=").parse().expect("a node id"), field("peer="))
     }
 
-    /// Sends a request to a node in node mode and returns its answer.
-    fn ask(&mut self, request: &str) -> String {
-        let stdin = self.stdin.as_mut().expect("a running node");
-        writeln!(stdin, "{request}").and_then(|()| stdin.flush()).expect("the node reads");
-        let answers = ["ok", "err", "none", "status"];
-        let end = Instant::now() + ANSWER;
-        loop {
-            let left = end.saturating_duration_since(Instant::now());
-            let line = self
-                .lines
-                .recv_timeout(left)
-                .unwrap_or_else(|_| panic!("no answer to `{request}`"));
-            if answers.iter().any(|a| line == *a || line.starts_with(&format!("{a} "))) {
-                return line;
-            }
-        }
-    }
-
     /// Sends `sig` with the shell's `kill` builtin (images without the `kill` program have it).
     fn signal(&self, sig: &str) {
         let cmd = format!("kill {sig} {}", self.child.id());
         let ok = Command::new("sh").args(["-c", &cmd]).status().unwrap();
         assert!(ok.success());
-    }
-
-    /// Ends a node in node mode cleanly: its standard input closes.
-    fn close(mut self) {
-        drop(self.stdin.take());
-        assert!(self.child.wait().unwrap().success(), "the node stops cleanly");
     }
 }
 
@@ -313,7 +248,6 @@ impl Drop for Proc {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -368,35 +302,46 @@ fn two_nodes_on_every_address_join_with_the_address_they_advertise() {
 }
 
 fn a_write_is_confirmed_within_a_second_of_the_range_leaders_death() {
-    let p1 = Proc::node("r1", None);
-    let (id1, seed) = p1.ready();
-    assert_eq!(id1, 1);
-    let p2 = Proc::node("r2", Some(&seed));
-    assert_eq!(p2.ready().0, 2);
-    let p3 = Proc::node("r3", Some(&seed));
-    assert_eq!(p3.ready().0, 3);
+    let dirs = [DataDir::new("r1"), DataDir::new("r2"), DataDir::new("r3")];
+    let node = |dir: &DataDir, join: &[String]| {
+        let p = start_self("start", join, Some(&dir.0), &[]);
+        assert!(p.wait_ready(READY), "the cluster did not become ready");
+        p
+    };
+    let p1 = node(&dirs[0], &[]);
+    assert_eq!(p1.node_id(), NodeId(1));
+    let seed = vec![p1.peer_addr().to_string()];
+    let p2 = node(&dirs[1], &seed);
+    assert_eq!(p2.node_id(), NodeId(2));
+    let p3 = node(&dirs[2], &seed);
+    assert_eq!(p3.node_id(), NodeId(3));
     let mut nodes = vec![p1, p2, p3];
+    let key = |w: &str| [&DATA_START[..], w.as_bytes()].concat();
+    let status = |p: &NodeProc| p.data_status(REQUEST);
+    let leads = |p: &NodeProc| status(p).is_some_and(|s| s.role == Some(Role::Leader));
 
     // The balancer gives the two new nodes replicas of the data range: three voters everywhere.
+    let three = [NodeId(1), NodeId(2), NodeId(3)];
     let end = Instant::now() + READY;
-    while !nodes.iter_mut().all(|p| p.ask("status").contains("voters=1,2,3 learners=")) {
+    while !nodes
+        .iter()
+        .all(|p| status(p).is_some_and(|s| s.voters == three && s.learners.is_empty()))
+    {
         assert!(Instant::now() < end, "the range never got three voters");
         thread::sleep(Duration::from_millis(50));
     }
-    let leader = nodes.iter_mut().position(|p| p.ask("status").contains("leads=1"));
-    let leader = leader.expect("a leader of the range");
-    let first = nodes[leader].ask("put before 1");
-    assert!(first.starts_with("ok "), "{first}");
+    let leader = nodes.iter().position(leads).expect("a leader of the range");
+    let first = nodes[leader].put(&key("before"), b"1", REQUEST);
+    assert!(first.is_ok(), "{first:?}");
 
     // The leader dies; the others are asked in turn until one confirms a write.
     let mut dead = nodes.remove(leader);
-    dead.child.kill().unwrap();
+    dead.kill();
     let killed = Instant::now();
-    dead.child.wait().unwrap();
     let end = killed + READY;
     let confirmed = 'write: loop {
-        for p in &mut nodes {
-            if p.ask("put after 2").starts_with("ok ") {
+        for p in &nodes {
+            if p.put(&key("after"), b"2", REQUEST).is_ok() {
                 break 'write killed.elapsed();
             }
         }
@@ -407,10 +352,9 @@ fn a_write_is_confirmed_within_a_second_of_the_range_leaders_death() {
     assert!(confirmed < FAILOVER_BUDGET, "{confirmed:?} after the leader's death");
 
     // The new leader has both writes.
-    let at = nodes.iter_mut().position(|p| p.ask("status").contains("leads=1"));
-    let new = &mut nodes[at.expect("the new leader")];
-    assert_eq!(new.ask("get before"), "ok 1");
-    assert_eq!(new.ask("get after"), "ok 2");
+    let new = nodes.iter().find(|p| leads(p)).expect("the new leader");
+    assert_eq!(new.get(&key("before"), REQUEST), Ok(Some(b"1".to_vec())));
+    assert_eq!(new.get(&key("after"), REQUEST), Ok(Some(b"2".to_vec())));
     drop(dead);
-    nodes.into_iter().for_each(Proc::close);
+    assert!(nodes.into_iter().map(NodeProc::stop).all(|s| s.success()), "the nodes stop cleanly");
 }
