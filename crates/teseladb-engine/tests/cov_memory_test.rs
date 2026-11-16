@@ -2,7 +2,10 @@
 //! minimum free memory, the memory layout, large-allocation warning thresholds, the
 //! diagnostics report with an application producer, the allocation-failure settings, the
 //! `malloc` family entry points, and cross-shard frees.
-#![cfg(target_os = "linux")]
+//!
+//! They test the engine's own allocator, so a build with `--cfg engine_default_allocator`
+//! (the debug and sanitizer builds, as `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) leaves them out.
+#![cfg(all(target_os = "linux", not(engine_default_allocator)))]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
 #![allow(unsafe_code)]

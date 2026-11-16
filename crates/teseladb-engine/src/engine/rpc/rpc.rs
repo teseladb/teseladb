@@ -558,6 +558,9 @@ pub struct Connection {
     pub(crate) _stream_sem: Semaphore,
     pub(crate) _sink_closed: bool,
     pub(crate) _source_closed: bool,
+    /// Whether the peer's end-of-stream frame has been queued: the connection's end after
+    /// it is the end of the stream, not a loss, so the queue is not aborted then.
+    pub(crate) _stream_eos_received: bool,
     // the future holds if sink is already closed
     // if it is not ready it means the sink is been closed
     pub(crate) _sink_closed_future: Future<bool>,
@@ -620,6 +623,7 @@ impl Connection {
             _stream_sem: Semaphore::new(MAX_STREAM_BUFFERS_MEMORY),
             _sink_closed: true,
             _source_closed: true,
+            _stream_eos_received: false,
             _sink_closed_future: make_ready_future(false),
         }
     }
@@ -2587,6 +2591,10 @@ impl Connection {
         // we do not want to dead lock on huge packets, so let them in
         // but only one at a time
         let size = (buf.size as usize).min(MAX_STREAM_BUFFERS_MEMORY);
+        if buf.size == u32::MAX {
+            // max fragment length marks an end of a stream
+            self._stream_eos_received = true;
+        }
         let this: *mut Connection = self;
         // SAFETY: the connection, and so its stream semaphore, outlives its stream loop and the
         // units of the frames it queues (stop() waits for the loop and drains the queue).
@@ -3514,7 +3522,10 @@ impl Client {
             }
             ep = Some(e);
         }
-        if self.is_stream() && (ep.is_some() || self._conn._error) {
+        // A connection that ends cleanly after the peer's end of stream leaves the queued
+        // frames and the end to the source.
+        let clean_end = ep.is_none() && self._conn._stream_eos_received;
+        if self.is_stream() && (ep.is_some() || self._conn._error) && !clean_end {
             self._conn._stream_queue.abort(ExceptionPtr::new(stream_closed()));
         }
         self._conn._error = true;
@@ -3934,7 +3945,10 @@ impl ServerConnection {
             ep = Some(e);
         }
         self._conn._fd.shutdown_input();
-        if self.is_stream() && (ep.is_some() || self._conn._error) {
+        // A connection that ends cleanly after the peer's end of stream leaves the queued
+        // frames and the end to the source.
+        let clean_end = ep.is_none() && self._conn._stream_eos_received;
+        if self.is_stream() && (ep.is_some() || self._conn._error) && !clean_end {
             self._conn._stream_queue.abort(ExceptionPtr::new(stream_closed()));
         }
         self._conn._error = true;

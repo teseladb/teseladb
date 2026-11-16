@@ -226,6 +226,21 @@ pub mod websocket {
             unsafe { handler(&mut (*sp).input, &mut (*sp).output) }
         }
 
+        /// Ends the response loop of a connection on which no handler will run (its upgrade
+        /// was refused, or the client left before sending it): the loop would otherwise
+        /// wait for output forever. The output queue is empty, as nothing has written to it.
+        pub(crate) fn end_response_loop(&mut self) {
+            self._done = true;
+            let side = self.side();
+            // SAFETY: the block is alive while the connection is; this is the only reference
+            // made to the output queue during the call.
+            unsafe {
+                (*side).output_buffer.abort(ExceptionPtr::new(Exception::new(
+                    "the connection ended before its upgrade",
+                )))
+            };
+        }
+
         /// Handles a received PING frame
         /// (<https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.2>); not implemented
         /// yet, it resolves at once.

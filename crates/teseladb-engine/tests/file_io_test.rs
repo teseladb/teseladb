@@ -945,8 +945,9 @@ engine_test_case!(test_underlying_file, {
         assert_eq!(f.memory_dma_alignment(), lf.memory_dma_alignment());
         assert_eq!(f.disk_read_dma_alignment(), lf.disk_read_dma_alignment());
         assert_eq!(f.disk_write_dma_alignment(), lf.disk_write_dma_alignment());
-        // The layered file is never closed (its close() aborts).
-        std::mem::forget(lf);
+        // The layered file is never closed (its close() aborts); dropping the handle only
+        // releases it, as the original's lf goes out of scope.
+        drop(lf);
         Ok(())
     })
 });

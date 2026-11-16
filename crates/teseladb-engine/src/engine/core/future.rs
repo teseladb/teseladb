@@ -744,6 +744,55 @@ mod node_pool {
         fn pool() -> Pool, symbol = "__engine_rs_future_node_pool";
     }
 
+    /// With the system allocator (`engine_default_allocator`, the debug and sanitizer
+    /// builds) memory outlives the thread, so the blocks cached when a thread exits are
+    /// handed back to it, as the blocks of a build without this cache would be: a
+    /// thread-local with a destructor, registered by the first block cached, empties the
+    /// lists when the thread exits.
+    #[cfg(engine_default_allocator)]
+    struct ReleaseAtExit;
+
+    #[cfg(engine_default_allocator)]
+    impl Drop for ReleaseAtExit {
+        fn drop(&mut self) {
+            with_pool(|pool| {
+                for (c, head) in pool.heads.iter().enumerate() {
+                    let mut b = head.replace(std::ptr::null_mut());
+                    while !b.is_null() {
+                        // SAFETY: a block on the list is a live FreeBlock owned by it,
+                        // allocated with its class layout; it is unlinked before release.
+                        unsafe {
+                            let next = (*b).next;
+                            std::alloc::dealloc(b.cast::<u8>(), class_layout(c));
+                            b = next;
+                        }
+                    }
+                    pool.counts[c].set(0);
+                }
+            });
+        }
+    }
+
+    #[cfg(engine_default_allocator)]
+    std::thread_local! {
+        static RELEASE_AT_EXIT: ReleaseAtExit = const { ReleaseAtExit };
+    }
+
+    /// Whether a block may be cached: always with the engine's allocator; with the system
+    /// allocator, while the exit-time release of this thread's lists is registered (it is
+    /// registered here on first use; once it has run, blocks go straight back).
+    #[inline(always)]
+    fn release_at_exit_registered() -> bool {
+        #[cfg(engine_default_allocator)]
+        {
+            RELEASE_AT_EXIT.try_with(|_| ()).is_ok()
+        }
+        #[cfg(not(engine_default_allocator))]
+        {
+            true
+        }
+    }
+
     /// Runs `f` on this thread's pool.
     #[inline(always)]
     fn with_pool<R>(f: impl FnOnce(&Pool) -> R) -> R {
@@ -809,7 +858,7 @@ mod node_pool {
             return;
         };
         let kept = with_pool(|pool| {
-            if pool.counts[c].get() >= MAX_CACHED {
+            if pool.counts[c].get() >= MAX_CACHED || !release_at_exit_registered() {
                 return false;
             }
             let b = p.cast::<FreeBlock>();

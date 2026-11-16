@@ -16,19 +16,19 @@ use teseladb::engine::core::thread::Thread;
 use super::bound::Sink;
 use super::writer::{Req, Shared, deliver};
 use crate::engine::post::ShardPost;
-use crate::engine::wait::in_engine_thread;
+use crate::engine::wait;
 
 /// The next value of `rx`, `None` once its sender is gone. In an engine thread (a core's recovery
 /// on its shard) the thread yields to its shard while it waits, so that the writer, which may run
-/// on the same shard, goes on; elsewhere the calling thread blocks.
-///
-/// Whether it runs in an engine thread is asked through [`in_engine_thread`], which first checks
-/// that the calling thread is a shard: the engine's own question
-/// ([`Thread::running_in_thread`]) reads the shard's thread context and holds only on a shard,
-/// as in the reference (`thread::running_in_thread` reads `thread_impl::get()`).
+/// on the same shard, goes on; a thread that is not a shard blocks. A shard's task cannot wait:
+/// its own messages to the writer would never leave, so it gets `None` at once.
 fn wait_for<T>(rx: &Receiver<T>) -> Option<T> {
-    if !in_engine_thread() {
+    // `Thread::running_in_thread` is only defined on a shard: asked first.
+    if wait::this_shard().is_none() {
         return rx.recv().ok();
+    }
+    if !Thread::running_in_thread() {
+        return rx.try_recv().ok();
     }
     loop {
         match rx.try_recv() {

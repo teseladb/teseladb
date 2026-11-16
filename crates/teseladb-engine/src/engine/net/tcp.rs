@@ -828,6 +828,9 @@ pub struct Tcb<T: TcpInetTraits> {
     _nr_full_seg_received: u16,
     _packetq: CircularBuffer<L4Packet>,
     _poll_active: bool,
+    /// Whether the connection came from a listener's SYN, so that it holds one of the
+    /// listener's backlog slots while in SYN_RECEIVED.
+    _passive_open: bool,
 }
 
 type TcbPtr<T> = LwSharedPtr<Tcb<T>>;
@@ -1120,7 +1123,25 @@ impl<T: TcpInetTraits> Tcb<T> {
         self._connect_done.set_value(());
     }
 
+    /// Gives back the backlog slot a passive open holds on its listener when the connection
+    /// ends in SYN_RECEIVED; an established connection gave it back when it was queued
+    /// for accept (`Tcp::add_connected_tcb`).
+    fn release_listener_slot(&mut self) {
+        if !self._passive_open || !self.in_state(Self::SYN_RECEIVED.into()) {
+            return;
+        }
+        self._passive_open = false;
+        // SAFETY: see `tcp`; listeners unregister their state before it is destroyed, and no
+        // listener method is on the stack (this runs from the tcb's input or timers).
+        unsafe {
+            if let Some(&l) = (*self.tcp())._listening.get(&self._local_port) {
+                (*l).dec_pending();
+            }
+        }
+    }
+
     fn do_reset(&mut self) {
+        self.release_listener_slot();
         self._state = Self::CLOSED;
         self.cleanup();
         if let Some(mut p) = self._rcv._data_received_promise.take() {
@@ -1716,8 +1737,8 @@ impl<T: TcpInetTraits> Tcp<T> {
                                 // NOTE: Ignored for now
                                 tcbp = Tcb::<T>::create(this, id);
                                 (*this)._tcbs.insert(id, tcbp.clone());
-                                // TODO: we need to remove the tcb and decrease the pending if
-                                // it stays SYN_RECEIVED state forever.
+                                // The tcb gives the slot back when it is queued for accept,
+                                // reset, or abandoned after its SYN-ACK retransmissions.
                                 (*listener).inc_pending();
 
                                 // no reference to the new tcb exists besides this one.
@@ -1819,6 +1840,7 @@ impl<T: TcpInetTraits> Tcb<T> {
             _nr_full_seg_received: 0,
             _packetq: CircularBuffer::new(),
             _poll_active: false,
+            _passive_open: false,
         });
         let tp: *mut Tcb<T> = p.get();
         // SAFETY: the tcb was just made and nothing else refers to it; its timers sit inside
@@ -2033,6 +2055,7 @@ impl<T: TcpInetTraits> Tcb<T> {
         self._rcv.urgent = self._rcv.next;
 
         crate::tcp_debug!("listen: LISTEN -> SYN_RECEIVED\n");
+        self._passive_open = true;
         self.init_from_options(th, opts);
         self.do_syn_received();
     }
@@ -2100,6 +2123,9 @@ impl<T: TcpInetTraits> Tcb<T> {
                 // Otherwise enter SYN_RECEIVED, form a SYN,ACK segment
                 // <SEQ=ISS><ACK=RCV.NXT><CTL=SYN,ACK>
                 crate::tcp_debug!("syn: SYN_SENT -> SYN_RECEIVED\n");
+                // A simultaneous open: the peer's SYN sets up the windows and the MSS, as in
+                // a passive open.
+                self.init_from_options(th, opts);
                 self.do_syn_received();
             }
         }
@@ -2959,6 +2985,7 @@ impl<T: TcpInetTraits> Tcb<T> {
                 self.output_update_rto();
             } else {
                 self._connect_done.set_exception(ExceptionPtr::from(tcp_connect_error()));
+                self.release_listener_slot();
                 self.cleanup();
                 return;
             }
@@ -3225,7 +3252,12 @@ impl TcpOption {
                 MSS => {
                     if let Ok(opt) = opt.try_into() {
                         self._mss_received = true;
-                        self._remote_mss = OptMss::read(opt).mss;
+                        // An MSS of 0 would stop every send and zero the congestion
+                        // window; it is ignored and the default MSS stays.
+                        let mss = OptMss::read(opt).mss;
+                        if mss != 0 {
+                            self._remote_mss = mss;
+                        }
                     }
                 }
                 WIN_SCALE => {

@@ -1487,7 +1487,11 @@ engine_test_case!(test_suspended_awaiter_leaks_nothing, {
         // live, whatever the number of rounds.
         assert!(live_100.abs() <= 2, "live objects after 100 rounds: {live_100}");
         assert!(live_10000.abs() <= 2, "live objects after 10000 rounds: {live_10000}");
-        assert!(s2.mallocs() - s1.mallocs() >= 10_000);
+        // The system allocator of a `--cfg engine_default_allocator` build counts nothing
+        // (memory::stats() is all zeros there, as with ANOTHERPRODUCT_DEFAULT_ALLOCATOR).
+        if cfg!(not(engine_default_allocator)) {
+            assert!(s2.mallocs() - s1.mallocs() >= 10_000);
+        }
         Ok(())
     })
 });

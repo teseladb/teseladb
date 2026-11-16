@@ -507,8 +507,9 @@ static UKNOWN_SHARED_OBJECT: SharedObject =
 /// Enumerates the shared objects before `main`, from the ELF `.init_array`, so that a
 /// backtrace taken in a signal handler (the reactor prints one on `SIGSEGV`/`SIGABRT`)
 /// never enumerates them: `dl_iterate_phdr` takes the loader lock and the vector
-/// allocates, neither safe there.
-#[cfg(target_os = "linux")]
+/// allocates, neither safe there. Under Miri, which cannot call `dl_iterate_phdr`, they are
+/// enumerated on first use instead.
+#[cfg(all(target_os = "linux", not(miri)))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static INIT_SHARED_OBJECTS: extern "C" fn() = {

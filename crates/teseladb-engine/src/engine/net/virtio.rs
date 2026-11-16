@@ -607,7 +607,8 @@ impl<B: BufferChain + 'static, C: Completion<B> + 'static> Vring<B, C> {
         // completion functor is projected from `this` and called with no reference live.
         unsafe {
             let used_head = (*(*this)._used._shared)._idx.load(Ordering::Acquire);
-            let count = (*this)._used._tail.wrapping_sub(used_head);
+            // The buffers the device used since the last completion.
+            let count = used_head.wrapping_sub((*this)._used._tail);
             let complete: *mut C = addr_of_mut!((*this)._complete);
             C::bunch(complete, count as u64);
             let mask = (*this)._config.size as usize - 1;

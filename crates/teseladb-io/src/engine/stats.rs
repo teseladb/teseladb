@@ -7,15 +7,21 @@
 //! registry and its allocator's statistics, and the probe puts them together. The engine's own
 //! metrics server is not started: the node's administration port serves them.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 
+use teseladb::engine::core::future::{ExceptionPtr, Future};
+use teseladb::engine::core::loop_::parallel_for_each;
 use teseladb::engine::core::memory;
 use teseladb::engine::core::metrics::impl_::{DataType, MetricValue, MetricValueU};
 use teseladb::engine::core::metrics::impl_fns::get_values;
+use teseladb::engine::core::smp::Smp;
 
 use super::post::{Gate, ShardPost};
+use super::wait;
 
 /// The prefix of the engine's metrics in `/metrics`.
 pub const PREFIX: &str = "teseladb_engine_";
@@ -203,10 +209,28 @@ impl EngineProbe {
 
     /// `f(shard)` on every shard, in shard order; the shards that cannot run it any more (the
     /// engine stopped) are left out.
+    ///
+    /// In an engine thread ([`super::stacks`], where the administration port's handlers run)
+    /// the wait parks the engine thread on [`EngineProbe::on_each_future`], so the shard keeps
+    /// running; on a thread that is not a shard it blocks that thread.
+    ///
+    /// # Panics
+    ///
+    /// On a shard outside an engine thread, which cannot wait without stopping its reactor:
+    /// such code awaits [`EngineProbe::on_each_future`] instead.
     pub fn on_each<T: Send + 'static>(
         &self,
         f: impl Fn(u32) -> T + Clone + Send + 'static,
     ) -> Vec<T> {
+        if wait::in_engine_thread() {
+            // A failure is a shard that went away with the engine: nothing to show.
+            return self.on_each_future(f).get().unwrap_or_default();
+        }
+        assert!(
+            wait::this_shard().is_none(),
+            "EngineProbe::on_each on a shard outside an engine thread would stop its reactor"
+        );
+        // Not a shard: `alien` reaches the shards and this thread waits for their answers.
         let mut waits = Vec::with_capacity(usize::from(self.shards));
         for shard in 0..u32::from(self.shards) {
             let (tx, rx) = mpsc::sync_channel(1);
@@ -216,6 +240,29 @@ impl EngineProbe {
             }
         }
         waits.into_iter().filter_map(|rx| rx.recv().ok()).collect()
+    }
+
+    /// `f(shard)` on every shard, in shard order, as a future of the calling shard: each shard
+    /// is reached with `smp::submit_to` and the answers are gathered as they come, as the
+    /// engine's own metrics server gathers every shard's values (`get_map_value`). Runs on a
+    /// shard.
+    pub fn on_each_future<T: Send + 'static>(
+        &self,
+        f: impl Fn(u32) -> T + Clone + Send + 'static,
+    ) -> Future<Vec<T>> {
+        let shards = u32::from(self.shards);
+        let slots: Rc<RefCell<Vec<Option<T>>>> =
+            Rc::new(RefCell::new((0..shards).map(|_| None).collect()));
+        let out = Rc::clone(&slots);
+        let all = parallel_for_each(0..shards, move |shard: u32| {
+            let (f, slots) = (f.clone(), Rc::clone(&slots));
+            Smp::submit_to(shard, move || Ok::<T, ExceptionPtr>(f(shard))).then(move |v: T| {
+                slots.borrow_mut()[shard as usize] = Some(v);
+            })
+        });
+        all.then(move |()| -> Result<Vec<T>, ExceptionPtr> {
+            Ok(out.borrow_mut().drain(..).flatten().collect())
+        })
     }
 
     /// The engine's metrics in Prometheus' text format (`contracts/metrics.md`).

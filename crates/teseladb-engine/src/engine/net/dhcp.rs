@@ -409,6 +409,12 @@ impl IpInfo {
             if m.is_null() || unsafe { (*m).type_ } == opt_type::END {
                 break;
             }
+            // SAFETY: as above; `m` was checked non-null.
+            if unsafe { (*m).type_ } == opt_type::PAD {
+                // A PAD is a single byte, with no length.
+                off += 1;
+                continue;
+            }
             let o = p.get_header::<DhcpOption>(off);
             if o.is_null() {
                 // TODO: report broken packet?
@@ -613,11 +619,19 @@ impl DhcpImpl {
         dhp: *mut DhcpPayload,
         opt_off: usize,
     ) -> Future<()> {
-        // SAFETY: a timer of the client (see `pinned`).
-        unsafe { Self::pinned(&mut self._retry_timer) }.cancel();
-
         // SAFETY: `dhp` points into `p`, which is alive here.
         let h = ntoh_struct(unsafe { &*dhp });
+
+        // A reply to another exchange or another client is not ours (RFC 2131, 4.4.1).
+        let (xid, chaddr) = (h.bootp.xid, h.bootp.chaddr);
+        // SAFETY: the ipv4 layer and its interface outlive the client.
+        let mac = unsafe { &*(*self._stack).netif() }.hw_address().mac;
+        if xid != self._xid || chaddr[..mac.len()] != mac {
+            return make_ready_future(());
+        }
+
+        // SAFETY: a timer of the client (see `pinned`).
+        unsafe { Self::pinned(&mut self._retry_timer) }.cancel();
 
         let mut info = IpInfo::default();
 

@@ -321,9 +321,7 @@ engine_thread_test_case!(simultaneous_open_goes_through_syn_received, {
     assert_eq!(synack.seq, syn.seq);
     assert_eq!(synack.ack, 501);
     // An acknowledgment within SND.UNA..SND.NXT establishes the connection (no listener waits
-    // for it). It acknowledges SND.UNA itself: one that moves SND.UNA would reach the
-    // congestion-window update with the window and threshold never initialized on this path
-    // (the SYN-ACK options are not parsed), which divides by zero.
+    // for it); here it acknowledges SND.UNA itself.
     st.wire.inject(&tcp_frame(&TcpSpec::new(7000, syn.sport, 501, syn.seq, ACK), b""));
     wait(connected).expect("established");
     // The window it advertises opens the send window.
