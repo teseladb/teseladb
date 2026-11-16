@@ -157,7 +157,7 @@ const POLL: Duration = Duration::from_millis(1);
 /// on. `answer` takes a range's index, its part and the answer, and gives the range's next part,
 /// none when the range ended, or `None` to give up. `None` when `send` or `answer` gives up, a
 /// part's sender goes away or `until` passes.
-fn drive<P, R>(
+fn drive<P, R: Send + 'static>(
     first: Vec<P>,
     until: Instant,
     mut send: impl FnMut(&P) -> Option<mpsc::Receiver<R>>,

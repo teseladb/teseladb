@@ -36,7 +36,6 @@ use teseladb_types::{Nanos, NodeId, Rng};
 use super::blocking;
 use super::connect::socket_address;
 use super::core_loop::{BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreLogic, MAX_PENDING};
-use super::offload::off_shard;
 use super::post::{CoreIo, Gate, ShardPost, Wake};
 use super::tls_stream::{self, TlsSession};
 use crate::file_send::FileSend;
@@ -432,24 +431,33 @@ async fn newcomer_request(
     rest: Vec<u8>,
     ctx: &AcceptCtx,
 ) -> Result<(), HandshakeError> {
-    let post = ShardPost::new(ctx.shard, ctx.gate.clone());
     let answer = match (read_frame(s, rest).await?.0, &ctx.opts.join, &ctx.opts.enroll) {
         (PeerMsg::JoinRequest { name, peer_addr, http_addr, native_addr, cores }, Some(j), _) => {
             certified(tls)?;
             let req = JoinRequest { name, peer_addr, http_addr, native_addr, cores };
             let j = j.clone();
-            // The handler waits for Group 0: off the shard.
-            let r = off_shard(&post, "peer-join", move || j(req)).await;
+            // The handler waits for Group 0: in an engine thread, which parks meanwhile.
+            let r = in_engine_thread(move || j(req)).await;
             PeerMsg::JoinResponse(r.unwrap_or_else(|| Err("the node is stopping".into())))
         }
         (PeerMsg::EnrollRequest(req), _, Some(e)) => {
             let e = e.clone();
-            let r = off_shard(&post, "peer-enroll", move || e(req)).await;
+            let r = in_engine_thread(move || e(req)).await;
             PeerMsg::EnrollResponse(r.unwrap_or_else(|| Err("the node is stopping".into())))
         }
         _ => return Err(HandshakeError::UnexpectedFrame),
     };
     send_frame(s, &answer).await
+}
+
+/// Runs `f`, which waits on the cores (a join, an enrollment), in an engine thread of this shard
+/// (023 FR-026): its waits park the thread and the shard goes on. `None` when no engine thread
+/// could be made or `f` panicked.
+async fn in_engine_thread<T: 'static>(f: impl FnOnce() -> T + 'static) -> Option<T> {
+    let out = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&out);
+    let ran = super::stacks::run(Box::new(move || *slot.borrow_mut() = Some(f()))).await;
+    ran.ok().and_then(|()| out.borrow_mut().take())
 }
 
 /// Hands an accepted connection to the core it names: on this shard, or relayed to the core's.

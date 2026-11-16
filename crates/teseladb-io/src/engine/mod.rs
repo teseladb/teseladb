@@ -45,8 +45,6 @@ mod driver;
 pub mod link;
 #[cfg(target_os = "linux")]
 mod node_engine;
-#[cfg(target_os = "linux")]
-mod offload;
 pub mod options;
 #[cfg(target_os = "linux")]
 mod peers;

@@ -459,7 +459,7 @@ impl ServerBackend {
         }
     }
 
-    fn ask<T>(
+    fn ask<T: Send + 'static>(
         &self,
         core: usize,
         msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg,

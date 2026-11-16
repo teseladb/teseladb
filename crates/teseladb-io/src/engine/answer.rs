@@ -1,43 +1,69 @@
-//! The answers of the cores to whoever asked (023 FR-018): a channel with the methods of the
-//! standard library's `mpsc` channel, whose receiving side waits by parking its engine thread
-//! ([`super::wait`]) when it runs in one and blocks its thread otherwise. A core answers from its
-//! shard; the answer reaches a waiting shard as one `smp` message, and none when the receiver is
-//! not parked (it takes the answer when it next looks).
+//! The answers of the cores to whoever asked (023 FR-018, FR-026): a channel with the methods of
+//! the standard library's `mpsc` channel, any number of senders and one receiver, with no lock
+//! shared between threads.
 //!
-//! Any number of senders, one receiver. The receiver sees the channel closed once every sender
-//! is gone and nothing is left in it; a send after the receiver is gone gives the value back.
+//! A channel made on a shard (by a command, a handler or a task in an engine thread, or by a task
+//! of the shard for one of them) keeps its answers on that shard: a sender on the shard puts its
+//! answer there at once, a sender anywhere else sends it there as one `smp` message (`alien` from
+//! a thread that is not a shard), and the receiver waits by parking its engine thread
+//! ([`super::wait`]), so the shard runs its other work meanwhile. Its receiver is used on that
+//! shard only.
+//!
+//! A channel made on a thread that is not a shard (the process's own thread before and after its
+//! engine, a command of the command line, the unit tests) is the standard library's channel,
+//! whose receiver blocks its thread.
+//!
+//! The receiver sees the channel closed once every sender is gone and nothing is left in it or on
+//! its way; a send after the receiver is gone gives the value back.
 
-use std::collections::VecDeque;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-
+use std::sync::mpsc;
 /// The errors of the standard library's channel, which this one gives the same way.
 pub use std::sync::mpsc::{RecvError, RecvTimeoutError, SendError, TryRecvError};
 use std::time::{Duration, Instant};
 
-use super::wait::Waiter;
+use super::wait;
 
-struct Chan<T> {
-    queue: Mutex<VecDeque<T>>,
+/// What both sides of a channel kept on a shard share, wherever each runs.
+#[derive(Debug)]
+struct Shared {
+    /// Senders alive.
     senders: AtomicUsize,
+    /// Answers sent from another thread that have not reached the shard yet.
+    in_flight: AtomicUsize,
+    /// Whether the receiver is alive.
     receiver: AtomicBool,
-    waiter: Waiter,
+    /// Whether the receiver is parked waiting: the last sender that goes wakes it.
+    waiting: AtomicBool,
 }
 
-impl<T> Chan<T> {
-    fn queue(&self) -> std::sync::MutexGuard<'_, VecDeque<T>> {
-        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+/// Where a channel keeps its answers.
+enum Route<T> {
+    /// On shard `shard`, in its slot `id`.
+    Shard { shard: u32, id: u64, shared: Arc<Shared>, _of: PhantomData<fn(T) -> T> },
+    /// In a channel of the standard library (a thread that is not a shard).
+    Thread(mpsc::Sender<T>),
 }
 
 /// The sending side of an answer channel; cheap to clone, usable from any thread.
 pub struct Sender<T> {
-    chan: Arc<Chan<T>>,
+    route: Route<T>,
 }
 
 /// The receiving side of an answer channel.
 pub struct Receiver<T> {
-    chan: Arc<Chan<T>>,
+    inner: Inner<T>,
+}
+
+enum Inner<T> {
+    Shard { shard: u32, id: u64, shared: Arc<Shared>, _of: PhantomData<fn(T) -> T> },
+    Thread(mpsc::Receiver<T>),
 }
 
 impl<T> std::fmt::Debug for Sender<T> {
@@ -52,56 +78,192 @@ impl<T> std::fmt::Debug for Receiver<T> {
     }
 }
 
-/// A new answer channel.
-pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let chan = Arc::new(Chan {
-        queue: Mutex::new(VecDeque::new()),
-        senders: AtomicUsize::new(1),
-        receiver: AtomicBool::new(true),
-        waiter: Waiter::default(),
-    });
-    (Sender { chan: Arc::clone(&chan) }, Receiver { chan })
+/// The answers of the channels kept on this shard, by slot.
+mod slots {
+    use super::{Any, Cell, HashMap, Rc, RefCell, VecDeque};
+
+    /// One channel's answers on its shard, and the engine thread parked on them.
+    pub(super) struct Slot<T> {
+        pub(super) queue: RefCell<VecDeque<T>>,
+        /// The parking number of the receiver's engine thread, 0 when it is not parked.
+        pub(super) parked: Rc<Cell<u64>>,
+    }
+
+    /// A slot of any type, with its parking number where code that does not know the type
+    /// reads it.
+    struct Entry {
+        parked: Rc<Cell<u64>>,
+        slot: Rc<dyn Any>,
+    }
+
+    thread_local! {
+        static SLOTS: RefCell<(u64, HashMap<u64, Entry>)> = RefCell::new((0, HashMap::new()));
+    }
+
+    /// Opens a slot on this shard; its number.
+    pub(super) fn open<T: 'static>() -> u64 {
+        let parked = Rc::new(Cell::new(0));
+        let slot = Rc::new(Slot::<T> {
+            queue: RefCell::new(VecDeque::new()),
+            parked: Rc::clone(&parked),
+        });
+        SLOTS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.0 += 1;
+            let id = s.0;
+            s.1.insert(id, Entry { parked, slot });
+            id
+        })
+    }
+
+    /// Slot `id` of this shard, if it is still open.
+    pub(super) fn get<T: 'static>(id: u64) -> Option<Rc<Slot<T>>> {
+        let slot = SLOTS.with(|s| s.borrow().1.get(&id).map(|e| Rc::clone(&e.slot)))?;
+        slot.downcast::<Slot<T>>().ok()
+    }
+
+    /// Closes slot `id`: the answers left in it go with it.
+    pub(super) fn close(id: u64) {
+        let gone = SLOTS.with(|s| s.borrow_mut().1.remove(&id));
+        drop(gone);
+    }
+
+    /// Puts `value` in slot `id` and wakes its receiver; dropped when the slot is closed.
+    pub(super) fn deliver<T: 'static>(id: u64, value: T) {
+        if let Some(slot) = get::<T>(id) {
+            slot.queue.borrow_mut().push_back(value);
+            wake(id);
+        }
+    }
+
+    /// Wakes the receiver of slot `id` if it is parked.
+    pub(super) fn wake(id: u64) {
+        let parked = SLOTS.with(|s| s.borrow().1.get(&id).map_or(0, |e| e.parked.get()));
+        if parked != 0 {
+            crate::engine::wait::wake_parked(parked);
+        }
+    }
 }
 
-impl<T> Sender<T> {
+/// A new answer channel: kept on this shard when made on one, the standard library's otherwise.
+pub fn channel<T: Send + 'static>() -> (Sender<T>, Receiver<T>) {
+    let Some(shard) = wait::this_shard() else {
+        let (tx, rx) = mpsc::channel();
+        return (Sender { route: Route::Thread(tx) }, Receiver { inner: Inner::Thread(rx) });
+    };
+    let id = slots::open::<T>();
+    let shared = Arc::new(Shared {
+        senders: AtomicUsize::new(1),
+        in_flight: AtomicUsize::new(0),
+        receiver: AtomicBool::new(true),
+        waiting: AtomicBool::new(false),
+    });
+    let tx = Route::Shard { shard, id, shared: Arc::clone(&shared), _of: PhantomData };
+    let rx = Inner::Shard { shard, id, shared, _of: PhantomData };
+    (Sender { route: tx }, Receiver { inner: rx })
+}
+
+impl<T: Send + 'static> Sender<T> {
     /// Hands `value` to the receiver.
     ///
     /// # Errors
     ///
     /// Gives `value` back when the receiver is gone.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        if !self.chan.receiver.load(Ordering::Acquire) {
+        let (shard, id, shared) = match &self.route {
+            Route::Thread(tx) => return tx.send(value),
+            Route::Shard { shard, id, shared, .. } => (*shard, *id, shared),
+        };
+        if !shared.receiver.load(Ordering::Acquire) {
             return Err(SendError(value));
         }
-        self.chan.queue().push_back(value);
-        self.chan.waiter.notify();
+        if wait::this_shard() == Some(shard) {
+            slots::deliver(id, value);
+            return Ok(());
+        }
+        // Counted before it leaves: the receiver does not see the channel closed while an answer
+        // is on its way.
+        shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        let arrived = Arc::clone(shared);
+        let posted = wait::post(
+            shard,
+            Box::new(move || {
+                slots::deliver(id, value);
+                arrived.in_flight.fetch_sub(1, Ordering::SeqCst);
+            }),
+        );
+        if !posted {
+            // No engine runs any more: the receiver's shard went with it, and its receiver.
+            shared.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Sender<T> {
-        self.chan.senders.fetch_add(1, Ordering::AcqRel);
-        Sender { chan: Arc::clone(&self.chan) }
+        let route = match &self.route {
+            Route::Thread(tx) => Route::Thread(tx.clone()),
+            Route::Shard { shard, id, shared, .. } => {
+                shared.senders.fetch_add(1, Ordering::SeqCst);
+                Route::Shard {
+                    shard: *shard,
+                    id: *id,
+                    shared: Arc::clone(shared),
+                    _of: PhantomData,
+                }
+            }
+        };
+        Sender { route }
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        if self.chan.senders.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // The receiver learns that nothing more comes.
-            self.chan.waiter.notify();
+        let Route::Shard { shard, id, shared, .. } = &self.route else { return };
+        if shared.senders.fetch_sub(1, Ordering::SeqCst) != 1 {
+            return;
+        }
+        // The last one: a receiver parked with nothing on its way learns that nothing more comes.
+        // An answer on its way wakes it when it arrives.
+        if !shared.waiting.load(Ordering::SeqCst) || shared.in_flight.load(Ordering::SeqCst) != 0 {
+            return;
+        }
+        let (shard, id) = (*shard, *id);
+        let wake = move || slots::wake(id);
+        if wait::this_shard() == Some(shard) {
+            wake();
+        } else {
+            let _ = wait::post(shard, Box::new(wake));
         }
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.chan.receiver.store(false, Ordering::Release);
+        let Inner::Shard { shard, id, shared, .. } = &self.inner else { return };
+        shared.receiver.store(false, Ordering::Release);
+        let (shard, id) = (*shard, *id);
+        if wait::this_shard() == Some(shard) {
+            slots::close(id);
+        } else {
+            let _ = wait::post(shard, Box::new(move || slots::close(id)));
+        }
     }
 }
 
-impl<T> Receiver<T> {
+impl<T: Send + 'static> Receiver<T> {
+    /// This receiver's slot, on its shard.
+    ///
+    /// # Panics
+    ///
+    /// Off its shard: its answers are kept there.
+    fn slot(shard: u32, id: u64) -> Option<Rc<slots::Slot<T>>> {
+        let here = wait::this_shard();
+        assert_eq!(here, Some(shard), "an answer kept on shard {shard} is received on {here:?}");
+        slots::get::<T>(id)
+    }
+
     /// The next answer, if one is there.
     ///
     /// # Errors
@@ -109,31 +271,61 @@ impl<T> Receiver<T> {
     /// [`TryRecvError::Empty`] when none is there yet, [`TryRecvError::Disconnected`] when none
     /// will come.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        if let Some(v) = self.chan.queue().pop_front() {
+        let (shard, id, shared) = match &self.inner {
+            Inner::Thread(rx) => return rx.try_recv(),
+            Inner::Shard { shard, id, shared, .. } => (*shard, *id, shared),
+        };
+        let Some(slot) = Self::slot(shard, id) else { return Err(TryRecvError::Disconnected) };
+        if let Some(v) = slot.queue.borrow_mut().pop_front() {
             return Ok(v);
         }
-        if self.chan.senders.load(Ordering::Acquire) == 0 {
-            // A value sent just before the last sender went is taken first.
-            return self.chan.queue().pop_front().ok_or(TryRecvError::Disconnected);
+        // The senders first: an answer counted on its way before the last one went is seen.
+        if shared.senders.load(Ordering::SeqCst) == 0
+            && shared.in_flight.load(Ordering::SeqCst) == 0
+        {
+            // An answer that arrived meanwhile on this shard is taken first.
+            return slot.queue.borrow_mut().pop_front().ok_or(TryRecvError::Disconnected);
         }
         Err(TryRecvError::Empty)
     }
 
     /// Waits for the next answer until `until` (`None`: no limit).
     fn recv_until(&self, until: Option<Instant>) -> Result<T, RecvTimeoutError> {
+        let (shard, id, shared) = match &self.inner {
+            Inner::Thread(rx) => return thread_recv(rx, until),
+            Inner::Shard { shard, id, shared, .. } => (*shard, *id, shared),
+        };
         loop {
             match self.try_recv() {
                 Ok(v) => return Ok(v),
                 Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
                 Err(TryRecvError::Empty) => {}
             }
-            if !self.chan.waiter.wait(until) {
-                // The deadline passed: an answer that came at the same time is still taken.
-                return self.try_recv().map_err(|e| match e {
-                    TryRecvError::Empty => RecvTimeoutError::Timeout,
-                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
-                });
+            if until.is_some_and(|u| Instant::now() >= u) {
+                return Err(RecvTimeoutError::Timeout);
             }
+            let here = wait::engine_thread_shard();
+            assert_eq!(
+                here,
+                Some(shard),
+                "an answer is awaited on shard {shard} outside an engine thread: it would block \
+                 the shard that delivers it"
+            );
+            let Some(slot) = slots::get::<T>(id) else {
+                return Err(RecvTimeoutError::Disconnected);
+            };
+            let p = wait::begin_park();
+            slot.parked.set(wait::parking_id(&p));
+            shared.waiting.store(true, Ordering::SeqCst);
+            // The last sender may have gone between the look above and `waiting`: it saw nobody
+            // waiting, so this side looks again instead of parking.
+            if shared.senders.load(Ordering::SeqCst) == 0 {
+                wait::cancel_park(p);
+            } else {
+                wait::finish_park(p, until);
+            }
+            shared.waiting.store(false, Ordering::SeqCst);
+            slot.parked.set(0);
         }
     }
 
@@ -173,6 +365,14 @@ impl<T> Receiver<T> {
     /// The answers until the channel closes, waiting for each.
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
         std::iter::from_fn(move || self.recv().ok())
+    }
+}
+
+/// A wait of a thread that is not a shard on the standard library's channel.
+fn thread_recv<T>(rx: &mpsc::Receiver<T>, until: Option<Instant>) -> Result<T, RecvTimeoutError> {
+    match until {
+        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        Some(u) => rx.recv_timeout(u.saturating_duration_since(Instant::now())),
     }
 }
 
@@ -223,6 +423,14 @@ mod tests {
     }
 
     #[test]
+    fn a_deadline_that_passed_still_takes_an_answer_that_is_there() {
+        let (tx, rx) = channel::<u8>();
+        tx.send(4).unwrap();
+        assert_eq!(rx.recv_deadline(Instant::now()), Ok(4));
+        assert_eq!(rx.recv_deadline(Instant::now()), Err(RecvTimeoutError::Timeout));
+    }
+
+    #[test]
     fn many_senders_on_many_threads_deliver_everything() {
         let (tx, rx) = channel::<u32>();
         let threads: Vec<_> = (0..4)
@@ -244,5 +452,20 @@ mod tests {
         assert_eq!(got.len(), 1000);
         assert_eq!(got[0], 0);
         assert_eq!(got[999], 3249);
+    }
+
+    #[test]
+    fn a_slot_keeps_its_answers_until_it_closes() {
+        // The slots of a shard, used here from the test's thread as a shard uses them.
+        let id = slots::open::<u16>();
+        slots::deliver(id, 5u16);
+        let slot = slots::get::<u16>(id).expect("open");
+        assert_eq!(slot.queue.borrow().len(), 1);
+        assert!(slots::get::<u32>(id).is_none(), "another type is not this slot");
+        slots::close(id);
+        assert!(slots::get::<u16>(id).is_none());
+        // An answer that arrives after the close is dropped.
+        slots::deliver(id, 6u16);
+        assert!(slots::get::<u16>(id).is_none());
     }
 }

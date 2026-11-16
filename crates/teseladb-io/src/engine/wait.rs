@@ -1,9 +1,14 @@
-//! Waiting on the engine from code that is written to block (023 FR-018, FR-019): the commands
-//! of the clients' port run in engine threads ([`super::stacks`]) and wait for the cores'
-//! answers ([`super::answer`]) or for a pause ([`sleep`]) by parking their engine thread, so the
-//! shard runs its other connections meanwhile. The same calls block an ordinary thread (the HTTP
-//! and administration ports until they move to the engine, and every thread outside Linux), so
-//! the code that waits does not know where it runs.
+//! Waiting on the engine from code that is written to block (023 FR-018, FR-019, FR-026): the
+//! commands of the clients' port, the handlers of the node's ports and the shards' periodic tasks
+//! run in engine threads ([`super::stacks`]) and wait for the cores' answers ([`super::answer`]),
+//! for a notification ([`Waiter`]) or for a pause ([`sleep`]) by parking their engine thread, so
+//! the shard runs its other work meanwhile. Nothing here takes a lock shared between threads: a
+//! notification reaches a parked engine thread as one `smp` message to its shard.
+//!
+//! A thread that is not a shard (the process's own thread before and after its engine, a command
+//! of the command line, the unit tests) has no engine thread to park: [`sleep`] sleeps, and a
+//! [`Waiter`] looks again every [`THREAD_POLL`]; the answers it waits for go through a channel of
+//! the standard library ([`super::answer`]).
 //!
 //! An engine thread that parks hands the shard to the other engine threads of the shard, which
 //! share its thread-local state. A process sets [`set_switch_hooks`] once with what saves the
@@ -14,8 +19,12 @@
 //! instantiated where they are written).
 
 use std::any::Any;
-use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// How often a thread that is not a shard looks at a [`Waiter`] it waits on.
+pub const THREAD_POLL: Duration = Duration::from_millis(1);
 
 /// What saves the thread-local state of a command before its engine thread parks and gives it
 /// back when it resumes.
@@ -45,6 +54,11 @@ pub fn in_engine_thread() -> bool {
     rt::engine_thread_shard().is_some()
 }
 
+/// The shard of the engine thread this code runs in, if it runs in one.
+pub(crate) fn engine_thread_shard() -> Option<u32> {
+    rt::engine_thread_shard()
+}
+
 /// Runs `f` on `shard`: from a shard with `smp::submit_to`, from any other thread with `alien`.
 /// `false` (and `f` dropped) when no engine runs in the process.
 pub fn post(shard: u32, f: Box<dyn FnOnce() + Send>) -> bool {
@@ -59,6 +73,36 @@ pub fn sleep(d: Duration) {
     }
     let p = rt::begin_park();
     rt::finish_park(p, Some(Instant::now() + d));
+}
+
+/// An engine thread about to park, by its number on its shard.
+pub(crate) use rt::Parking;
+
+/// Registers the running engine thread to park; it parks with [`finish_park`] or gives up with
+/// [`cancel_park`]. Only in an engine thread.
+pub(crate) fn begin_park() -> Parking {
+    rt::begin_park()
+}
+
+/// The number on its shard that [`wake_parked`] wakes `p` by.
+pub(crate) fn parking_id(p: &Parking) -> u64 {
+    p.id
+}
+
+/// Parks until [`wake_parked`] names it or `until` passes; the command's thread-local state is
+/// saved meanwhile.
+pub(crate) fn finish_park(p: Parking, until: Option<Instant>) {
+    rt::finish_park(p, until);
+}
+
+/// Gives up a park registered with [`begin_park`] without parking.
+pub(crate) fn cancel_park(p: Parking) {
+    rt::cancel_park(p);
+}
+
+/// Wakes the engine thread of this shard parked as `id`, if it still is.
+pub(crate) fn wake_parked(id: u64) {
+    rt::wake_parked(id);
 }
 
 #[cfg(target_os = "linux")]
@@ -109,11 +153,10 @@ mod rt {
 
     /// An engine thread about to park: its number on the shard, which a notification names.
     pub(crate) struct Parking {
-        pub(super) id: u64,
+        pub(crate) id: u64,
         wake: Rc<Wake>,
     }
 
-    /// Registers the running engine thread to park.
     pub(super) fn begin_park() -> Parking {
         let wake = Rc::new(Wake::default());
         let id = PARKED.with(|p| {
@@ -126,7 +169,6 @@ mod rt {
         Parking { id, wake }
     }
 
-    /// Wakes the engine thread of this shard parked as `id`, if it still is.
     pub(super) fn wake_parked(id: u64) {
         let wake = PARKED.with(|p| p.borrow().1.get(&id).cloned());
         if let Some(w) = wake {
@@ -134,8 +176,10 @@ mod rt {
         }
     }
 
-    /// Parks until [`wake_parked`] or `until`; the command's thread-local state is saved
-    /// meanwhile.
+    pub(super) fn cancel_park(p: Parking) {
+        PARKED.with(|q| q.borrow_mut().1.remove(&p.id));
+    }
+
     pub(super) fn finish_park(p: Parking, until: Option<Instant>) {
         let saved = HOOKS.get().map(|h| (h, (h.save)()));
         let mut timer = until.map(|at| {
@@ -158,108 +202,114 @@ mod rt {
         if let Some(t) = timer.as_mut() {
             t.as_mut().cancel();
         }
-        PARKED.with(|q| q.borrow_mut().1.remove(&p.id));
+        cancel_park(p);
         if let Some((h, state)) = saved {
             (h.restore)(state);
         }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn parking_id(p: &rt::Parking) -> u64 {
-    p.id
-}
+/// Outside Linux there is no engine (D3): no thread is a shard, so nothing parks.
+#[cfg(not(target_os = "linux"))]
+mod rt {
+    use std::time::Instant;
 
-/// Who waits on a [`Waiter`].
-#[derive(Debug, Clone, Copy)]
-enum Parked {
-    Nobody,
-    /// An ordinary thread, on the condition variable.
-    Thread,
-    /// An engine thread of `shard`, parked as `id`.
-    Shard {
-        shard: u32,
-        id: u64,
-    },
-}
-
-#[derive(Debug)]
-struct State {
-    /// Set by [`Waiter::notify`], taken by a wait that returns.
-    ready: bool,
-    parked: Parked,
-}
-
-/// One waiting side and any number of notifying ones, on any threads: the receiving side of an
-/// answer. A notification while nobody waits is kept for the next wait; one while an engine
-/// thread waits goes to its shard as one message, and none when the waiter is already awake.
-#[derive(Debug)]
-pub struct Waiter {
-    st: Mutex<State>,
-    cv: Condvar,
-}
-
-impl Default for Waiter {
-    fn default() -> Waiter {
-        Waiter {
-            st: Mutex::new(State { ready: false, parked: Parked::Nobody }),
-            cv: Condvar::new(),
-        }
+    pub(super) fn this_shard() -> Option<u32> {
+        None
     }
+
+    pub(super) fn engine_thread_shard() -> Option<u32> {
+        None
+    }
+
+    pub(super) fn post(_shard: u32, _f: Box<dyn FnOnce() + Send>) -> bool {
+        false
+    }
+
+    /// Never made: no thread is an engine thread.
+    #[allow(dead_code, reason = "no engine thread outside Linux, so nothing parks")]
+    pub(crate) struct Parking {
+        pub(crate) id: u64,
+    }
+
+    pub(super) fn begin_park() -> Parking {
+        unreachable!("no engine thread outside Linux")
+    }
+
+    pub(super) fn wake_parked(_id: u64) {}
+
+    pub(super) fn cancel_park(_p: Parking) {}
+
+    pub(super) fn finish_park(_p: Parking, _until: Option<Instant>) {
+        unreachable!("no engine thread outside Linux")
+    }
+}
+
+/// Bits of [`Waiter`]'s parked word that hold the parking number; the shard goes above them.
+const ID_BITS: u32 = 40;
+const ID_MASK: u64 = (1 << ID_BITS) - 1;
+
+/// The parked word of the engine thread of `shard` parked as `id` (never 0: numbers start at 1).
+fn parked_word(shard: u32, id: u64) -> u64 {
+    (u64::from(shard) << ID_BITS) | (id & ID_MASK)
+}
+
+/// One waiting side and any number of notifying ones, on any threads (the stop and the wake of a
+/// shard's task). A notification while nobody waits is kept for the next wait; one while an
+/// engine thread waits goes to its shard as one message, and none when the waiter is already
+/// awake. Two atomic words, no lock: `ready` says a notification came, `parked` names the engine
+/// thread waiting (its shard and number), 0 when none does.
+#[derive(Debug, Default)]
+pub struct Waiter {
+    ready: AtomicBool,
+    parked: AtomicU64,
 }
 
 impl Waiter {
     /// Wakes the waiting side (or the next wait).
     pub fn notify(&self) {
-        let parked = {
-            let mut st = self.st.lock().unwrap_or_else(PoisonError::into_inner);
-            st.ready = true;
-            std::mem::replace(&mut st.parked, Parked::Nobody)
-        };
-        match parked {
-            Parked::Nobody => {}
-            Parked::Thread => self.cv.notify_all(),
-            Parked::Shard { shard, id } => {
-                // A shard that is gone has nobody to wake.
-                let _ = rt::post(shard, Box::new(move || rt::wake_parked(id)));
-            }
+        // Sequentially consistent with the waiter's store of `parked` and load of `ready`: either
+        // the notifier sees the parked thread, or the waiter sees the notification.
+        self.ready.store(true, Ordering::SeqCst);
+        let word = self.parked.swap(0, Ordering::SeqCst);
+        if word != 0 {
+            let shard = u32::try_from(word >> ID_BITS).unwrap_or(u32::MAX);
+            let id = word & ID_MASK;
+            // A shard that is gone has nobody to wake.
+            let _ = rt::post(shard, Box::new(move || rt::wake_parked(id)));
         }
     }
 
     /// Waits for a notification until `until` (`None`: no limit); whether one came. Takes it.
     pub fn wait(&self, until: Option<Instant>) -> bool {
         loop {
-            let mut st = self.st.lock().unwrap_or_else(PoisonError::into_inner);
-            if std::mem::take(&mut st.ready) {
+            if self.ready.swap(false, Ordering::SeqCst) {
                 return true;
             }
-            if until.is_some_and(|u| Instant::now() >= u) {
+            let now = Instant::now();
+            if until.is_some_and(|u| now >= u) {
                 return false;
             }
-            if let Some(shard) = rt::engine_thread_shard() {
-                let p = rt::begin_park();
-                let id = parking_id(&p);
-                st.parked = Parked::Shard { shard, id };
-                drop(st);
-                rt::finish_park(p, until);
-                let mut st = self.st.lock().unwrap_or_else(PoisonError::into_inner);
-                if matches!(st.parked, Parked::Shard { id: i, .. } if i == id) {
-                    st.parked = Parked::Nobody;
-                }
+            let Some(shard) = rt::engine_thread_shard() else {
+                // A thread that is not a shard looks again shortly.
+                let left = until.map_or(THREAD_POLL, |u| u.saturating_duration_since(now));
+                std::thread::sleep(left.min(THREAD_POLL));
+                continue;
+            };
+            let p = rt::begin_park();
+            let word = parked_word(shard, p.id);
+            self.parked.store(word, Ordering::SeqCst);
+            // A notification that came before the store found nobody to wake: take it back
+            // unless the notifier already took the word (its wake is then on its way).
+            if self.ready.load(Ordering::SeqCst)
+                && self.parked.compare_exchange(word, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            {
+                rt::cancel_park(p);
                 continue;
             }
-            st.parked = Parked::Thread;
-            let st = match until {
-                None => self.cv.wait(st).unwrap_or_else(PoisonError::into_inner),
-                Some(u) => {
-                    let left = u.saturating_duration_since(Instant::now());
-                    self.cv.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0
-                }
-            };
-            let mut st = st;
-            if matches!(st.parked, Parked::Thread) {
-                st.parked = Parked::Nobody;
-            }
+            rt::finish_park(p, until);
+            // Woken by the deadline: nobody is parked here any more.
+            let _ = self.parked.compare_exchange(word, 0, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 }
@@ -307,9 +357,29 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_that_is_not_a_shard_parks_nobody() {
+        // Its wait never names a parked engine thread, so a notification posts nothing.
+        let w = Waiter::default();
+        assert!(!w.wait(Some(Instant::now() + THREAD_POLL * 3)));
+        assert_eq!(w.parked.load(Ordering::SeqCst), 0);
+        w.notify();
+        assert!(w.ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_parked_word_keeps_the_shard_and_the_number_apart() {
+        let word = parked_word(7, 42);
+        assert_ne!(word, 0);
+        assert_eq!(word >> ID_BITS, 7);
+        assert_eq!(word & ID_MASK, 42);
+        assert_ne!(parked_word(0, 1), 0, "shard 0's first park is not 'nobody'");
+    }
+
+    #[test]
     fn outside_the_engine_a_sleep_sleeps_and_nothing_is_posted() {
         assert!(!in_engine_thread());
         assert_eq!(this_shard(), None);
+        assert_eq!(engine_thread_shard(), None);
         let start = Instant::now();
         sleep(Duration::from_millis(5));
         assert!(start.elapsed() >= Duration::from_millis(5));

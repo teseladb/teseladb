@@ -259,6 +259,30 @@ printf '\n[dev-dependencies.teseladb]\npath = "../teseladb-engine"\n' >> "$d/cra
 expect "the engine's dependency in a table of its own" "$d" 1 \
   "crates/teseladb-io/Cargo.toml: the engine's dependency in a table of its own"
 
+# The I/O crates start no thread of their own (023 FR-026, T067): a `thread::spawn` or a
+# `thread::Builder` outside their tests and the admitted files is a finding.
+for spawn in "std::thread::spawn(|| ());" "std::thread::Builder::new().spawn(|| ());"; do
+  d=$(fixture engine-thread)
+  printf 'pub fn f() {\n    %s\n}\n' "$spawn" >> "$d/crates/teseladb-io/src/lib.rs"
+  expect "a thread of its own: $spawn" "$d" 1 \
+    "crates/teseladb-io/src/lib.rs:[0-9]+: .*a thread of its own in an I/O crate"
+done
+d=$(fixture engine-thread-test)
+printf '#[cfg(test)]\nmod tests {\n    fn t() {\n        std::thread::spawn(|| ());\n    }\n}\n' \
+  >> "$d/crates/teseladb-io/src/lib.rs"
+expect "threads in the tests of an I/O crate" "$d" 0 "^check-deps: OK$"
+d=$(fixture engine-thread-admitted)
+mkdir -p "$d/crates/teseladb-io/src/engine"
+printf 'pub fn start() {\n    std::thread::Builder::new().name("engine".into());\n}\n' \
+  > "$d/crates/teseladb-io/src/engine/node_engine.rs"
+expect "the thread the engine runs on" "$d" 0 "^check-deps: OK$"
+d=$(fixture engine-thread-gone)
+mkdir -p "$d/crates/teseladb-io/src/engine"
+printf 'pub fn f() {\n    std::thread::Builder::new().name("peer-join".into());\n}\n' \
+  > "$d/crates/teseladb-io/src/engine/offload.rs"
+expect "the peer layer's calls run in engine threads" "$d" 1 \
+  "crates/teseladb-io/src/engine/offload.rs:2: .*a thread of its own in an I/O crate"
+
 # --needed reads the NEEDED entries of a release binary (023 SC-015): only on Linux, with readelf
 # and a C compiler to make the binaries.
 d=$(fixture needed)

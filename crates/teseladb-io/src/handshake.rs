@@ -19,11 +19,11 @@ use crate::peer::{
 };
 use crate::secure::{Channel, PeerTls};
 
-/// Answers a `JoinRequest` (the acceptor calls it off its shard, so it may block until the
-/// cluster decides).
+/// Answers a `JoinRequest` (the acceptor calls it in an engine thread of its shard, so it may wait
+/// until the cluster decides: the thread parks and the shard goes on).
 pub type JoinHandler = Arc<dyn Fn(JoinRequest) -> Result<JoinAccepted, String> + Send + Sync>;
 
-/// Answers an [`EnrollRequest`] (013 FR-005), off the shard like a join.
+/// Answers an [`EnrollRequest`] (013 FR-005), in an engine thread like a join.
 pub type EnrollHandler = Arc<dyn Fn(EnrollRequest) -> Result<EnrollAccepted, String> + Send + Sync>;
 
 /// What a node that joins says about itself (`JoinRequest`).

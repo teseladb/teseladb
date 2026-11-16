@@ -235,8 +235,10 @@ fn an_accepted_join(e: &NodeEngine) {
     let answer = accepted.clone();
     let handler: JoinHandler = Arc::new(move |req| {
         assert_eq!(req, join_request());
-        // The handler may wait for the cluster: off the shard.
-        thread::sleep(Duration::from_millis(50));
+        // The handler may wait for the cluster: in an engine thread, which parks meanwhile
+        // (023 FR-026).
+        assert!(teseladb_io::engine::wait::in_engine_thread());
+        teseladb_io::engine::wait::sleep(Duration::from_millis(50));
         Ok(answer.clone())
     });
     let a = acceptor_only(e, AcceptorOptions { join: Some(handler), ..AcceptorOptions::default() });

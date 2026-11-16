@@ -16,7 +16,6 @@ use teseladb::engine::core::reactor::internal_misc::run_in_background;
 use teseladb::engine::core::scheduling::SchedulingGroup;
 use teseladb::engine::core::thread::{Thread, ThreadAttributes};
 use teseladb_io::IoClass;
-use teseladb_io::engine::answer;
 use teseladb_io::engine::disk::IoGroups;
 use teseladb_io::engine::stacks;
 use teseladb_io::engine::wait::Waiter;
@@ -56,11 +55,43 @@ impl TaskStop {
     }
 }
 
+/// The end of a task, which whoever stops it waits for from any thread: an engine thread parks,
+/// any other looks again every `wait::THREAD_POLL` (023 FR-026).
+#[derive(Debug, Default)]
+struct Ended {
+    done: AtomicBool,
+    waiter: Waiter,
+}
+
+impl Ended {
+    fn wait_until(&self, until: Option<Instant>) -> bool {
+        loop {
+            if self.done.load(Ordering::Acquire) {
+                return true;
+            }
+            if !self.waiter.wait(until) {
+                return self.done.load(Ordering::Acquire);
+            }
+        }
+    }
+}
+
+/// Marks its task ended when dropped: when the body returns, panics, or is dropped unrun (no
+/// engine thread could be made for it).
+struct EndGuard(Arc<Ended>);
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::Release);
+        self.0.waiter.notify();
+    }
+}
+
 /// A task of a shard: its stop and the end it signals.
 #[derive(Debug)]
 pub struct Task {
     stop: Arc<TaskStop>,
-    ended: answer::Receiver<()>,
+    ended: Arc<Ended>,
 }
 
 impl Task {
@@ -72,40 +103,44 @@ impl Task {
     /// Stops it and waits up to [`TASK_STOP_LIMIT`] for it to end; whether it did.
     pub fn stop(self) -> bool {
         self.stop.stop();
-        // A task that ended drops its sender: the wait ends either way.
-        !matches!(self.ended.recv_timeout(TASK_STOP_LIMIT), Err(answer::RecvTimeoutError::Timeout))
+        self.ended.wait_until(Instant::now().checked_add(TASK_STOP_LIMIT))
+    }
+
+    /// A task and the guard its body drops when it ends.
+    fn new() -> (Task, EndGuard) {
+        let ended = Arc::new(Ended::default());
+        let guard = EndGuard(Arc::clone(&ended));
+        (Task { stop: Arc::default(), ended }, guard)
     }
 }
 
 /// Runs `body` in an engine thread of `shard` until it returns; `None` when no engine runs.
 pub fn spawn(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task> {
-    let stop = Arc::new(TaskStop::default());
-    let (tx, ended) = answer::channel::<()>();
-    let s = Arc::clone(&stop);
+    let (task, guard) = Task::new();
+    let s = task.handle();
     let posted = teseladb_io::engine::wait::post(
         shard,
         Box::new(move || {
             drop(teseladb_io::engine::stacks::run(Box::new(move || {
+                let _ended = guard;
                 body(&s);
-                let _ = tx.send(());
             })));
         }),
     );
-    posted.then_some(Task { stop, ended })
+    posted.then_some(task)
 }
 
 /// Runs `body` on a thread of the unit tests, which have no engine: the same [`Task`] a shard's
 /// gives.
 #[cfg(test)]
 pub(crate) fn on_thread(body: Box<dyn FnOnce(&TaskStop) + Send>) -> Task {
-    let stop = Arc::new(TaskStop::default());
-    let (tx, ended) = answer::channel::<()>();
-    let s = Arc::clone(&stop);
+    let (task, guard) = Task::new();
+    let s = task.handle();
     std::thread::spawn(move || {
+        let _ended = guard;
         body(&s);
-        let _ = tx.send(());
     });
-    Task { stop, ended }
+    task
 }
 
 /// Runs `body` in an engine thread of `shard` in the background's scheduling group until it
@@ -113,22 +148,21 @@ pub(crate) fn on_thread(body: Box<dyn FnOnce(&TaskStop) + Send>) -> Task {
 /// shard's CPU and disk only in the background's share, behind the clients' commands. `None` when
 /// no engine runs.
 pub fn spawn_background(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task> {
-    let stop = Arc::new(TaskStop::default());
-    let (tx, ended) = answer::channel::<()>();
-    let s = Arc::clone(&stop);
+    let (task, guard) = Task::new();
+    let s = task.handle();
     let posted = teseladb_io::engine::wait::post(
         shard,
         Box::new(move || {
             let job: Box<dyn FnOnce()> = Box::new(move || {
+                let _ended = guard;
                 body(&s);
-                let _ = tx.send(());
             });
             run_in_background(IoGroups::get_or_create().then(move |groups: IoGroups| {
                 in_group(groups.of(IoClass::Background), job)
             }));
         }),
     );
-    posted.then_some(Task { stop, ended })
+    posted.then_some(task)
 }
 
 /// Runs `job` in an engine thread of its own in `group`: the pooled engine threads keep the group
@@ -184,11 +218,36 @@ mod tests {
 
     #[test]
     fn a_task_that_ended_stops_at_once() {
-        let (tx, ended) = answer::channel::<()>();
-        drop(tx);
-        let t = Task { stop: Arc::default(), ended };
+        let (t, guard) = Task::new();
+        drop(guard);
         let h = t.handle();
+        let start = Instant::now();
         assert!(t.stop());
         assert!(h.stopped());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_task_on_a_thread_ends_when_its_body_returns_or_panics() {
+        let t = on_thread(Box::new(|stop: &TaskStop| {
+            while !stop.stopped() {
+                stop.pause(Duration::from_secs(10));
+            }
+        }));
+        let start = Instant::now();
+        assert!(t.stop(), "the stop ends its pause and the body returns");
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let t = on_thread(Box::new(|_: &TaskStop| panic!("a task's body panics")));
+        assert!(t.stop(), "a body that panicked ended all the same");
+    }
+
+    #[test]
+    fn a_wait_for_the_end_gives_up_at_its_deadline() {
+        let (t, guard) = Task::new();
+        let start = Instant::now();
+        assert!(!t.ended.wait_until(Some(start + Duration::from_millis(10))));
+        assert!(start.elapsed() >= Duration::from_millis(10));
+        drop(guard);
+        assert!(t.ended.wait_until(Some(Instant::now())));
     }
 }

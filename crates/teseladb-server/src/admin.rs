@@ -402,7 +402,11 @@ impl NodeAdmin {
     }
 
     /// Sends `msg` to core `core` and waits for its answer, as long as [`CORE_WAIT`].
-    pub fn ask<T>(&self, core: usize, msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg) -> Option<T> {
+    pub fn ask<T: Send + 'static>(
+        &self,
+        core: usize,
+        msg: impl FnOnce(mpsc::Sender<T>) -> NodeMsg,
+    ) -> Option<T> {
         let (tx, rx) = mpsc::channel();
         self.handle.senders.get(core)?.sender().send(CoreInput::App(msg(tx))).ok()?;
         rx.recv_timeout(CORE_WAIT).ok()

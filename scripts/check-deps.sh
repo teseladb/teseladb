@@ -306,12 +306,12 @@ check_hot_path_locks() {
 # `thread::Builder`) outside the tests and the files below.
 ENGINE_CRATES=(teseladb-io teseladb-sys teseladb-server)
 # Threads admitted on the engine (023 T067): the thread an engine runs on (the node's, the one of a
-# command-line process), the peer layer's short-lived calls until they move to the engine, and the
-# process harness that reads a child's standard input and output (one process per node, D4), and
-# the network namespaces of the AF_XDP tests (a namespace belongs to a thread).
-THREAD_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-io/src/engine/offload.rs
-  crates/teseladb-server/src/shard_client.rs crates/teseladb-server/src/procs.rs
-  crates/teseladb-server/src/procs/parent.rs crates/teseladb-sys/src/linux/netns.rs)
+# command-line process), the process harness that reads a child's standard input and output (one
+# process per node, D4), and the network namespaces of the AF_XDP tests (a namespace belongs to a
+# thread).
+THREAD_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-server/src/shard_client.rs
+  crates/teseladb-server/src/procs.rs crates/teseladb-server/src/procs/parent.rs
+  crates/teseladb-sys/src/linux/netns.rs)
 
 # Prints `file:line: text` for every thread started outside the tests in the given sources. Code
 # after a `#[cfg(test)]` at the start of a line is a test's up to the end of its item: the next `}`

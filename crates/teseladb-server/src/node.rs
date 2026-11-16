@@ -1266,7 +1266,7 @@ impl Node {
             // A core that already stopped is noticed by whoever talks to it.
             let _ = s.send_waiting(CoreInput::App(NodeMsg::Cores(senders.clone())));
         }
-        // The acceptors of the shards share these handlers, which run off the shards.
+        // The acceptors of the shards share these handlers, which run in engine threads of the shards.
         let core0 = senders[0].senders();
         let join: JoinHandler = Arc::new(move |req| {
             let (tx, rx) = teseladb_io::engine::answer::channel();
