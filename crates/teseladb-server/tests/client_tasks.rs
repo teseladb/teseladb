@@ -59,10 +59,6 @@ const DBPATH: &str = "dbpath";
 
 #[cfg(target_os = "linux")]
 fn main() {
-    // The engine runs on Linux only (D3).
-    if cfg!(not(target_os = "linux")) {
-        return;
-    }
     procs::main(
         &[
             ("a_refresh_that_fails_goes_again", a_refresh_that_fails_goes_again),

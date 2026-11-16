@@ -50,10 +50,6 @@ const LIMIT: usize = 3;
 
 #[cfg(target_os = "linux")]
 fn main() {
-    // The engine runs on Linux only (D3).
-    if cfg!(not(target_os = "linux")) {
-        return;
-    }
     procs::main(
         &[
             ("a_node_opens_the_clients_port", a_node_opens_the_clients_port),
