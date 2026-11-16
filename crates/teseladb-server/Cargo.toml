@@ -93,6 +93,10 @@ harness = false
 name = "replicas"
 harness = false
 
+[[test]]
+name = "rest"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
