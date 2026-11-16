@@ -48,6 +48,8 @@ pub const RECIPE: &str = "rest";
 /// The parameter of [`RECIPE`]: the instant, in seconds since the epoch, the certificates count
 /// from; the scenario and its node processes make the same CA and certificate from it.
 const NOW: &str = "now";
+/// Nodes of the scenario's cluster.
+const NODES: u64 = 3;
 
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
@@ -162,6 +164,9 @@ pub fn node_config(a: &NodeArgs) -> Result<NodeConfig, String> {
             tls: Some(tls),
             settings: Settings::default(),
         }),
+        // The machine's default memory of a node, shared by the cluster's nodes: each process
+        // has an engine of its own (023 FR-028), as `teseladb dev` shares it.
+        memory_limit: Some(teseladb_io::engine::resources::node_memory(None, 1) / NODES),
         ..NodeConfig::default()
     })
 }
@@ -170,7 +175,7 @@ pub fn node_config(a: &NodeArgs) -> Result<NodeConfig, String> {
 fn cluster(now: i64) -> Result<Vec<NodeProc>, String> {
     let params = [format!("{NOW}={now}")];
     let mut nodes: Vec<NodeProc> = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..NODES {
         let join = nodes.first().map(|n| vec![n.peer_addr().to_string()]).unwrap_or_default();
         let started =
             crate::nodes::start(RECIPE, &join, None, &params, READY, "a node did not start");

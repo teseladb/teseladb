@@ -45,6 +45,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LEAD: Duration = Duration::from_millis(50);
 /// Bytes an output stream buffers before it writes.
 const OUTPUT_BUFFER: usize = 64 * 1024;
+/// Memory of each shard of the generator's engine: its connections' buffers, not the machine's
+/// default, which the local cluster's nodes share.
+const MEMORY_PER_SHARD: u64 = 1 << 30;
 
 /// What one run asks for.
 #[derive(Clone, Copy, Debug)]
@@ -114,7 +117,8 @@ pub fn run(
         ..plan
     };
     let _turn = crate::scenarios::on_engine::engine_turn();
-    let engine = NodeEngine::start(&EngineConfig { shards, ..EngineConfig::default() })
+    let memory = Some(MEMORY_PER_SHARD * u64::from(shards));
+    let engine = NodeEngine::start(&EngineConfig { shards, memory, ..EngineConfig::default() })
         .map_err(|e| format!("the generator's engine: {e}"))?;
     let start = Instant::now() + LEAD;
     let (tx, rx) = mpsc::channel();
