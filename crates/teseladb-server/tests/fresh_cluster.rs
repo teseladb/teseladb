@@ -171,12 +171,12 @@ fn a_dev_cluster_on_a_busy_machine_takes_catalog_changes_at_once() {
 
 fn a_cluster_whose_nodes_just_joined_takes_catalog_changes_at_once() {
     let _load = Load::start();
-    let first = procs::node("node", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
     for _ in 0..2 {
-        let n = procs::node("node", &seed, None, &[]);
+        let n = teseladb_server::procs::start_self("node", &seed, None, &[]);
         until("a node that joined", || n.wait_ready(Duration::from_millis(100)).then_some(()));
         nodes.push(n);
     }

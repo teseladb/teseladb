@@ -53,7 +53,7 @@ fn start(join: Vec<String>) -> NodeProc {
 /// [`start`], with the HTTP port on `ip`.
 fn start_on(join: Vec<String>, ip: [u8; 4]) -> NodeProc {
     let ip = std::net::Ipv4Addr::from(ip);
-    let node = procs::node("http", &join, None, &[&format!("ip={ip}")]);
+    let node = teseladb_server::procs::start_self("http", &join, None, &[&format!("ip={ip}")]);
     assert!(node.wait_ready(READY));
     node
 }

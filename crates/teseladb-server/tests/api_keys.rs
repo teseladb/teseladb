@@ -124,7 +124,7 @@ fn start(join: Vec<String>) -> NodeProc {
 fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeProc {
     let audit = audit.map(|p| format!("audit={}", p.display()));
     let params: Vec<&str> = audit.iter().map(String::as_str).collect();
-    let node = procs::node("keys", &join, None, &params);
+    let node = teseladb_server::procs::start_self("keys", &join, None, &params);
     assert!(node.wait_ready(READY));
     node
 }

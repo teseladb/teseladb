@@ -6,15 +6,14 @@
 //! a thread of its own.
 //!
 //! A file declares it with `#[path = "common/procs.rs"] mod procs;`, and starts its nodes with
-//! [`node`].
+//! `teseladb_server::procs::start_self`.
 
 use std::collections::VecDeque;
-use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use teseladb_server::node::NodeConfig;
-use teseladb_server::procs::{NODE_PROCESS, NodeArgs, NodeProc, StartError, log_path};
+use teseladb_server::procs::{NODE_PROCESS, NodeArgs};
 
 /// A test: its name and its function.
 pub type Test = (&'static str, fn());
@@ -113,28 +112,4 @@ pub fn main(tests: &[Test], recipes: &[Recipe]) {
     failed.iter().for_each(|n| println!("    {n}"));
     println!("\ntest result: FAILED. {passed} passed; {} failed; 0 ignored\n", failed.len());
     std::process::exit(101);
-}
-
-/// Starts this binary as a node process of `recipe` joining `join` (none: it creates the
-/// cluster), in memory or, with `dir`, on files there.
-pub fn spawn(
-    recipe: &str,
-    join: &[String],
-    dir: Option<&Path>,
-    params: &[&str],
-) -> Result<NodeProc, StartError> {
-    let a = NodeArgs {
-        recipe: recipe.to_owned(),
-        join: join.to_vec(),
-        dir: dir.map(Path::to_owned),
-        params: params.iter().map(|p| (*p).to_owned()).collect(),
-        ports: None,
-    };
-    let me = std::env::current_exe().expect("this test's binary");
-    NodeProc::spawn(&me, &a.to_args(), Some(&log_path(recipe)))
-}
-
-/// [`spawn`], which has to start.
-pub fn node(recipe: &str, join: &[String], dir: Option<&Path>, params: &[&str]) -> NodeProc {
-    spawn(recipe, join, dir, params).unwrap_or_else(|e| panic!("node `{recipe}`: {e}"))
 }

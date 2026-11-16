@@ -307,8 +307,8 @@ fn as_the_restore_tool_gives_it(entry: &Document) -> Vec<Document> {
 /// one's data at the last entry. The real tools in both directions with the reference server 9.0.4
 /// run in `tests/compat/tools/run.sh`.
 fn a_copy_with_the_oplog_replays_into_the_same_data() {
-    let source = procs::node("node", &[], None, &[]);
-    let target = procs::node("node", &[], None, &[]);
+    let source = teseladb_server::procs::start_self("node", &[], None, &[]);
+    let target = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(source.wait_ready(READY) && target.wait_ready(READY));
     let mut s = Client::new(&source);
     let mut t = Client::new(&target);

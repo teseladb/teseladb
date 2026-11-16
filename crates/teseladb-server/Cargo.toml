@@ -85,6 +85,10 @@ harness = false
 name = "large_history"
 harness = false
 
+[[test]]
+name = "node"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

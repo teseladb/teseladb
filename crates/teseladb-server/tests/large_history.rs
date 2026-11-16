@@ -52,7 +52,7 @@ const GET_MORE_MS: i32 = 3_000;
 
 /// Three nodes of two cores, the second and third joining the first.
 fn cluster() -> Vec<NodeProc> {
-    let start = |join: Vec<String>| procs::node("node", &join, None, &[]);
+    let start = |join: Vec<String>| teseladb_server::procs::start_self("node", &join, None, &[]);
     let first = start(Vec::new());
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];

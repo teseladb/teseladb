@@ -66,7 +66,12 @@ fn now() -> i64 {
 
 /// The first member, a node process ([`member_config`]), ready.
 fn member(data: &Path) -> NodeProc {
-    let node = procs::node("member", &[], None, &[&format!("pki={}", data.display())]);
+    let node = teseladb_server::procs::start_self(
+        "member",
+        &[],
+        None,
+        &[&format!("pki={}", data.display())],
+    );
     assert!(node.wait_ready(WAIT));
     node
 }

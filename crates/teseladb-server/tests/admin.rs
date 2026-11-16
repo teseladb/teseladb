@@ -38,10 +38,10 @@ fn parameter(r: &Document) -> Option<Value> {
 }
 
 fn a_cluster_parameter_set_on_one_node_is_read_on_every_node() {
-    let first = procs::node("node", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let other = procs::node("node", &seed, None, &[]);
+    let other = teseladb_server::procs::start_self("node", &seed, None, &[]);
     assert!(other.wait_ready(READY));
     let mut a = Client::new(&first);
     let get = Document::new().with("getClusterParameter", "defaultMaxTimeMS");

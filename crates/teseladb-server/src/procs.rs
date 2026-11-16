@@ -434,6 +434,40 @@ pub fn log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("teseladb-proc-{}-{n}-{name}.log", std::process::id()))
 }
 
+/// Starts this binary (a test's, whose `main` takes [`NODE_PROCESS`]) as a node process of
+/// `recipe` joining `join` (none: it creates the cluster), in memory or, with `dir`, on files there;
+/// its log goes to a file of its own ([`log_path`]).
+pub fn spawn_self(
+    recipe: &str,
+    join: &[String],
+    dir: Option<&Path>,
+    params: &[&str],
+) -> Result<NodeProc, StartError> {
+    let a = NodeArgs {
+        recipe: recipe.to_owned(),
+        join: join.to_vec(),
+        dir: dir.map(Path::to_owned),
+        params: params.iter().map(|p| (*p).to_owned()).collect(),
+        ports: None,
+    };
+    let me = std::env::current_exe().map_err(|e| StartError {
+        kind: "exit".to_owned(),
+        message: format!("the path of this program: {e}"),
+        log: String::new(),
+    })?;
+    NodeProc::spawn(&me, &a.to_args(), Some(&log_path(recipe)))
+}
+
+/// [`spawn_self`], which has to start.
+///
+/// # Panics
+///
+/// If the node process does not start, with its error and log.
+#[must_use]
+pub fn start_self(recipe: &str, join: &[String], dir: Option<&Path>, params: &[&str]) -> NodeProc {
+    spawn_self(recipe, join, dir, params).unwrap_or_else(|e| panic!("node `{recipe}`: {e}"))
+}
+
 impl NodeProc {
     /// Starts `program` with `args` (a node process), its log in `log` (`None`: on this process's
     /// standard error), and waits for its member line.

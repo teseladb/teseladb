@@ -35,7 +35,7 @@ pub fn root_user() -> Vec<u8> {
 
 /// A node process of the recipe `secured` ([`config`]), ready.
 pub fn secured(join: Vec<String>) -> NodeProc {
-    let node = crate::procs::node("secured", &join, None, &[]);
+    let node = teseladb_server::procs::start_self("secured", &join, None, &[]);
     assert!(node.wait_ready(READY));
     node
 }

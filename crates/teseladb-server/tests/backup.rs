@@ -109,7 +109,7 @@ fn count(c: &mut Client) -> i32 {
 
 fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster() {
     let out = Dir::new("out");
-    let n = procs::node("admin", &[], None, &[]);
+    let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -134,7 +134,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
     assert_eq!(count(&mut c), 25);
     n.stop();
     // An empty cluster takes it: the catalog and the documents up to the mark.
-    let fresh = procs::node("admin", &[], None, &[]);
+    let fresh = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(fresh.wait_ready(READY));
     let at = fresh.admin_addr().unwrap().to_string();
     let (code, text, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);
@@ -151,7 +151,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
     let mut bytes = std::fs::read(&file).unwrap();
     bytes[0] ^= 0xff;
     std::fs::write(&file, bytes).unwrap();
-    let other = procs::node("admin", &[], None, &[]);
+    let other = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(other.wait_ready(READY));
     let at = other.admin_addr().unwrap().to_string();
     let (code, _, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);
@@ -163,7 +163,7 @@ fn a_backup_at_a_mark_restores_what_was_written_up_to_it_into_an_empty_cluster()
 
 fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     let out = Dir::new("three");
-    let n = procs::node("admin", &[], None, &[]);
+    let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..30)));
@@ -173,11 +173,11 @@ fn a_restore_into_three_nodes_leaves_every_replica_with_the_data() {
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
     // A cluster of three nodes, its data range on all three.
-    let n1 = procs::node("admin", &[], None, &[]);
+    let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = procs::node("admin", &seed, None, &[]);
-    let n3 = procs::node("admin", &seed, None, &[]);
+    let n2 = teseladb_server::procs::start_self("admin", &seed, None, &[]);
+    let n3 = teseladb_server::procs::start_self("admin", &seed, None, &[]);
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let voters = |n: &NodeProc| n.data_status(ASK).map_or(0, |s| s.voters.len());
     until("three replicas", || (voters(&n1) == 3).then_some(()));
@@ -219,7 +219,7 @@ fn port(at: String) -> impl Fn(Method, &str, &[u8]) -> Result<Document, String> 
 /// cluster without collections, and the next restore into it brings every document (007 FR-021).
 fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     let out = Dir::new("cut");
-    let n = procs::node("admin", &[], None, &[]);
+    let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
     let mut c = Client::new(&n);
     let r = c.run("app", Document::new().with("insert", "c").with("documents", docs(0..30)));
@@ -228,11 +228,11 @@ fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
     let (code, text, err) = admin(&at, &["backup", "--out", out.0.to_str().unwrap()]);
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
-    let n1 = procs::node("admin", &[], None, &[]);
+    let n1 = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n1.wait_ready(READY));
     let seed = vec![n1.peer_addr().to_string()];
-    let n2 = procs::node("admin", &seed, None, &[]);
-    let n3 = procs::node("admin", &seed, None, &[]);
+    let n2 = teseladb_server::procs::start_self("admin", &seed, None, &[]);
+    let n3 = teseladb_server::procs::start_self("admin", &seed, None, &[]);
     assert!(n2.wait_ready(READY) && n3.wait_ready(READY));
     let voters = |n: &NodeProc| n.data_status(ASK).map_or(0, |s| s.voters.len());
     until("three replicas", || (voters(&n1) == 3).then_some(()));
@@ -259,7 +259,7 @@ fn a_restore_cut_while_a_replica_ingests_leaves_the_cluster_to_the_next_one() {
 
 fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_torn() {
     let out = Dir::new("load");
-    let n = procs::node("admin", &[], None, &[]);
+    let n = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(n.wait_ready(READY));
     let at = n.admin_addr().unwrap().to_string();
     let mut c = Client::new(&n);
@@ -288,7 +288,7 @@ fn a_backup_under_writes_holds_everything_acknowledged_before_it_and_nothing_tor
     writer.join().unwrap();
     assert_eq!(code, 0, "{text}{err}");
     n.stop();
-    let fresh = procs::node("admin", &[], None, &[]);
+    let fresh = teseladb_server::procs::start_self("admin", &[], None, &[]);
     assert!(fresh.wait_ready(READY));
     let at = fresh.admin_addr().unwrap().to_string();
     let (code, text, err) = admin(&at, &["restore", "--from", out.0.to_str().unwrap()]);

@@ -184,10 +184,11 @@ fn the_node_reaps_idle_cursors_and_expired_sessions() {
 }
 
 fn every_node_of_a_cluster_takes_the_commands() {
-    let first = procs::node("node", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<NodeProc> = (0..2).map(|_| procs::node("node", &seed, None, &[])).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
     let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
@@ -370,10 +371,11 @@ fn a_command_that_waits_does_not_hold_up_the_other_connections() {
     // One core, so one client worker serves every connection of the node. A catalog change that
     // cannot reach a majority of Group 0 waits for its `maxTimeMS`; meanwhile another connection
     // of the same worker gets its `ping` and `hello` answered.
-    let first = procs::node("one_core", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("one_core", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<NodeProc> = (0..2).map(|_| procs::node("one_core", &seed, None, &[])).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("one_core", &seed, None, &[])).collect();
     for n in &others {
         assert!(n.wait_ready(READY));
     }
@@ -804,10 +806,11 @@ fn a_unique_insert_waits_for_a_transaction_that_commits_and_is_a_duplicate() {
 /// T009): each value ends in one document, and `null` and a missing field are one value.
 fn concurrent_unique_inserts_from_every_node_keep_one_document_per_value() {
     const VALUES: i32 = 15;
-    let first = procs::node("node", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<NodeProc> = (0..2).map(|_| procs::node("node", &seed, None, &[])).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
     let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
@@ -920,10 +923,11 @@ fn users_of(r: &Document) -> usize {
 }
 
 fn a_role_or_a_user_written_on_one_node_is_read_at_once_on_the_others() {
-    let first = procs::node("node", &[], None, &[]);
+    let first = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<NodeProc> = (0..2).map(|_| procs::node("node", &seed, None, &[])).collect();
+    let others: Vec<NodeProc> =
+        (0..2).map(|_| teseladb_server::procs::start_self("node", &seed, None, &[])).collect();
     let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));

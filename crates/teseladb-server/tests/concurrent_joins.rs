@@ -32,13 +32,13 @@ fn config(join: Vec<String>) -> NodeConfig {
 }
 
 fn six_nodes_joining_at_once_all_get_in() {
-    let founder = procs::node("node", &[], None, &[]);
+    let founder = teseladb_server::procs::start_self("node", &[], None, &[]);
     assert!(founder.wait_ready(Duration::from_secs(10)));
     let seed = founder.peer_addr().to_string();
     let joiners: Vec<_> = (0..JOINERS)
         .map(|_| {
             let seeds = vec![seed.clone()];
-            thread::spawn(move || procs::spawn("node", &seeds, None, &[]))
+            thread::spawn(move || teseladb_server::procs::spawn_self("node", &seeds, None, &[]))
         })
         .collect();
     let nodes: Vec<NodeProc> = joiners.into_iter().map(|j| j.join().unwrap().unwrap()).collect();
