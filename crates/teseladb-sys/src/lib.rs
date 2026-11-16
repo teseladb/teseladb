@@ -10,15 +10,12 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 
-pub mod aligned;
 /// Safe forms of the engine's DMA file operations (023 FR-010).
 pub mod dma;
 pub mod handoff;
 pub mod host;
 pub mod latest;
 mod linux;
-/// io_uring (012 FR-001).
-pub use linux::io_uring as uring;
 /// Network namespaces and `veth` pairs, for the tests of AF_XDP (012 FR-033).
 pub use linux::netns;
 /// AF_XDP and its XDP program (012 FR-033).
