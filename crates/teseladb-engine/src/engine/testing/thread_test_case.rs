@@ -24,9 +24,10 @@ macro_rules! engine_thread_test_case_with_deco {
     ($(#[$attr:meta])* $name:ident, $body:block) => {
         $crate::engine_test_case_with_deco!($(#[$attr])* $name, {
             // A panic of the body (a failed assertion) is caught on the thread's own stack
-            // and turned into the test's error, which fails the test.
+            // and turned into the test's error, which fails the test. A closure with a return
+            // type needs a block written in place, not a `block` fragment: the body goes inside one.
             $crate::engine::core::thread::async_(move || -> ::std::result::Result<(), $crate::engine::core::future::ExceptionPtr> {
-                ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(move || -> () $body))
+                ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(move || -> () { $body }))
                     .map_err($crate::engine::core::future::ExceptionPtr::from_panic)
             })
         });
