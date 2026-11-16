@@ -30,9 +30,33 @@ pub struct Client {
     next: i32,
 }
 
+/// A node whose clients' port a [`Client`] connects to: in this process or in its own.
+pub trait ClientPort {
+    /// The first address of its clients' port.
+    fn client_port(&self) -> SocketAddr;
+}
+
+impl<D: Disk + Send + 'static> ClientPort for Node<D> {
+    fn client_port(&self) -> SocketAddr {
+        self.client_addrs()[0]
+    }
+}
+
+impl<T: ClientPort> ClientPort for &T {
+    fn client_port(&self) -> SocketAddr {
+        (*self).client_port()
+    }
+}
+
+impl ClientPort for teseladb_server::procs::NodeProc {
+    fn client_port(&self) -> SocketAddr {
+        self.client_addrs()[0]
+    }
+}
+
 impl Client {
-    pub fn new<D: Disk + Send + 'static>(node: &Node<D>) -> Client {
-        let s = TcpStream::connect(node.client_addrs()[0]).unwrap();
+    pub fn new(node: &impl ClientPort) -> Client {
+        let s = TcpStream::connect(node.client_port()).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(40))).unwrap();
         Client { s, next: 1 }
     }

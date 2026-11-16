@@ -4,16 +4,27 @@
 //! been idle for a while, a query answers within its `maxTimeMS` on every node.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 
 use std::time::{Duration, Instant};
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
+use teseladb_server::procs::{NodeProc, start_self};
 
 /// The most a query on an idle range may take: its leader closes a mark at most 3 s behind its
 /// clock, every 200 ms, and 200 ms behind every 20 ms once something reads its changes.
+fn main() {
+    procs::main(
+        &[(
+            "a_search_on_an_idle_range_answers_on_every_node",
+            a_search_on_an_idle_range_answers_on_every_node,
+        )],
+        &[("node", |a| config(a.join.clone()))],
+    );
+}
+
 const ANSWER_WITHIN: Duration = Duration::from_secs(8);
 
 fn search(c: &mut Client, q: &str) -> Document {
@@ -36,15 +47,12 @@ fn queryable(c: &mut Client) -> bool {
     )
 }
 
-#[test]
 fn a_search_on_an_idle_range_answers_on_every_node() {
-    let first = Node::start(config(Vec::new()), || Ok(MemDisk::new()), None).unwrap();
+    let first = start_self("node", &[], None, &[]);
     assert!(first.wait_ready(READY));
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2)
-        .map(|_| Node::start(config(seed.clone()), || Ok(MemDisk::new()), None).unwrap())
-        .collect();
-    let nodes: Vec<&Node<MemDisk>> = std::iter::once(&first).chain(others.iter()).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start_self("node", &seed, None, &[])).collect();
+    let nodes: Vec<&NodeProc> = std::iter::once(&first).chain(others.iter()).collect();
     for n in &nodes {
         assert!(n.wait_ready(READY));
     }
@@ -81,6 +89,6 @@ fn a_search_on_an_idle_range_answers_on_every_node() {
         assert_eq!(batch(&r, "firstBatch").len(), 2, "{r:?}");
         assert!(started.elapsed() < ANSWER_WITHIN, "took {:?}", started.elapsed());
     }
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }

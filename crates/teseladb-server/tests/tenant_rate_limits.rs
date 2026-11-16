@@ -5,6 +5,8 @@
 //! each node applies the whole limits, and the service user is held by none of them.
 
 mod common;
+#[path = "common/procs.rs"]
+mod procs;
 mod secured;
 
 use std::io::Read;
@@ -13,10 +15,17 @@ use std::time::Duration;
 use common::{Client, batch, docs, ok, until};
 use secured::{PASSWORD, ROOT_PASSWORD, admin_out as admin, login, secured as start};
 use teseladb_bson::{Document, Value};
-use teseladb_raftlog::MemDisk;
-use teseladb_server::node::Node;
+use teseladb_server::procs::NodeProc;
 use teseladb_server::tenant_limits::{RETRYABLE, SYSTEM_OVERLOADED};
 use teseladb_wire::error::RETRYABLE_WRITE_ERROR;
+
+fn main() {
+    procs::main(&[
+("each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer", each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer),
+("commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labels", commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labels),
+("a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node", a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node),
+], &[("secured", |a| secured::config(a.join.clone()))]);
+}
 
 const RATE_LIMITED: i32 = 462;
 
@@ -41,7 +50,7 @@ fn labels(r: &Document) -> Vec<String> {
 }
 
 /// Three secured nodes with tenant `acme`, its user `ann` and `root` signed in on the first.
-fn cluster() -> (Vec<Node<MemDisk>>, Client) {
+fn cluster() -> (Vec<NodeProc>, Client) {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
     let mut nodes = vec![first];
@@ -61,7 +70,7 @@ fn cluster() -> (Vec<Node<MemDisk>>, Client) {
 
 /// Waits until `node` holds limit `key` of `acme` at `value`: a change reaches the other nodes a
 /// moment after the node that took it.
-fn reached(node: &Node<MemDisk>, key: &str, value: u64) {
+fn reached(node: &NodeProc, key: &str, value: u64) {
     let want = format!("\"{key}\":{value}");
     until(&format!("{key} {value} on the node"), || {
         let out = admin(node, &["--format", "json", "tenant", "limits", "acme"]);
@@ -70,7 +79,7 @@ fn reached(node: &Node<MemDisk>, key: &str, value: u64) {
 }
 
 /// A connection of Ann on `node`, signed in once the user and the limits reached it.
-fn ann(node: &Node<MemDisk>) -> Client {
+fn ann(node: &NodeProc) -> Client {
     until("Ann signs in", || {
         let mut c = Client::new(node);
         ok(&login(&mut c, "ann", PASSWORD)).then_some(c)
@@ -86,7 +95,7 @@ fn closed(c: &mut Client) -> bool {
 
 /// A connection of Ann on `node` that sends the last step of its sign-in without reading the
 /// answer.
-fn third_sign_in(node: &Node<MemDisk>) -> Client {
+fn third_sign_in(node: &NodeProc) -> Client {
     let mut third = Client::new(node);
     third.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mech = teseladb_auth::scram::Mechanism::ScramSha256;
@@ -108,13 +117,12 @@ fn third_sign_in(node: &Node<MemDisk>) -> Client {
     third
 }
 
-fn stop(nodes: Vec<Node<MemDisk>>) {
+fn stop(nodes: Vec<NodeProc>) {
     for n in nodes.into_iter().rev() {
         n.stop();
     }
 }
 
-#[test]
 fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without_an_answer() {
     let (nodes, _root) = cluster();
     admin(&nodes[0], &["tenant", "limits", "acme", "--max-connections", "2"]);
@@ -138,7 +146,6 @@ fn each_node_takes_max_connections_of_the_tenant_and_closes_the_next_one_without
     stop(nodes);
 }
 
-#[test]
 fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labels() {
     let (nodes, _root) = cluster();
     admin(&nodes[0], &["tenant", "limits", "acme", "--ops-per-second", "20"]);
@@ -257,7 +264,6 @@ fn commands_past_the_tenant_rate_concurrency_or_bytes_fail_with_462_and_its_labe
     stop(nodes);
 }
 
-#[test]
 fn a_tenant_runs_at_most_max_concurrent_ops_at_once_on_a_node() {
     let (nodes, _root) = cluster();
     let mut slow = ann(&nodes[0]);

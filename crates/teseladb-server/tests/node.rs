@@ -2,6 +2,9 @@
 //! the data directory's lock, refuses another number of cores, and joins a cluster with `--join`,
 //! also through a follower and after a restart.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::fs;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -19,7 +22,54 @@ use teseladb_server::logic::Group0View;
 use teseladb_server::node::{
     FOUNDER, JOIN_DEADLINE, JOIN_VOTERS, Node, NodeConfig, NodeError, join_cluster, lock_dir,
 };
+use teseladb_server::procs::{NodeArgs, NodeProc};
 use teseladb_types::NodeId;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "a_restarted_node_keeps_its_identity_and_group0",
+                a_restarted_node_keeps_its_identity_and_group0,
+            ),
+            ("the_data_directory_has_one_owner", the_data_directory_has_one_owner),
+            (
+                "nodes_join_with_join_also_through_a_follower_and_after_a_restart",
+                nodes_join_with_join_also_through_a_follower_and_after_a_restart,
+            ),
+            (
+                "a_joined_node_without_its_voters_does_not_start",
+                a_joined_node_without_its_voters_does_not_start,
+            ),
+            (
+                "a_node_that_stopped_before_its_identifier_joins_again_and_never_founds",
+                a_node_that_stopped_before_its_identifier_joins_again_and_never_founds,
+            ),
+            (
+                "a_node_back_on_another_port_keeps_the_cluster_whole",
+                a_node_back_on_another_port_keeps_the_cluster_whole,
+            ),
+            (
+                "joining_fails_with_another_core_count_or_nobody_to_ask",
+                joining_fails_with_another_core_count_or_nobody_to_ask,
+            ),
+            ("errors_say_what_failed", errors_say_what_failed),
+            (
+                "a_join_round_follows_a_bounded_number_of_hints",
+                a_join_round_follows_a_bounded_number_of_hints,
+            ),
+            (
+                "a_damaged_node_meta_stops_the_node_without_touching_the_directory",
+                a_damaged_node_meta_stops_the_node_without_touching_the_directory,
+            ),
+            (
+                "the_clock_bound_stays_ahead_and_a_restart_waits_past_it",
+                the_clock_bound_stays_ahead_and_a_restart_waits_past_it,
+            ),
+        ],
+        &[("files", files_config)],
+    );
+}
 
 const READY: Duration = Duration::from_secs(10);
 const ASK: Duration = Duration::from_secs(1);
@@ -60,15 +110,77 @@ fn start_within(
     Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&dir.0)?))
 }
 
-/// Waits for `n` to be ready; if it is not, fails with what its Group 0 looks like.
-fn ready(n: &Node<FileDisk>) {
-    assert!(n.wait_ready(READY), "not ready after {READY:?}: {:?}", n.view(ASK));
+/// The node of a cluster's test, in a process of its own (D4: one process per node), over the
+/// files of `dir`: as [`start_within`] starts one, listening between nodes at `peer` if given.
+fn spawn_within(
+    dir: &Dir,
+    cores: Option<u16>,
+    join: Vec<String>,
+    deadline: Duration,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<NodeProc, NodeError> {
+    let mut params = vec![format!("deadline_ms={}", deadline.as_millis())];
+    params.extend(cores.map(|c| format!("cores={c}")));
+    params.extend(peer.map(|p| format!("peer={p}")));
+    let params: Vec<&str> = params.iter().map(String::as_str).collect();
+    teseladb_server::procs::spawn_self("files", &join, Some(&dir.0), &params)
+        .map_err(|e| e.node_error())
 }
 
-fn wait_view(n: &Node<FileDisk>, ok: impl Fn(&Group0View) -> bool) -> Group0View {
+/// [`spawn_within`] with the product's join deadline.
+fn spawn(dir: &Dir, cores: Option<u16>, join: Vec<String>) -> Result<NodeProc, NodeError> {
+    spawn_within(dir, cores, join, JOIN_DEADLINE, None)
+}
+
+/// The configuration of [`spawn_within`]'s node process.
+fn files_config(a: &NodeArgs) -> NodeConfig {
+    let number = |k: &str| a.param(k).map(|v| v.parse::<u64>().expect("a number"));
+    NodeConfig {
+        cores: number("cores").map(|c| u16::try_from(c).expect("cores")),
+        join: a.join.clone(),
+        join_deadline: number("deadline_ms").map_or(JOIN_DEADLINE, Duration::from_millis),
+        listen_peer: a
+            .param("peer")
+            .map_or_else(|| NodeConfig::default().listen_peer, |p| p.parse().expect("an address")),
+        ..NodeConfig::default()
+    }
+}
+
+/// A node in this process or in its own.
+trait Views {
+    fn view_within(&self, timeout: Duration) -> Option<Group0View>;
+    fn ready_within(&self, timeout: Duration) -> bool;
+}
+
+impl Views for Node<FileDisk> {
+    fn view_within(&self, timeout: Duration) -> Option<Group0View> {
+        self.view(timeout)
+    }
+
+    fn ready_within(&self, timeout: Duration) -> bool {
+        self.wait_ready(timeout)
+    }
+}
+
+impl Views for NodeProc {
+    fn view_within(&self, timeout: Duration) -> Option<Group0View> {
+        self.view(timeout)
+    }
+
+    fn ready_within(&self, timeout: Duration) -> bool {
+        self.wait_ready(timeout)
+    }
+}
+
+/// Waits for `n` to be ready; if it is not, fails with what its Group 0 looks like.
+fn ready(n: &impl Views) {
+    assert!(n.ready_within(READY), "not ready after {READY:?}: {:?}", n.view_within(ASK));
+}
+
+fn wait_view(n: &impl Views, ok: impl Fn(&Group0View) -> bool) -> Group0View {
     let end = Instant::now() + READY;
     loop {
-        let v = n.view(ASK).expect("core 0 answers");
+        let v = n.view_within(ASK).expect("core 0 answers");
         if ok(&v) || Instant::now() >= end {
             return v;
         }
@@ -76,7 +188,6 @@ fn wait_view(n: &Node<FileDisk>, ok: impl Fn(&Group0View) -> bool) -> Group0View
     }
 }
 
-#[test]
 fn a_restarted_node_keeps_its_identity_and_group0() {
     let dir = Dir::new("restart");
     let n = start(&dir, Some(2), Vec::new()).unwrap();
@@ -99,7 +210,6 @@ fn a_restarted_node_keeps_its_identity_and_group0() {
     assert!(e.to_string().contains("created with 2 cores and 3 were requested"), "{e}");
 }
 
-#[test]
 fn the_data_directory_has_one_owner() {
     let dir = Dir::new("lock");
     let n = start(&dir, Some(1), Vec::new()).unwrap();
@@ -110,12 +220,11 @@ fn the_data_directory_has_one_owner() {
     drop(lock_dir(&dir.0).expect("free once the node stopped"));
 }
 
-#[test]
 fn nodes_join_with_join_also_through_a_follower_and_after_a_restart() {
     let (d1, d2, d3) = (Dir::new("join-1"), Dir::new("join-2"), Dir::new("join-3"));
-    let n1 = start(&d1, Some(1), Vec::new()).unwrap();
+    let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
     ready(&n1);
-    let n2 = start(&d2, None, vec![n1.peer_addr().to_string()]).unwrap();
+    let n2 = spawn(&d2, None, vec![n1.peer_addr().to_string()]).unwrap();
     assert_eq!((n2.node_id(), n2.cluster_id(), n2.cores()), (NodeId(2), n1.cluster_id(), 1));
     ready(&n2);
     assert!(fs::read_to_string(d2.0.join(JOIN_VOTERS)).unwrap().contains('1'));
@@ -123,14 +232,14 @@ fn nodes_join_with_join_also_through_a_follower_and_after_a_restart() {
     let v = wait_view(&n2, |v| v.voters.len() == 2);
     assert_eq!(v.voters, [NodeId(1), NodeId(2)]);
     let seeds = vec![n2.peer_addr().to_string()];
-    let n3 = start(&d3, None, seeds).unwrap();
+    let n3 = spawn(&d3, None, seeds).unwrap();
     assert_eq!(n3.node_id(), NodeId(3));
     let ids = [NodeId(1), NodeId(2), NodeId(3)];
     assert_eq!(wait_view(&n1, |v| v.voters == ids).voters, ids);
 
     // A node that joined restarts from its log, without --join.
     n3.stop();
-    let n3 = start(&d3, None, Vec::new()).unwrap();
+    let n3 = spawn(&d3, None, Vec::new()).unwrap();
     assert_eq!((n3.node_id(), n3.cluster_id()), (NodeId(3), n1.cluster_id()));
     ready(&n3);
     assert_eq!(wait_view(&n3, |v| v.voters == ids).voters, ids);
@@ -139,18 +248,17 @@ fn nodes_join_with_join_also_through_a_follower_and_after_a_restart() {
     }
 }
 
-#[test]
 fn a_joined_node_without_its_voters_does_not_start() {
     let (d1, d2) = (Dir::new("voters-1"), Dir::new("voters-2"));
-    let n1 = start(&d1, Some(1), Vec::new()).unwrap();
+    let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
     ready(&n1);
-    let n2 = start(&d2, None, vec![n1.peer_addr().to_string()]).unwrap();
+    let n2 = spawn(&d2, None, vec![n1.peer_addr().to_string()]).unwrap();
     n2.stop();
     fs::remove_file(d2.0.join(JOIN_VOTERS)).unwrap();
-    let e = start(&d2, None, Vec::new()).unwrap_err();
+    let e = spawn(&d2, None, Vec::new()).unwrap_err();
     assert!(matches!(&e, NodeError::Config(m) if m.contains(JOIN_VOTERS)), "{e}");
     fs::write(d2.0.join(JOIN_VOTERS), "1\nx\n").unwrap();
-    let e = start(&d2, None, Vec::new()).unwrap_err();
+    let e = spawn(&d2, None, Vec::new()).unwrap_err();
     assert!(e.to_string().contains("not a list of node ids"), "{e}");
     n1.stop();
 }
@@ -164,55 +272,46 @@ fn unassign(dir: &Dir) {
     teseladb_raftlog::write_node_meta(&mut disk, &meta).unwrap();
 }
 
-#[test]
 fn a_node_that_stopped_before_its_identifier_joins_again_and_never_founds() {
     let (d1, d2) = (Dir::new("unassigned-1"), Dir::new("unassigned-2"));
-    let n1 = start(&d1, Some(1), Vec::new()).unwrap();
+    let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
     ready(&n1);
     let seeds = vec![n1.peer_addr().to_string()];
-    let n2 = start(&d2, None, seeds.clone()).unwrap();
+    let n2 = spawn(&d2, None, seeds.clone()).unwrap();
     let addr2 = n2.peer_addr();
     n2.stop();
     unassign(&d2);
     // Without --join it cannot learn its identifier: it does not start (and does not found).
-    let e = start(&d2, None, Vec::new()).unwrap_err();
+    let e = spawn(&d2, None, Vec::new()).unwrap_err();
     assert!(matches!(&e, NodeError::Config(m) if m.contains("--join")), "{e}");
     // With --join, from the same address, it is node 2 of the same cluster again.
-    let cfg = NodeConfig {
-        listen_peer: addr2,
-        join: seeds,
-        join_deadline: JOIN_DEADLINE,
-        ..NodeConfig::default()
-    };
-    let path = d2.0.clone();
-    let n2 = Node::start(cfg, || FileDisk::open(&path), Some(lock_dir(&d2.0).unwrap())).unwrap();
+    let n2 = spawn_within(&d2, None, seeds, JOIN_DEADLINE, Some(addr2)).unwrap();
     assert_eq!((n2.node_id(), n2.cluster_id()), (NodeId(2), n1.cluster_id()));
     ready(&n2);
     n2.stop();
     n1.stop();
 }
 
-#[test]
 fn a_node_back_on_another_port_keeps_the_cluster_whole() {
     let (d1, d2, d3, d4) =
         (Dir::new("port-1"), Dir::new("port-2"), Dir::new("port-3"), Dir::new("port-4"));
-    let n1 = start(&d1, Some(1), Vec::new()).unwrap();
+    let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
     ready(&n1);
     let seeds = vec![n1.peer_addr().to_string()];
-    let n2 = start(&d2, None, seeds.clone()).unwrap();
-    let n3 = start(&d3, None, seeds).unwrap();
+    let n2 = spawn(&d2, None, seeds.clone()).unwrap();
+    let n3 = spawn(&d3, None, seeds).unwrap();
     let ids = [NodeId(1), NodeId(2), NodeId(3)];
     assert_eq!(wait_view(&n1, |v| v.voters == ids).voters, ids);
     // Node 3 comes back on another port: it is ready only once Group 0 has the new one.
     let old = n3.peer_addr();
     n3.stop();
-    let n3 = start(&d3, None, Vec::new()).unwrap();
+    let n3 = spawn(&d3, None, Vec::new()).unwrap();
     assert_ne!(n3.peer_addr(), old);
     ready(&n3);
     assert!(n3.view(ASK).unwrap().addrs_current);
     // Without node 1, nodes 2 and 3 still elect a leader and take a join.
     n1.stop();
-    let n4 = start(&d4, None, vec![n2.peer_addr().to_string()]).unwrap();
+    let n4 = spawn(&d4, None, vec![n2.peer_addr().to_string()]).unwrap();
     assert_eq!(n4.node_id(), NodeId(4));
     ready(&n4);
     for n in [n2, n3, n4] {
@@ -220,14 +319,14 @@ fn a_node_back_on_another_port_keeps_the_cluster_whole() {
     }
 }
 
-#[test]
 fn joining_fails_with_another_core_count_or_nobody_to_ask() {
     let (d1, d2) = (Dir::new("cores-1"), Dir::new("cores-2"));
-    let n1 = start(&d1, Some(1), Vec::new()).unwrap();
+    let n1 = spawn(&d1, Some(1), Vec::new()).unwrap();
     ready(&n1);
     // Refused for good: a short deadline only bounds how long the node asks again.
     let refused = Duration::from_secs(2);
-    let e = start_within(&d2, Some(2), vec![n1.peer_addr().to_string()], refused).unwrap_err();
+    let e =
+        spawn_within(&d2, Some(2), vec![n1.peer_addr().to_string()], refused, None).unwrap_err();
     assert!(matches!(&e, NodeError::Join(m) if m.contains("CoreCountMismatch")), "{e}");
     n1.stop();
 
@@ -242,7 +341,6 @@ fn joining_fails_with_another_core_count_or_nobody_to_ask() {
     assert!(e.to_string().starts_with("could not join the cluster: 127.0.0.1:1"), "{e}");
 }
 
-#[test]
 fn errors_say_what_failed() {
     let io = NodeError::from(std::io::Error::other("disk gone"));
     assert_eq!(io.to_string(), "disk gone");
@@ -296,7 +394,6 @@ fn fake_node(answer: fn(&str) -> String, asked: Arc<AtomicUsize>) -> (Acceptor, 
     (a, addr)
 }
 
-#[test]
 fn a_join_round_follows_a_bounded_number_of_hints() {
     let req = JoinRequest {
         name: "x".into(),
@@ -321,7 +418,6 @@ fn a_join_round_follows_a_bounded_number_of_hints() {
     a.stop();
 }
 
-#[test]
 fn a_damaged_node_meta_stops_the_node_without_touching_the_directory() {
     let dir = Dir::new("corrupt-meta");
     let n = start(&dir, Some(1), Vec::new()).unwrap();
@@ -353,7 +449,6 @@ fn meta_bound(dir: &Dir) -> u64 {
     teseladb_raftlog::read_node_meta(&mut disk).unwrap().expect("node.meta").hlc_upper_bound
 }
 
-#[test]
 fn the_clock_bound_stays_ahead_and_a_restart_waits_past_it() {
     // 005 FR-003, D-158: no mark goes out above the bound in `hlc.bound`, which stays at most
     // `AHEAD_MS` ahead of the marks while the node runs; a node that stops cleanly writes the
