@@ -1,9 +1,11 @@
 //! Open-loop scenarios (002 FR-035): requests at `--rate` per second from `--concurrency`
-//! connections over a few threads of the generator of `open_loop`, with their latency counted from
-//! the instant each was due. `open-read` reads by `_id` the records YCSB's load phase leaves
+//! connections over a few shards of the generator of `open_loop` (an engine of its own, D4), with
+//! their latency counted from the instant each was due. `open-read` reads by `_id` the records YCSB's load phase leaves
 //! (`--records`, loaded unless `--skip-load`); `open-insert` inserts one telemetry document per
 //! request with `{w: "majority", j: true}`. The report says whether the client kept the rate: a
 //! measure where it did not is not valid.
+
+use std::sync::Arc;
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
 
@@ -13,7 +15,7 @@ use crate::client::{Client, Target, doc, durable};
 use crate::open_loop::{self, Plan};
 use crate::report::{Report, Target as Goal};
 
-/// Threads of the generator: each drives its share of the connections.
+/// Shards of the generator: each drives its share of the connections.
 const THREADS: usize = 4;
 
 fn body(mut command: Document, db: &str) -> Vec<u8> {
@@ -29,6 +31,11 @@ fn ok(reply: &[u8]) -> bool {
         RawValue::Int64(n) => n == 1,
         _ => false,
     })
+}
+
+/// [`ok`], for the generator's shards.
+fn success() -> open_loop::Success {
+    Arc::new(ok)
 }
 
 fn plan(args: &Args) -> Result<Plan, String> {
@@ -91,7 +98,8 @@ pub fn read(args: &Args) -> Result<Report, String> {
             "ycsb",
         )
     };
-    let m = open_loop::run(addr, plan(args)?, &request, &ok)?;
+    let request: open_loop::Request = Arc::new(request);
+    let m = open_loop::run(addr, plan(args)?, &request, &success())?;
     Ok(report("open-read", args, &m))
 }
 
@@ -114,6 +122,7 @@ pub fn insert(args: &Args) -> Result<Report, String> {
         ]);
         body(durable(insert), "bench")
     };
-    let m = open_loop::run(addr, plan(args)?, &request, &ok)?;
+    let request: open_loop::Request = Arc::new(request);
+    let m = open_loop::run(addr, plan(args)?, &request, &success())?;
     Ok(report("open-insert", args, &m))
 }

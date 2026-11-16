@@ -2,17 +2,30 @@
 # Line, function and branch coverage per crate (001 FR-014), with rustc's instrumentation and
 # llvm-tools. Branch coverage needs the nightly toolchain (`-Z coverage-options=branch`); the code
 # and the tests are the same ones built with the pinned toolchain.
-#   scripts/coverage.sh [crate...]           (no arguments: every crate of crates/ and tools/)
+#   scripts/coverage.sh [crate...]           (no arguments: every crate of crates/ and tools/ this
+#                                            host builds; outside Linux, all but LINUX_CRATES)
 #   TESELADB_COV_MIN=95 scripts/coverage.sh  fails if a crate has lines, functions or branches below
 #   TESELADB_COV_LINUX=1 scripts/coverage.sh  measures on the Linux kernel of the local Docker engine
-#     (what only runs on Linux, such as io_uring; 012): the tests are built for
-#     `<arch>-unknown-linux-musl` and run as scripts/test-linux.sh runs them
+#     the crates that only run on Linux (LINUX_CRATES by default: the engine, teseladb-sys,
+#     teseladb-io, teseladb-server and teseladb-bench; 023 FR-007, FR-040): this script runs again
+#     inside a privileged container of the image of scripts/test-linux.sh, where it builds for
+#     `<arch>-unknown-linux-gnu` (023 R10) and runs the tests natively
+#
+# The crates are named by their folder (`teseladb-engine` is the engine, whose package is
+# `teseladb`). Every test binary runs, the programs with their own `main` (`harness = false`)
+# included: the engine's two that a Python driver of its tests/data starts (metrics_tester and
+# rest_api_httpd) run through it, and each test binary of the engine runs once per reactor backend
+# of TESELADB_COV_ENGINE_BACKENDS (default `io_uring linux-aio epoll`), chosen by the engine's
+# configuration file under a `$HOME` of its own, one test case at a time, as the engine's own
+# coverage runs measure it.
 #
 # Writes coverage/report.txt (the table), coverage/missed.txt (functions never run and branch
 # sides never taken, by source position) and coverage/show.txt (each measured source with the
 # times each line ran, summed over every binary) under the
 # caller's `CARGO_TARGET_DIR` (default target), and builds in coverage-build next to them: two
 # runs with different target directories (two agents, or CI next to a developer) never share them.
+# On Linux through Docker they go to coverage-linux, and the build to the volume of
+# scripts/test-linux.sh (TESELADB_LINUX_VOLUME), where the nightly toolchain is installed once.
 # The tests are built once and the built binaries run from there, so a source that changes while
 # the run goes on (another agent editing the tree) cannot mix binaries of two versions; doctests
 # are not run, since llvm-cov does not read their binaries.
@@ -20,47 +33,96 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The crates (by folder) that build and run only on Linux (023 FR-007, D-177).
+LINUX_CRATES=(teseladb-engine teseladb-sys teseladb-io teseladb-server teseladb-bench)
+# The engine's package: its test binaries run once per reactor backend.
+ENGINE=teseladb
+ENGINE_BACKENDS=${TESELADB_COV_ENGINE_BACKENDS:-io_uring linux-aio epoll}
+LINUX_IMAGE=${TESELADB_LINUX_IMAGE:-anotherproduct-rs-bench:1.98.0}
+LINUX_VOLUME=${TESELADB_LINUX_VOLUME:-teseladb-linux-target}
+# The engine's reactors run linux-aio with many contexts (as its own coverage runs set it).
+AIO_MAX_NR=1048576
+
+is_linux_crate() {
+  local c
+  for c in "${LINUX_CRATES[@]}"; do [[ $1 == "$c" ]] && return 0; done
+  return 1
+}
+
+on_linux() {
+  [[ $(uname -s) == Linux ]]
+}
+
 TOOLCHAIN=${TESELADB_COV_TOOLCHAIN:-nightly}
+BASE=${CARGO_TARGET_DIR:-target}
+
+# The Linux run from another host: this script again, inside the container, with the repository at
+# its own path (the tests find their files through paths fixed at build time).
+if [[ ${TESELADB_COV_LINUX:-0} == 1 && ${TESELADB_COV_INSIDE:-0} != 1 ]]; then
+  mkdir -p "$BASE/coverage-linux"
+  out=$(cd "$BASE/coverage-linux" && pwd)
+  registry=${CARGO_HOME:-$HOME/.cargo}/registry
+  args=("$@")
+  [[ ${#args[@]} -gt 0 ]] || args=("${LINUX_CRATES[@]}")
+  exec docker run --rm -i --privileged --init --dns 127.0.0.1 --tmpfs /full:rw,size=1m \
+    --ulimit memlock=-1 -e TESELADB_FULL_DIR=/full -e TESELADB_COV_INSIDE=1 -e TESELADB_COV_LINUX=1 \
+    -e TESELADB_COV_MIN="${TESELADB_COV_MIN:-}" -e TESELADB_COV_TOOLCHAIN="$TOOLCHAIN" \
+    -e TESELADB_COV_ENGINE_BACKENDS="$ENGINE_BACKENDS" -e TESELADB_COV_OUT="$out" \
+    -e TESELADB_COV_BUILD=/target/coverage-linux-build -e RUSTUP_HOME=/target/cov-rustup \
+    -e CARGO_HOME=/cargo-home -v "$registry:/cargo-home/registry" -v "$LINUX_VOLUME:/target" \
+    -v "$PWD:$PWD" -w "$PWD" "$LINUX_IMAGE" bash scripts/coverage.sh "${args[@]}"
+fi
+
+if [[ ${TESELADB_COV_INSIDE:-0} == 1 ]]; then
+  # The image has the pinned stable toolchain only: the nightly one and its llvm-tools are installed
+  # once into the volume, and later runs reuse them.
+  if ! rustup run "$TOOLCHAIN" rustc -V >/dev/null 2>&1; then
+    rustup toolchain install "$TOOLCHAIN" --no-self-update --profile minimal -c llvm-tools >&2
+  fi
+  # The tools link the toolchain's shared libLLVM, which lives in the sysroot's lib/.
+  nightly_lib=$(rustc +"$TOOLCHAIN" --print sysroot)/lib
+  export LD_LIBRARY_PATH=$nightly_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  echo "$AIO_MAX_NR" >/proc/sys/fs/aio-max-nr
+fi
 SYSROOT=$(rustc +"$TOOLCHAIN" --print sysroot)
 HOST=$(rustc +"$TOOLCHAIN" -vV | sed -n 's/^host: //p')
 BIN="$SYSROOT/lib/rustlib/$HOST/bin"
-BASE=${CARGO_TARGET_DIR:-target}
-OUT=$BASE/coverage
-cargo_target=()
-LINUX_IMAGE=teseladb-x86_64-qemu
-if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then
-  OUT=$BASE/coverage-linux
-  case $(uname -m) in
-    arm64 | aarch64) linux_target=aarch64-unknown-linux-musl ;;
-    *) linux_target=x86_64-unknown-linux-musl ;;
-  esac
-  cargo_target=(--target "$linux_target")
-  export "CARGO_TARGET_$(echo "$linux_target" | tr 'a-z-' 'A-Z_')_LINKER"=rust-lld
-  docker build -q -t "$LINUX_IMAGE" -f scripts/docker/x86_64-qemu.Dockerfile scripts/docker >/dev/null
-fi
+OUT=${TESELADB_COV_OUT:-$BASE/coverage}
 rm -rf "$OUT"
 mkdir -p "$OUT/prof"
 
 crates=("$@")
 if [[ ${#crates[@]} -eq 0 ]]; then
   for d in crates/*/ tools/*/; do
-    [[ -f $d/Cargo.toml ]] && crates+=("$(basename "$d")")
+    [[ -f $d/Cargo.toml ]] || continue
+    c=$(basename "$d")
+    if ! on_linux && is_linux_crate "$c"; then continue; fi
+    crates+=("$c")
   done
 fi
 pkgs=()
-for c in "${crates[@]}"; do pkgs+=(-p "$c"); done
+for c in "${crates[@]}"; do
+  if ! on_linux && is_linux_crate "$c"; then
+    echo "coverage: $c runs on Linux only: measure it with TESELADB_COV_LINUX=1" >&2
+    exit 2
+  fi
+  manifest=crates/$c/Cargo.toml
+  [[ -f $manifest ]] || manifest=tools/$c/Cargo.toml
+  [[ -f $manifest ]] || { echo "coverage: no crate $c in crates/ or tools/" >&2; exit 2; }
+  pkgs+=(-p "$(awk -F'"' '/^name = / { print $2; exit }' "$manifest")")
+done
 
 # `coverage(off)` is only used in test modules: outside them the feature stays unused.
 export RUSTFLAGS="-C instrument-coverage -Z coverage-options=branch --cfg coverage -A unused_features"
 PROF=$(cd "$OUT/prof" && pwd)
 export LLVM_PROFILE_FILE="$PROF/%p-%m.profraw"
-export CARGO_TARGET_DIR=$BASE/coverage-build
-if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then CARGO_TARGET_DIR=$BASE/coverage-linux-build; fi
+export CARGO_TARGET_DIR=${TESELADB_COV_BUILD:-$BASE/coverage-build}
 
-# One line per test binary: `<executable> <package folder> <package name>`, from a single build;
-# and in bins.txt the programs of the packages, which their tests start (`CARGO_BIN_EXE_<name>`):
-# what only the program runs, its `main`, is measured from its own object.
-cargo +"$TOOLCHAIN" test --offline -q "${pkgs[@]}" ${cargo_target[@]+"${cargo_target[@]}"} --no-run --message-format=json >"$OUT/build.json"
+# One line per test binary: `<executable> <package folder> <package name> <harness> <target>`, from
+# a single build (`harness` is 0 for a test target with its own `main`, which rustc builds without
+# `--test`); and in bins.txt the programs of the packages, which their tests start
+# (`CARGO_BIN_EXE_<name>`): what only the program runs, its `main`, is measured from its own object.
+cargo +"$TOOLCHAIN" test --offline -q "${pkgs[@]}" --no-run --message-format=json >"$OUT/build.json"
 python3 - "$OUT/build.json" "$OUT/bins.txt" >"$OUT/tests.txt" <<'PY'
 import json
 import os
@@ -71,7 +133,8 @@ for line in open(sys.argv[1], encoding="utf-8"):
     m = json.loads(line)
     if m.get("reason") != "compiler-artifact" or not m.get("executable"):
         continue
-    if not m["profile"]["test"]:
+    harness = m["profile"]["test"]
+    if not harness and "test" not in m["target"]["kind"]:
         if "bin" in m["target"]["kind"]:
             print(m["executable"], file=bins)
         continue
@@ -79,7 +142,7 @@ for line in open(sys.argv[1], encoding="utf-8"):
     # `path+file:///…/<folder>#<version>`, or `…#<name>@<version>` when the name differs.
     fragment = m["package_id"].rpartition("#")[2]
     name = fragment.partition("@")[0] if "@" in fragment else os.path.basename(package)
-    print(m["executable"], package, name, sep="\t")
+    print(m["executable"], package, name, int(harness), m["target"]["name"], sep="\t")
 PY
 
 # Each binary runs in its package's folder with the variables cargo gives a test at run time;
@@ -90,23 +153,56 @@ PY
 # profile merged from every binary gives each one the counts the others ran of a function they
 # share, and its records with another hash are dropped («functions have mismatched data»). Its
 # signature (the `%m` of the profile's name) comes from a first run that only lists its tests, and
-# tells its own profiles from those of the programs it starts.
-mkdir -p "$OUT/tests" "$OUT/sig"
+# tells its own profiles from those of the programs it starts. A program with its own `main` takes
+# no `--list`: every profile it leaves is read as its own (the engine's and teseladb-io's start no
+# other program, at most themselves again).
+mkdir -p "$OUT/tests" "$OUT/sig" "$OUT/home"
 LOGS=$(cd "$OUT/tests" && pwd)
 SIG=$(cd "$OUT/sig" && pwd)
-# run_test PROFILE PACKAGE NAME EXE ARGS...: runs a test binary as cargo would, writing PROFILE.
+HOMES=$(cd "$OUT/home" && pwd)
+# run_test PROFILE PACKAGE NAME BACKEND EXE ARGS...: runs a test binary as cargo would, writing
+# PROFILE; with a BACKEND, under a `$HOME` whose engine configuration file selects that reactor
+# backend.
 run_test() {
-  local profile=$1 package=$2 name=$3
-  shift 3
-  if [[ ${TESELADB_COV_LINUX:-0} == 1 ]]; then
-    # Without the seccomp profile (Docker's refuses io_uring) and with the battery's full disk.
-    (cd "$package" && docker run --rm --security-opt seccomp=unconfined --tmpfs "/full:rw,size=1m" \
-      -e TESELADB_FULL_DIR=/full -e "LLVM_PROFILE_FILE=$profile" \
-      -e "CARGO_MANIFEST_DIR=$package" -e "CARGO_PKG_NAME=$name" -v "$PWD:$PWD" -w "$package" \
-      "$LINUX_IMAGE" "$@")
+  local profile=$1 package=$2 name=$3 backend=$4 home=$HOME
+  shift 4
+  if [[ -n $backend ]]; then
+    home=$HOMES/$backend
+    mkdir -p "$home/.config/engine"
+    echo "reactor-backend = $backend" >"$home/.config/engine/engine.conf"
+  fi
+  # Nothing on its standard input: this script's loops read theirs.
+  (cd "$package" && env "HOME=$home" "LLVM_PROFILE_FILE=$profile" "CARGO_MANIFEST_DIR=$package" \
+    "CARGO_PKG_NAME=$name" "$@" </dev/null)
+}
+# command_of EXE PACKAGE NAME HARNESS TARGET: the command that runs a test binary, one word per line:
+# a libtest binary quietly (the engine's one test case at a time), the engine's programs that a
+# Python driver of its tests/data starts through it, any other program on its own.
+command_of() {
+  local exe=$1 package=$2 name=$3 harness=$4 target=$5
+  if [[ $harness == 1 ]]; then
+    printf '%s\n' "$exe" -q
+    if [[ $name == "$ENGINE" ]]; then printf '%s\n' --test-threads 1; fi
+    return
+  fi
+  case $name:$target in
+    "$ENGINE":metrics_tester)
+      printf '%s\n' python3 "$package/tests/data/prometheus_test.py" --exporter "$exe" \
+        --config "$package/tests/data/conf-example.yaml" ;;
+    "$ENGINE":rest_api_httpd)
+      printf '%s\n' python3 "$package/tests/data/json2code_test.py" --rest-api-httpd "$exe" ;;
+    *) printf '%s\n' "$exe" ;;
+  esac
+}
+# backends_of NAME: the reactor backends a package's tests run on, one per line (an empty line:
+# the default backend, without a configuration file).
+backends_of() {
+  local list
+  if [[ $1 == "$ENGINE" ]]; then
+    read -r -a list <<<"$ENGINE_BACKENDS"
+    printf '%s\n' "${list[@]}"
   else
-    (cd "$package" && env "LLVM_PROFILE_FILE=$profile" "CARGO_MANIFEST_DIR=$package" \
-      "CARGO_PKG_NAME=$name" "$@")
+    echo
   fi
 }
 # signature FILE: the binary signature in the name of a profile (`[<pid>-]<signature>_<n>.profraw`).
@@ -117,17 +213,27 @@ signature() {
   echo "${b%%_*}"
 }
 tests=()
+harnesses=()
 failures=()
 n=0
-while IFS=$'\t' read -r exe package name; do
+while IFS=$'\t' read -r exe package name harness target; do
   n=$((n + 1))
   tests+=("$exe")
+  harnesses+=("$harness")
   mkdir -p "$PROF/$n" "$SIG/$n"
-  run_test "$SIG/$n/%m.profraw" "$package" "$name" "$exe" --list >/dev/null 2>&1 || true
-  log=$LOGS/$(basename "$exe").txt
-  if ! run_test "$PROF/$n/%p-%m.profraw" "$package" "$name" "$exe" -q >"$log" 2>&1; then
-    failures+=("$exe")
+  if [[ $harness == 1 ]]; then
+    run_test "$SIG/$n/%m.profraw" "$package" "$name" "" "$exe" --list >/dev/null 2>&1 || true
   fi
+  cmd=()
+  while IFS= read -r word; do cmd+=("$word"); done < <(command_of "$exe" "$package" "$name" "$harness" "$target")
+  log=$LOGS/$(basename "$exe").txt
+  : >"$log"
+  ok=1
+  while IFS= read -r backend; do
+    if [[ -n $backend ]]; then echo "== reactor backend $backend" >>"$log"; fi
+    run_test "$PROF/$n/%p-%m.profraw" "$package" "$name" "$backend" "${cmd[@]}" >>"$log" 2>&1 || ok=0
+  done < <(backends_of "$name")
+  if [[ $ok == 0 ]]; then failures+=("$exe"); fi
 done <"$OUT/tests.txt"
 
 # The profile of each test binary, from its own profiles; and one of the programs, from the
@@ -145,7 +251,7 @@ for ((i = 1; i <= n; i++)); do
   for f in "$PROF/$i"/*.profraw; do
     [[ -e $f ]] || continue
     s=$(signature "$f")
-    if [[ $s == "$sig" ]]; then
+    if [[ ${harnesses[$((i - 1))]} == 0 || $s == "$sig" ]]; then
       mine+=("$f")
     elif ! grep -qx "$s" "$own"; then
       programs+=("$f")

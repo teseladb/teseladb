@@ -1,7 +1,7 @@
 [package]
 name = "teseladb-sys"
 version = "0.1.0"
-description = "TeselaDB's minimal FFI with Linux: file locking, epoll, AF_XDP, the engine's DMA calls and process signals."
+description = "TeselaDB's minimal FFI with Linux: file locking, host facts, AF_XDP, the engine's DMA calls and process signals."
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
@@ -12,4 +12,4 @@ workspace = true
 
 [dependencies]
 # The engine (023): its file API behind the safe forms of `dma`. Empty outside Linux.
-teseladb = { path = "../teseladb-engine" }
+teseladb = { path = "../teseladb-engine", default-features = false }

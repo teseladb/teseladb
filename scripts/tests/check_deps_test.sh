@@ -222,5 +222,83 @@ printf 'use std::sync::Mutex;\n' >> "$d/crates/teseladb-types/src/lib.rs"
 printf '// A Mutex would hold up the core.\n' >> "$d/crates/teseladb-io/src/lib.rs"
 expect "a lock outside the hot path, or in a comment" "$d" 0 "^check-deps: OK$"
 
+# The engine without its default features and without TLS, DNS, DPDK or hwloc in every manifest
+# that takes it (023 FR-002, SC-015).
+engine_dep() { # dir dependency: teseladb-io takes the engine with that dependency
+  mkdir -p "$1/crates/teseladb-engine/src"
+  printf '[package]\nname = "teseladb"\n[features]\ndefault = ["tls"]\ntls = []\n' \
+    > "$1/crates/teseladb-engine/Cargo.toml"
+  printf '#![allow(unsafe_code)]\npub fn f() {}\n' > "$1/crates/teseladb-engine/src/lib.rs"
+  printf '\n[[package]]\nname = "teseladb"\nversion = "0.1.0"\n' >> "$1/Cargo.lock"
+  printf '\n[dependencies]\nteseladb = %s\n' "$2" >> "$1/crates/teseladb-io/Cargo.toml"
+}
+d=$(fixture engine-off)
+engine_dep "$d" '{ path = "../teseladb-engine", default-features = false }'
+expect "the engine without its default features" "$d" 0 "^check-deps: OK$"
+
+d=$(fixture engine-default)
+engine_dep "$d" '{ path = "../teseladb-engine" }'
+expect "the engine with its default features" "$d" 1 \
+  "crates/teseladb-io/Cargo.toml: the engine with its default features"
+
+for feature in tls dns dpdk hwloc; do
+  d=$(fixture "engine-$feature")
+  engine_dep "$d" "{ path = \"../teseladb-engine\", default-features = false, features = [\"$feature\"] }"
+  expect "the engine's feature $feature" "$d" 1 \
+    "crates/teseladb-io/Cargo.toml: the engine's feature $feature"
+done
+
+d=$(fixture engine-allowed-feature)
+engine_dep "$d" \
+  '{ path = "../teseladb-engine", default-features = false, features = ["alloc_failure_injection"] }'
+expect "another feature of the engine" "$d" 0 "^check-deps: OK$"
+
+d=$(fixture engine-table)
+engine_dep "$d" '{ path = "../teseladb-engine", default-features = false }'
+printf '\n[dev-dependencies.teseladb]\npath = "../teseladb-engine"\n' >> "$d/crates/teseladb-io/Cargo.toml"
+expect "the engine's dependency in a table of its own" "$d" 1 \
+  "crates/teseladb-io/Cargo.toml: the engine's dependency in a table of its own"
+
+# --needed reads the NEEDED entries of a release binary (023 SC-015): only on Linux, with readelf
+# and a C compiler to make the binaries.
+d=$(fixture needed)
+if [[ $(uname -s) == Linux ]] && command -v readelf >/dev/null && command -v cc >/dev/null; then
+  printf 'int main(void) { return 0; }\n' > "$d/plain.c"
+  cc -o "$d/plain" "$d/plain.c"
+  out=$("$d/scripts/check-deps.sh" --needed "$d/plain" 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 0 && $out == *": OK" ]]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1))
+    echo "FAILED: a binary that needs only the C library (exit $rc): $out"
+  fi
+  # A binary that needs a library named like gnutls: a shared object of that name made here.
+  printf 'int gnutls_global_init(void) { return 0; }\n' > "$d/fake.c"
+  cc -shared -fPIC -o "$d/libgnutls.so.30" -Wl,-soname,libgnutls.so.30 "$d/fake.c"
+  printf 'int gnutls_global_init(void);\nint main(void) { return gnutls_global_init(); }\n' > "$d/uses.c"
+  cc -o "$d/uses" "$d/uses.c" "$d/libgnutls.so.30"
+  out=$("$d/scripts/check-deps.sh" --needed "$d/uses" 2>&1) && rc=0 || rc=$?
+  if [[ $rc -eq 1 && $out == *"needs libgnutls.so.30 (023 SC-015)"* ]]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1))
+    echo "FAILED: a binary that needs gnutls (exit $rc): $out"
+  fi
+fi
+out=$("$d/scripts/check-deps.sh" --needed "$d/missing" 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 1 && $out == *"$d/missing: no such binary"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  echo "FAILED: --needed of a missing binary (exit $rc): $out"
+fi
+out=$("$d/scripts/check-deps.sh" --other 2>&1) && rc=0 || rc=$?
+if [[ $rc -eq 2 && $out == usage:* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  echo "FAILED: an unknown option is a usage error (exit $rc): $out"
+fi
+
 echo "check_deps_test: $passed passed, $failed failed"
 [[ $failed -eq 0 ]]

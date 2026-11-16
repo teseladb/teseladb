@@ -7,10 +7,11 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_server::cli::DevOpts;
+use teseladb_server::cli::{DEV_MEMBER, DevOpts};
 use teseladb_server::procs::NodeProc;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
 
@@ -87,6 +88,39 @@ impl Target {
         }
     }
 
+    /// One more node of one core that joins the local cluster, in a process of its own (a member
+    /// of `teseladb dev`, D4); it serves when this returns.
+    pub fn add_member(&self, ready: Duration) -> Result<NodeProc, String> {
+        let Target::Local(nodes) = self else {
+            return Err("only a local cluster takes a new node".into());
+        };
+        let founder = nodes.first().ok_or("an empty cluster")?;
+        let k = u16::try_from(nodes.len()).map_err(text)?;
+        let args: Vec<String> = [
+            DEV_MEMBER,
+            "--nodes",
+            &(k + 1).to_string(),
+            "--cores",
+            "1",
+            "--port",
+            "0",
+            "--member",
+            &k.to_string(),
+            "--join",
+            &founder.peer_addr().to_string(),
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let log = teseladb_server::procs::log_path("member");
+        let node = NodeProc::spawn(&teseladb_binary()?, &args, Some(&log)).map_err(text)?;
+        if node.wait_ready(ready) {
+            return Ok(node);
+        }
+        node.stop();
+        Err("the new node did not join".into())
+    }
+
     /// Waits until a local cluster's first node routes at least `n` ranges.
     pub fn wait_ranges(&self, n: usize) -> Result<(), String> {
         let what = format!("routing {n} ranges");
@@ -106,12 +140,11 @@ impl Drop for Target {
 
 /// The `teseladb` binary of a local cluster's nodes: [`BIN_VAR`], or the one next to this binary
 /// (`cargo build -p teseladb-server` puts it there).
-fn teseladb_binary() -> Result<std::path::PathBuf, String> {
+pub fn teseladb_binary() -> Result<PathBuf, String> {
     if let Some(p) = std::env::var_os(BIN_VAR) {
         return Ok(p.into());
     }
-    let me = std::env::current_exe().map_err(text)?;
-    let bin = me.with_file_name("teseladb");
+    let bin = program_dir()?.join("teseladb");
     if bin.is_file() {
         return Ok(bin);
     }
@@ -120,6 +153,20 @@ fn teseladb_binary() -> Result<std::path::PathBuf, String> {
         bin.display()
     ))
 }
+
+/// The folder of the workspace's programs: this binary's, or its parent when this is a test
+/// binary in Cargo's `deps/`.
+pub fn program_dir() -> Result<PathBuf, String> {
+    let me = std::env::current_exe().map_err(text)?;
+    let dir = me.parent().ok_or("this program has no folder")?;
+    Ok(match dir.file_name() {
+        Some(name) if name == DEPS => dir.parent().unwrap_or(dir).to_path_buf(),
+        _ => dir.to_path_buf(),
+    })
+}
+
+/// The folder where Cargo puts test binaries, under the folder of the programs.
+const DEPS: &str = "deps";
 
 /// One connection.
 pub struct Client {
@@ -456,10 +503,20 @@ mod tests {
     }
 
     #[test]
+    fn the_programs_are_found_beside_a_test_binary() {
+        let dir = program_dir().expect("the folder of the programs");
+        assert_ne!(dir.file_name().and_then(|n| n.to_str()), Some(DEPS));
+        let me = std::env::current_exe().expect("this program");
+        assert!(me.starts_with(&dir), "{} under {}", me.display(), dir.display());
+    }
+
+    #[test]
     fn targets_are_host_and_port() {
         assert!(Target::open(Some("http://x")).err().expect("error").contains("is host:port"));
         let t = Target::open(Some("127.0.0.1:27017")).expect("target");
         assert_eq!(t.addr().expect("addr").port(), 27017);
+        let refused = t.add_member(Duration::ZERO).err().expect("error");
+        assert!(refused.contains("only a local cluster"), "{refused}");
         assert!(Client::connect(SocketAddr::from(([127, 0, 0, 1], 1))).is_err());
         assert_eq!(text(std::io::Error::other("x")), "x");
     }

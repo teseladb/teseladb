@@ -1,7 +1,11 @@
 //! TLS 1.3 between nodes (013 FR-006): the settings of a node with a PKI, and the channel a peer
-//! connection's bytes go through, in clear (`--insecure`) or encrypted. The handshake threads use
-//! the blocking side (the TLS handshake, then whole frames); the cores the non-blocking side, on
-//! the bytes their poller reads and writes.
+//! connection's bytes go through, in clear (`--insecure`) or encrypted. The blocking side (the TLS
+//! handshake, then whole frames on a `TcpStream`) serves the callers off the engine, as a node
+//! that asks to join before its own starts ([`crate::handshake`]); on the shards the connections
+//! are the engine's streams ([`crate::engine::tls_stream`]).
+//!
+//! The settings are read without a lock by every shard and replaced by a certificate rotation
+//! ([`PeerTls`]); the engine has no such cell, so they keep `teseladb_sys::latest`.
 
 use std::fmt;
 use std::io::{self, Read, Write};

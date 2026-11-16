@@ -171,11 +171,19 @@ fuzz_run() { # secs parallel target...: one core each, a marker per target that 
   return $rc
 }
 
+# The crates (by folder) that build and run only on Linux (023 FR-007): measured through Docker
+# outside Linux.
+LINUX_CRATES=" teseladb-engine teseladb-sys teseladb-io teseladb-server teseladb-bench "
+
 coverage_crate() { # the 95 % of 001 FR-014, then the profiles go: the disk is short
-  local rc=0
-  TESELADB_COV_MIN=95 scripts/coverage.sh "$1" || rc=$?
-  cp "$CARGO_TARGET_DIR/coverage/report.txt" "$CARGO_TARGET_DIR/coverage/missed.txt" "$PHASE_DIR/" 2>/dev/null || true
-  rm -rf "$CARGO_TARGET_DIR/coverage"
+  local rc=0 linux=0 dir=coverage
+  if [[ $LINUX_CRATES == *" $1 "* && $(uname -s) != Linux ]]; then
+    linux=1
+    dir=coverage-linux
+  fi
+  TESELADB_COV_LINUX=$linux TESELADB_COV_MIN=95 scripts/coverage.sh "$1" || rc=$?
+  cp "$CARGO_TARGET_DIR/$dir/report.txt" "$CARGO_TARGET_DIR/$dir/missed.txt" "$PHASE_DIR/" 2>/dev/null || true
+  rm -rf "${CARGO_TARGET_DIR:?}/$dir"
   return $rc
 }
 

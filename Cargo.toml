@@ -57,6 +57,10 @@ debug-assertions = false
 [profile.dev.package.teseladb-io]
 debug-assertions = false
 
+# The bench's open-loop generator awaits engine futures in its own code (023 FR-042): the same.
+[profile.dev.package.teseladb-bench]
+debug-assertions = false
+
 [profile.dev.package.teseladb-crypto]
 # teseladb-crypto is optimized in the tests too, as the crate always was (013 T005): the key derivations of
 # SCRAM and the at-rest encryption run on every authenticated or encrypted operation of the tests.

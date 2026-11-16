@@ -12,7 +12,12 @@
 #    (012 FR-008);
 #  - the I/O crates start no thread of their own outside the admitted files: everything runs on the
 #    engine's shards and engine threads (023 T067);
+#  - every manifest that takes the engine takes it without its default features and without the
+#    features that link gnutls, c-ares, hwloc or DPDK (023 FR-002, SC-015).
+# With --needed <binary> it checks a built release binary instead (023 SC-015, Linux): the dynamic
+# libraries it needs (`readelf -d`, `NEEDED`) include none of gnutls, c-ares, hwloc or DPDK.
 #   scripts/check-deps.sh
+#   scripts/check-deps.sh --needed target/x86_64-unknown-linux-gnu/release/teseladb
 # Bash 3.2 (macOS) or later.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -46,6 +51,13 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   # 023 FR-016, FR-029: plaintext handed to the engine's streams in the vectors TLS made (no copy),
   # and glibc's asynchronous resolver.
   crates/teseladb-io/src/engine/tls_stream.rs crates/teseladb-io/src/engine/blocking.rs)
+
+# The engine's package path, and the features of the engine that no TeselaDB crate turns on: TLS
+# and DNS (gnutls, c-ares), DPDK and hwloc stay out of the binary (023 FR-002, D-175, SC-015).
+ENGINE_DIR=crates/teseladb-engine
+ENGINE_FORBIDDEN_FEATURES=(tls dns dpdk hwloc gnutls_legacy)
+# The libraries of those features: none may be among the release binary's `NEEDED` (SC-015).
+FORBIDDEN_LIBRARIES='gnutls|cares|hwloc|dpdk|librte_'
 
 fail=0
 finding() {
@@ -336,6 +348,55 @@ check_engine_threads() {
   )
 }
 
+# Every manifest that takes the engine (its dependency names the engine's path) takes it with
+# `default-features = false` and turns on none of ENGINE_FORBIDDEN_FEATURES (023 FR-002). The
+# dependency is written on one line, as every dependency of the workspace is; a table of its own
+# (`[dependencies.teseladb]`) is a finding, since this check cannot read it.
+check_engine_features() {
+  local m line f re
+  for m in Cargo.toml crates/*/Cargo.toml tools/*/Cargo.toml; do
+    [[ -f $m && $m != "$ENGINE_DIR/Cargo.toml" ]] || continue
+    if grep -Eq '^\[([a-z.-]*\.)?(dev-|build-)?dependencies\.teseladb\]' "$m"; then
+      finding "$m: the engine's dependency in a table of its own; write it on one line (023 FR-002)"
+    fi
+    while IFS= read -r line; do
+      [[ $line == *'default-features = false'* ]] ||
+        finding "$m: the engine with its default features (023 FR-002): $line"
+      for f in "${ENGINE_FORBIDDEN_FEATURES[@]}"; do
+        re="features[[:space:]]*=[[:space:]]*\\[[^]]*\"$f\""
+        if [[ $line =~ $re ]]; then
+          finding "$m: the engine's feature $f (023 FR-002, SC-015): $line"
+        fi
+      done
+    done < <(grep -E "path[[:space:]]*=[[:space:]]*\"[^\"]*${ENGINE_DIR#crates/}\"" "$m" || true)
+  done
+}
+
+# The dynamic libraries a release binary needs hold none of the engine's features left out
+# (023 SC-015): gnutls, c-ares, hwloc and DPDK.
+check_release_needed() {
+  local bin=$1 needed lib
+  [[ -f $bin ]] || { finding "$bin: no such binary"; return; }
+  command -v readelf >/dev/null || { finding "readelf is needed to read $bin"; return; }
+  needed=$(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+  [[ -n $needed ]] || finding "$bin: no NEEDED entry; is it a dynamic ELF binary?"
+  while IFS= read -r lib; do
+    [[ -n $lib ]] || continue
+    if grep -Eq "$FORBIDDEN_LIBRARIES" <<<"$lib"; then
+      finding "$bin needs $lib (023 SC-015)"
+    fi
+  done <<<"$needed"
+}
+
+if [[ ${1:-} == --needed ]]; then
+  [[ $# -eq 2 ]] || { echo "usage: scripts/check-deps.sh [--needed <binary>]" >&2; exit 2; }
+  check_release_needed "$2"
+  [[ $fail -eq 0 ]] || exit 1
+  echo "check-deps: $2: OK"
+  exit 0
+fi
+[[ $# -eq 0 ]] || { echo "usage: scripts/check-deps.sh [--needed <binary>]" >&2; exit 2; }
+
 check_lock
 check_logic_crates
 check_tools
@@ -344,6 +405,7 @@ check_testkv_not_linked
 check_unsafe_forbidden
 check_hot_path_locks
 check_engine_threads
+check_engine_features
 
 [[ $fail -eq 0 ]] || exit 1
 echo "check-deps: OK"

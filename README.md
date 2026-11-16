@@ -7,7 +7,7 @@ official MongoDB drivers, `mongosh` and the MongoDB database tools, with no chan
 options beyond the address of the node.
 
 A single node is already a complete database. You add nodes when you need more capacity or want to keep working while
-one of them is down. TeselaDB ships as one binary for Linux and macOS and as a Docker image.
+one of them is down. TeselaDB ships as one binary for Linux and as a Docker image, which is how it runs on macOS.
 
 The website is [teseladb.com](https://teseladb.com), with the [documentation](https://teseladb.com/docs) and the
 [downloads](https://teseladb.com/download). The Docker image is
@@ -19,8 +19,8 @@ The website is [teseladb.com](https://teseladb.com), with the [documentation](ht
 In about five minutes you will install TeselaDB, start a node on your machine and open a `mongosh` session on it. A
 single node is already a complete database that stores your collections and serves the MongoDB drivers.
 
-To follow it you need Linux on x86_64 or aarch64 with glibc 2.28 or later, or macOS on Apple Silicon, with `curl` and
-[`mongosh`](https://www.mongodb.com/docs/mongodb-shell/install/). On any other system, go straight to
+To follow it you need Linux on x86_64 or aarch64 with glibc 2.28 or later, with `curl` and
+[`mongosh`](https://www.mongodb.com/docs/mongodb-shell/install/). On macOS or any other system, go straight to
 [Run it with Docker](#run-it-with-docker), which only needs Docker and `mongosh`.
 
 ### Step 1. Install the binary
@@ -273,8 +273,8 @@ The [REST API reference](https://teseladb.com/docs/reference/rest-api) and the
 
 | Platform | How to install |
 | --- | --- |
-| Linux x86_64 or aarch64 with glibc 2.28 or later, macOS on Apple Silicon | The install script above, or the archive of your platform from [Releases](https://github.com/teseladb/teseladb/releases) |
-| Any system with Docker | `docker pull teseladb/teseladb:latest` from Docker Hub, or `docker pull ghcr.io/teseladb/teseladb:latest` from GitHub |
+| Linux x86_64 or aarch64 with glibc 2.28 or later | The install script above, or the archive of your platform from [Releases](https://github.com/teseladb/teseladb/releases) |
+| macOS, or any system with Docker | `docker pull teseladb/teseladb:latest` from Docker Hub, or `docker pull ghcr.io/teseladb/teseladb:latest` from GitHub |
 
 Each archive in Releases comes with its `.sha256` file. To check an archive by hand, run this in the folder where you
 downloaded both files.

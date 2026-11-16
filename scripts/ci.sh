@@ -6,7 +6,8 @@
 #   TESELADB_BENCH=1 scripts/ci.sh   also the reference benchmark (gate 8)
 #   TESELADB_CI_LONG=0 scripts/ci.sh  every gate but the long runs of coverage, faulty variants and TLC,
 #     which scripts/final-phase.sh runs as phases of their own (coverage crate by crate)
-# Bash 3.2 (macOS) or later. The full run needs Docker (x86_64 tests and shellcheck).
+# Bash 3.2 (macOS) or later. The full run needs Docker (x86_64 tests, the Linux-only packages'
+# lints, tests and coverage, and shellcheck).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,9 +46,19 @@ shellcheck_all() {
   docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -x "${files[@]}"
 }
 
+# The packages that build and run only on Linux (023 FR-007, D-177): the engine, teseladb-sys,
+# teseladb-io, teseladb-server and teseladb-bench. Outside Linux the workspace's gates leave them
+# out, and their lints and tests run on Linux through scripts/test-linux.sh
+# (`<arch>-unknown-linux-gnu`, 023 R10).
+LINUX_CRATES=(teseladb teseladb-sys teseladb-io teseladb-server teseladb-bench)
+LINUX_EXCLUDE=()
+for c in "${LINUX_CRATES[@]}"; do LINUX_EXCLUDE+=(--exclude "$c"); done
+HOST_EXCLUDE=()
+[[ $(uname -s) == Linux ]] || HOST_EXCLUDE=("${LINUX_EXCLUDE[@]}")
+
 # Cargo.lock only holds workspace packages (001 FR-023): every step runs offline and without a registry.
 gate "1. format" cargo fmt --all -- --check
-gate "1. lints" cargo clippy --workspace --all-targets --offline -- -D warnings
+gate "1. lints" cargo clippy --workspace ${HOST_EXCLUDE[@]+"${HOST_EXCLUDE[@]}"} --all-targets --offline -- -D warnings
 gate "2. dependencies" scripts/check-deps.sh
 gate "2. Unicode 8.0 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-ucd.sha256
 gate "2. CLDR 29 data (D-043)" scripts/fetch-pinned.sh scripts/unicode-cldr.sha256
@@ -65,11 +76,14 @@ gate "2. collation tables match their generator (D-043)" cargo run -q --offline 
 gate "2. IANA time zone database 2024a (D-169)" scripts/fetch-pinned.sh scripts/tzdata.sha256
 gate "2. time zone tables match their generator (D-169)" \
   cargo run -q --offline -p teseladb-tzgen -- .tools/tzdata/tzdata2024a.tar.gz --check
-gate "3. tests" cargo test --workspace --offline -q
+gate "3. tests" cargo test --workspace ${HOST_EXCLUDE[@]+"${HOST_EXCLUDE[@]}"} --offline -q
 [[ $QUICK -eq 1 ]] && exit 0
 
-gate "1. lints for x86_64 Linux" cargo clippy --workspace --all-targets --offline \
+# The logic crates' x86_64 paths, cross-checked; the Linux-only packages link glibc and the
+# engine's libraries, so theirs run natively on Linux below.
+gate "1. lints for x86_64 Linux" cargo clippy --workspace "${LINUX_EXCLUDE[@]}" --all-targets --offline \
   --target x86_64-unknown-linux-musl -- -D warnings
+gate "1. lints of the Linux-only packages (023 FR-007)" scripts/test-linux.sh --lints "${LINUX_CRATES[@]}"
 gate "1. shell scripts" shellcheck_all
 # Miri ignores opt-level and warns about it: its runs build the workspace without the optimization of
 # the dev profile (Cargo.toml), which only speeds up the native tests.
@@ -135,11 +149,13 @@ gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env TES
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \
   cargo test -q --offline --release -p teseladb-lsm --test crash
 gate "3. real crashes with SIGKILL (50 kills)" env TESELADB_KILL_ROUNDS=50 \
-  cargo test -q --offline --release -p teseladb-io --test crash_real
+  scripts/test-linux.sh --release --test crash_real teseladb-io
 gate "3. real crashes of log and LSM with SIGKILL (50 kills, 004)" env TESELADB_KILL_ROUNDS=50 \
-  cargo test -q --offline --release -p teseladb-io --test crash_real_lsm
+  scripts/test-linux.sh --release --test crash_real_lsm teseladb-io
 gate "3. tests on x86_64 Linux" scripts/test-x86_64.sh
-gate "3. tests on the Linux kernel, io_uring included (012)" scripts/test-linux.sh
+gate "3. tests on the Linux kernel, io_uring included (012, 023 FR-007)" \
+  scripts/test-linux.sh "${LINUX_CRATES[@]}"
+gate "3. the release binary links no gnutls, c-ares, hwloc or DPDK (023 SC-015)" scripts/test-linux.sh --needed
 gate "3. TLS interoperability with openssl and curl (013 FR-019)" scripts/tls-interop.sh
 gate "4. tests of coverage" scripts/tests/coverage_test.sh
 gate "4. tests of the coverage of a set of commits" scripts/tests/coverage_of_commits_test.sh
@@ -151,6 +167,10 @@ long_gate() {
   fi
 }
 long_gate "4. coverage (95 % per crate)" env TESELADB_COV_MIN=95 scripts/coverage.sh
+if [[ $(uname -s) != Linux ]]; then
+  long_gate "4. coverage of the Linux-only crates, the engine included (95 %, 023 FR-040)" \
+    env TESELADB_COV_MIN=95 TESELADB_COV_LINUX=1 scripts/coverage.sh
+fi
 
 gate "5. tests of sim-mutants" scripts/tests/sim_mutants_test.sh
 long_gate "5. faulty variants, each caught by its checker (002 SC-002)" scripts/sim-mutants.sh
@@ -160,7 +180,11 @@ gate "5. simulator (200 seeds of every workload)" cargo run -q --offline --relea
 gate "7. tests of tlc" scripts/tests/tlc_test.sh
 long_gate "7. TLC (every model, writes spec/tla/RESULTS.md)" scripts/tlc.sh --all
 if [[ ${TESELADB_BENCH:-0} == 1 ]]; then
-  # 002 replaces it with `reference` and its baseline.
+  # 002 replaces it with `reference` and its baseline. The bench runs on Linux only (023 FR-007).
+  if [[ $(uname -s) != Linux ]]; then
+    echo "ci: TESELADB_BENCH=1 measures on a Linux host with NVMe and io_uring, not on $(uname -s)" >&2
+    exit 1
+  fi
   gate "8. performance" cargo run -q --offline --release -p teseladb-bench -- --scenario raftlog
 fi
 echo "ci: all gates OK"

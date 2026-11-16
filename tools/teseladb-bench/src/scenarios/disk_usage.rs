@@ -1,7 +1,7 @@
 //! `disk-usage` (012 FR-009): bytes on disk per document against BSON, an encoding that carries the
 //! name and type of every field in every document (what the reference server keeps per document
-//! before its block compression). A node of one core on the real disk (the engine's files, in
-//! `--data` or a temporary folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire
+//! before its block compression). A node of one core in a process of its own (D4) on the real disk
+//! (the engine's files, in `--data` or a temporary folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire
 //! protocol, with small memtables so that the documents reach the LSM's files. It reports:
 //! - `disk_usage.bson_per_doc`: BSON bytes per document;
 //! - `disk_usage.sst_per_doc`: bytes of the LSM's files per document;
@@ -13,9 +13,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use teseladb_bson::Value;
-use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::client_listener::ClientConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::{NodeArgs, NodeProc};
 
 use super::ycsb::{insert_when_ready, record_doc};
 use super::ycsb_gen::Rng;
@@ -65,15 +65,8 @@ fn vanished_as_none<T>(r: std::io::Result<T>, may_vanish: bool) -> std::io::Resu
 pub fn run(args: &Args) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "disk-usage")?;
     let path = dir.path.clone();
-    let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
-    let mut cfg = NodeConfig {
-        cores: Some(1),
-        client: Some(ClientConfig { addrs: vec![loopback], ..ClientConfig::new(Vec::new()) }),
-        ..NodeConfig::default()
-    };
-    cfg.lsm.memtable_bytes = MEMTABLE_BYTES;
-    let node = Node::start(cfg, DiskPlace::Files(path.clone()), None).map_err(msg)?;
-    let node = super::ready(node, READY, "the node did not start")?;
+    let node =
+        crate::nodes::start(RECIPE, &[], Some(&path), &[], READY, "the node did not start")?;
     let measured = measure(args, &node, &path);
     node.stop();
     let (bson, sst, total) = measured?;
@@ -93,8 +86,28 @@ pub fn run(args: &Args) -> Result<Report, String> {
     Ok(report)
 }
 
+/// The recipe of this scenario's node ([`crate::nodes`]).
+pub const RECIPE: &str = "disk-usage";
+
+/// The configuration of the node of [`RECIPE`]: one core, the clients' port and memtables of
+/// [`MEMTABLE_BYTES`]. Its files are the node process's `--dir`.
+///
+/// # Errors
+///
+/// None: the recipe takes no parameter.
+pub fn node_config(_a: &NodeArgs) -> Result<NodeConfig, String> {
+    let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
+    let mut cfg = NodeConfig {
+        cores: Some(1),
+        client: Some(ClientConfig { addrs: vec![loopback], ..ClientConfig::new(Vec::new()) }),
+        ..NodeConfig::default()
+    };
+    cfg.lsm.memtable_bytes = MEMTABLE_BYTES;
+    Ok(cfg)
+}
+
 /// Loads the records; returns their BSON bytes, the LSM's bytes and the directory's bytes.
-fn measure(args: &Args, node: &Node, dir: &Path) -> Result<(u64, u64, u64), String> {
+fn measure(args: &Args, node: &NodeProc, dir: &Path) -> Result<(u64, u64, u64), String> {
     let addr = *node.client_addrs().first().ok_or("the node has no clients' port")?;
     let mut c = Client::connect(addr)?;
     let mut rng = Rng::new(1);

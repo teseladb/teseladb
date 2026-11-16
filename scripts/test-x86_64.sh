@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# Runs the tests of the given crates (default: every crate of the workspace) on x86_64 Linux: they
-# are built for `x86_64-unknown-linux-musl` (static, linked with rust-lld) and run with
-# `qemu-x86_64 -cpu max` inside a local image (scripts/docker/x86_64-qemu.Dockerfile). That CPU
-# model has SSE4.2, SSSE3, SSE4.1 and the SHA extensions on any host, so the x86_64 paths (CRC32C,
-# Adler-32, SHA-NI, epoll, eventfd) run even on an AArch64 machine; `TESELADB_EXPECT_ACCEL` makes the
-# tests of teseladb-hash fail if one of the hash accelerations is not detected (001 FR-023).
+# Runs the tests of the given crates (default: every crate of the workspace but the Linux-only ones,
+# which scripts/test-linux.sh runs on glibc, 023 FR-007) on x86_64 Linux: they are built for
+# `x86_64-unknown-linux-musl` (static, linked with rust-lld) and run with `qemu-x86_64 -cpu max`
+# inside a local image (scripts/docker/x86_64-qemu.Dockerfile). That CPU model has SSE4.2, SSSE3,
+# SSE4.1 and the SHA extensions on any host, so the x86_64 paths (CRC32C, Adler-32, SHA-NI) run even
+# on an AArch64 machine; `TESELADB_EXPECT_ACCEL` makes the tests of teseladb-hash fail if one of the
+# hash accelerations is not detected (001 FR-023).
 #   scripts/test-x86_64.sh [crate...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TARGET=x86_64-unknown-linux-musl
 IMAGE=teseladb-x86_64-qemu
+# The crates (by folder) that build and run only on Linux with glibc (023 FR-007, D-177).
+LINUX_CRATES=" teseladb-engine teseladb-sys teseladb-io teseladb-server "
 crates=("$@")
 if [[ ${#crates[@]} -eq 0 ]]; then
-  for d in crates/*/; do crates+=("$(basename "$d")"); done
+  for d in crates/*/; do
+    c=$(basename "$d")
+    [[ $LINUX_CRATES == *" $c "* ]] || crates+=("$c")
+  done
 fi
 pkgs=()
 for c in "${crates[@]}"; do pkgs+=(-p "$c"); done
