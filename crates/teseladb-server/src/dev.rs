@@ -214,7 +214,9 @@ pub fn run(
             break 0;
         }
         let ended = nodes.iter_mut().zip(&ids).find_map(|(n, id)| Some((*id, n.ended()?)));
-        if let Some((id, status)) = ended {
+        // A Ctrl-C reaches the nodes too (they are in the terminal's process group): a node that
+        // ends on it is not a failure of the cluster.
+        if let Some((id, status)) = ended.filter(|_| !stop()) {
             log.error(
                 "a node of the development cluster ended",
                 &[("node_id", &id), ("status", &status)],
