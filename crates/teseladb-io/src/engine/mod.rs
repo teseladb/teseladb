@@ -20,6 +20,7 @@ use teseladb::engine::core::with_timeout::with_timeout;
 
 pub mod blocking;
 pub mod connect;
+pub mod link;
 pub mod tls_stream;
 
 /// The deadline `timeout` from now on the steady clock.

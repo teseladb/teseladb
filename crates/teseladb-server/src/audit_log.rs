@@ -161,8 +161,7 @@ fn kmip_encryption(
     use teseladb_auth::kmip::{Answer, Request};
     let mut log_key = [0u8; 32];
     random(&mut log_key).map_err(crate::error_text)?;
-    let mut session = crate::kmip::Session::connect(kmip)?;
-    match session.ask(&Request::Encrypt(uid.to_owned(), log_key.to_vec())) {
+    match crate::kmip::ask_once(kmip, Request::Encrypt(uid.to_owned(), log_key.to_vec()))? {
         Ok(Answer::Encrypted { data, iv }) => Ok(AuditEncryption::with_kmip(
             log_key,
             uid,

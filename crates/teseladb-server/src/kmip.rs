@@ -7,20 +7,29 @@
 //! server does, and every `--kmipKeyStatePollingSeconds` the node checks that its key is still
 //! active: a key that is not stops the node.
 //!
+//! The conversation with the server runs on the node's engine (023 FR-024): an engine connection
+//! under TLS, each step within `--kmipConnectTimeoutMS` on the engine's timers, the name resolved
+//! off the shard. The keystore and the certificate files are read and written by the thread that
+//! starts the node, off the shards; the check of the key's state is a background task of a shard.
+//!
 //! ```text
 //! kmip.keystore := "key=" id "\n" "sealed=" base64(nonce(12) · AES-256-GCM(kmip key, own key) · tag(16)) "\n"
 //! ```
 
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_os = "linux"))]
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use teseladb_auth::kmip::{ACTIVE, Answer, KmipError, Request, V1_0, V1_2, Version, message_len};
+#[cfg(not(target_os = "linux"))]
+use teseladb_auth::kmip::{Answer, Request};
+use teseladb_auth::kmip::KmipError;
+#[cfg(target_os = "linux")]
+use teseladb_auth::kmip::{V1_0, V1_2, Version};
 use teseladb_crypto::aes::Aes;
 use teseladb_crypto::modes::AesGcm;
 use teseladb_tls::{CertifiedKey, ClientConfig, Trust};
@@ -28,7 +37,6 @@ use teseladb_x509::pem::{base64_decode, base64_encode};
 use teseladb_x509::{Certificate, PrivateKey};
 
 use crate::cli::Password;
-use crate::tls_stream::TlsStream;
 
 /// The file of the data directory with the sealed key and the KMIP key's identifier.
 pub const KEYSTORE: &str = "kmip.keystore";
@@ -45,7 +53,14 @@ const KEY_LINE: &str = "key=";
 const SEALED_LINE: &str = "sealed=";
 const KEYSTORE_MODE: u32 = 0o600;
 /// How often the poller looks at the node's stop while it waits.
+#[cfg(target_os = "linux")]
 const POLL_STEP: Duration = Duration::from_millis(100);
+/// The error of a server that closed the connection before it answered.
+#[cfg(target_os = "linux")]
+const CLOSED: &str = "the KMIP server closed the connection";
+/// The error without servers.
+#[cfg(target_os = "linux")]
+const NO_SERVER: &str = "no --kmipServerName";
 
 /// The KMIP options (`security.kmip.*`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,12 +114,14 @@ impl Default for KmipOpts {
 }
 
 impl KmipOpts {
+    #[cfg(target_os = "linux")]
     fn version(&self) -> Version {
         if self.legacy { V1_0 } else { V1_2 }
     }
 
-    /// The client side of TLS: the server's authorities and the node's certificate.
-    fn tls(&self) -> Result<Arc<ClientConfig>, String> {
+    /// The client side of TLS: the server's authorities and the node's certificate, from their
+    /// files (read by the calling thread, never by a shard).
+    pub fn tls(&self) -> Result<Arc<ClientConfig>, String> {
         let trust = match &self.ca_file {
             Some(path) => {
                 let text = read(path, "kmipServerCAFile")?;
@@ -132,74 +149,6 @@ impl KmipOpts {
 
 fn read(path: &Path, option: &str) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("--{option} {}: {e}", path.display()))
-}
-
-/// A connection to the KMIP server.
-pub struct Session {
-    stream: TlsStream,
-    version: Version,
-}
-
-impl Session {
-    /// Connects to the first server of `o` that answers, trying each `--kmipConnectRetries` more
-    /// times; the reference server's message when none does.
-    pub fn connect(o: &KmipOpts) -> Result<Session, String> {
-        let tls = o.tls()?;
-        let mut last = "no --kmipServerName".to_owned();
-        for name in &o.servers {
-            let Ok(found) = (name.as_str(), o.port).to_socket_addrs() else {
-                last = format!("Could not resolve KMIP server {name}:{}", o.port);
-                continue;
-            };
-            // IPv4 first, as the reference server names the address it could not reach.
-            let mut addrs: Vec<SocketAddr> = found.collect();
-            addrs.sort_by_key(SocketAddr::is_ipv6);
-            let mut first = None;
-            for _ in 0..=o.connect_retries {
-                for addr in &addrs {
-                    match dial(*addr, name, o.connect_timeout, &tls) {
-                        Ok(stream) => return Ok(Session { stream, version: o.version() }),
-                        Err(e) => {
-                            first.get_or_insert(e);
-                        }
-                    }
-                }
-            }
-            last = first.unwrap_or(last);
-        }
-        Err(last)
-    }
-
-    /// Sends `req` and reads its answer.
-    pub fn ask(&mut self, req: &Request) -> Result<Answer, KmipFailure> {
-        self.stream.send(&req.encode(self.version)).map_err(KmipFailure::Io)?;
-        let mut got = Vec::new();
-        loop {
-            if let Some(len) = message_len(&got)
-                && got.len() >= len
-            {
-                return req.answer(&got[..len]).map_err(KmipFailure::Kmip);
-            }
-            let data = self.stream.recv().map_err(KmipFailure::Io)?;
-            if data.is_empty() {
-                return Err(KmipFailure::Io("the KMIP server closed the connection".into()));
-            }
-            got.extend_from_slice(&data);
-        }
-    }
-}
-
-fn dial(
-    addr: SocketAddr,
-    name: &str,
-    timeout: Duration,
-    tls: &Arc<ClientConfig>,
-) -> Result<TlsStream, String> {
-    let refused = || format!("Could not connect to KMIP server {addr}");
-    let sock = TcpStream::connect_timeout(&addr, timeout).map_err(|_| refused())?;
-    // A timeout that is not zero is always taken (the options never give zero).
-    let _ = sock.set_read_timeout(Some(timeout));
-    TlsStream::client(sock, tls.clone(), name).map_err(|e| format!("{}: {e}", refused()))
 }
 
 /// Why a KMIP request failed.
@@ -246,45 +195,26 @@ impl std::fmt::Debug for MasterKey {
     }
 }
 
-fn created(s: &mut Session, o: &KmipOpts, log: &mut Vec<String>) -> Result<String, String> {
-    let id = match s.ask(&Request::CreateKey) {
-        Ok(Answer::Created(id)) => id,
-        Ok(_) => return Err("KMIP create key: an answer of another kind".into()),
-        Err(e) => return Err(format!("KMIP create key failed, {e}")),
-    };
-    log.push(format!("Created KMIP key keyId={id}"));
-    if o.activate_keys {
-        s.ask(&Request::Activate(id.clone()))
-            .map_err(|e| format!("KMIP activate key '{id}' failed, {e}"))?;
-        log.push(format!("Activated KMIP key uid={id}"));
-    }
-    Ok(id)
+/// What a start asks the KMIP server for.
+#[derive(Clone, Debug)]
+enum Ask {
+    /// A new key, activated with `--kmipActivateKeys`, and its bytes.
+    Create,
+    /// The bytes of an existing key, which has to be active with `--kmipActivateKeys`.
+    Key(String),
 }
 
-/// The bytes of KMIP key `id`, which has to be active with `--kmipActivateKeys`.
-fn kmip_key(s: &mut Session, o: &KmipOpts, id: &str) -> Result<[u8; KEY_LEN], String> {
-    if o.activate_keys {
-        check_active(s, id)?;
-    }
-    match s.ask(&Request::Get(id.to_owned())) {
-        Ok(Answer::Key(mut bytes)) => {
-            let mut key = [0u8; KEY_LEN];
-            // The answer was checked to hold 256 bits.
-            key.copy_from_slice(&bytes[..KEY_LEN]);
-            bytes.fill(0);
-            Ok(key)
-        }
-        Ok(_) => Err(format!("KMIP get key '{id}': an answer of another kind")),
-        Err(e) => Err(format!("KMIP get key '{id}' failed, {e}")),
-    }
+/// A KMIP key the server gave: its identifier, its bytes and the log lines of its creation.
+struct Fetched {
+    id: String,
+    key: [u8; KEY_LEN],
+    log: Vec<String>,
 }
 
-/// Whether KMIP key `id` is active; the reference server's message when it is not.
-fn check_active(s: &mut Session, id: &str) -> Result<(), String> {
-    match s.ask(&Request::State(id.to_owned())) {
-        Ok(Answer::State(ACTIVE)) => Ok(()),
-        Ok(_) => Err(format!("KMIP Key used for ESE is not in active state key_uid={id}")),
-        Err(e) => Err(format!("KMIP get attributes of key '{id}' failed, {e}")),
+impl Drop for Fetched {
+    fn drop(&mut self) {
+        self.key = [0; KEY_LEN];
+        std::hint::black_box(&self.key);
     }
 }
 
@@ -342,27 +272,33 @@ fn write_keystore(dir: &Path, text: &str) -> Result<(), String> {
     std::fs::File::open(dir).and_then(|d| d.sync_all()).map_err(io)
 }
 
+/// A random array.
+fn drawn<const N: usize>(
+    random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
+) -> Result<[u8; N], String> {
+    let mut out = [0u8; N];
+    random(&mut out).map_err(|e| format!("{KEYSTORE}: {e}"))?;
+    Ok(out)
+}
+
 /// The node's key from the KMIP server of `o` for data directory `dir`: created on the first
-/// start, opened on the next ones, sealed under a new KMIP key with `--kmipRotateMasterKey`.
+/// start, opened on the next ones, sealed under a new KMIP key with `--kmipRotateMasterKey`. Called
+/// by the thread that starts the node, which reads and writes the keystore; the server is asked on
+/// the node's engine.
 pub fn master_key(
     o: &KmipOpts,
     dir: &Path,
     random: &mut dyn FnMut(&mut [u8]) -> std::io::Result<()>,
 ) -> Result<MasterKey, String> {
-    let mut s = Session::connect(o)?;
-    let mut log = Vec::new();
+    let tls = o.tls()?;
     let path = dir.join(KEYSTORE);
-    let mut nonce = [0u8; NONCE_LEN];
-    random(&mut nonce).map_err(|e| format!("{KEYSTORE}: {e}"))?;
     if !path.exists() {
-        let id = match &o.key_identifier {
-            Some(id) => id.clone(),
-            None => created(&mut s, o, &mut log)?,
-        };
-        let kmip = kmip_key(&mut s, o, &id)?;
-        let mut own = [0u8; KEY_LEN];
-        random(&mut own).map_err(|e| format!("{KEYSTORE}: {e}"))?;
-        write_keystore(dir, &keystore_text(&id, &kmip, &own, &nonce))?;
+        let ask = o.key_identifier.clone().map_or(Ask::Create, Ask::Key);
+        let mut got = fetch_off_shard(o, &tls, ask)?;
+        let nonce = drawn::<NONCE_LEN>(random)?;
+        let own = drawn::<KEY_LEN>(random)?;
+        write_keystore(dir, &keystore_text(&got.id, &got.key, &own, &nonce))?;
+        let (id, log) = (std::mem::take(&mut got.id), std::mem::take(&mut got.log));
         return Ok(MasterKey { key: own, id, log, rotated: false });
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{KEYSTORE}: {e}"))?;
@@ -372,29 +308,236 @@ pub fn master_key(
             "--kmipKeyIdentifier only applies the first time encryption is enabled: this data directory is encrypted with KMIP key '{id}'"
         ));
     }
-    let kmip = kmip_key(&mut s, o, &id)?;
-    let own = open_sealed(&id, &kmip, &sealed)
+    let got = fetch_off_shard(o, &tls, Ask::Key(id.clone()))?;
+    let own = open_sealed(&id, &got.key, &sealed)
         .ok_or_else(|| format!("{KEYSTORE}: KMIP key '{id}' does not open it"))?;
     if !o.rotate {
-        return Ok(MasterKey { key: own, id, log, rotated: false });
+        return Ok(MasterKey { key: own, id, log: Vec::new(), rotated: false });
     }
-    let new_id = created(&mut s, o, &mut log)?;
-    let new_kmip = kmip_key(&mut s, o, &new_id)?;
-    write_keystore(dir, &keystore_text(&new_id, &new_kmip, &own, &nonce))?;
+    let mut new = fetch_off_shard(o, &tls, Ask::Create)?;
+    let nonce = drawn::<NONCE_LEN>(random)?;
+    write_keystore(dir, &keystore_text(&new.id, &new.key, &own, &nonce))?;
+    let (new_id, mut log) = (std::mem::take(&mut new.id), std::mem::take(&mut new.log));
     log.push(format!("Rotated master encryption key oldMasterKeyId={id} newMasterKeyId={new_id}"));
     Ok(MasterKey { key: own, id: new_id, log, rotated: true })
 }
 
-/// Checks every `every` that KMIP key `id` is still active, until `stop`; sets `lost` when it is
-/// not. A server that does not answer is asked again at the next check.
-pub fn poll(
-    o: KmipOpts,
-    id: String,
-    every: Duration,
-    stop: Arc<AtomicBool>,
-    lost: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+/// The log line of a node whose KMIP key stopped being active.
+pub fn lost_message(id: &str) -> String {
+    format!("KMIP Key used for ESE is not in active state. Shutting down server. key_uid={id}")
+}
+
+/// The background check of a KMIP key's state started by [`poll`].
+#[derive(Debug)]
+pub struct Poller {
+    #[cfg(target_os = "linux")]
+    work: crate::outbound::Spawned,
+}
+
+impl Poller {
+    /// Waits until the check ended: the key was lost or the node stopped it.
+    pub fn join(self) {
+        #[cfg(target_os = "linux")]
+        self.work.join();
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod on_engine {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use teseladb::engine::core::sleep::sleep_steady;
+    use teseladb_auth::kmip::{ACTIVE, Answer, Request, Version, message_len};
+    use teseladb_io::engine::link::Link;
+    use teseladb_io::engine::{blocking, connect, tls_stream};
+    use teseladb_tls::ClientConfig;
+
+    use super::{
+        Ask, CLOSED, Fetched, KEY_LEN, KmipFailure, KmipOpts, NO_SERVER, POLL_STEP, Poller,
+    };
+    use crate::outbound::{self, text};
+
+    /// A connection to the KMIP server, on the shard that opened it.
+    pub(super) struct Session {
+        link: Link,
+        version: Version,
+    }
+
+    impl Session {
+        /// Connects to the first server of `o` that answers, trying each `--kmipConnectRetries`
+        /// more times; the reference server's message when none does.
+        pub(super) async fn connect(o: &KmipOpts, tls: &Arc<ClientConfig>) -> Result<Session, String> {
+            let mut last = NO_SERVER.to_owned();
+            for name in &o.servers {
+                let Ok(mut addrs) = blocking::resolve(name, o.port, o.connect_timeout).await else {
+                    last = format!("Could not resolve KMIP server {name}:{}", o.port);
+                    continue;
+                };
+                // IPv4 first, as the reference server names the address it could not reach.
+                addrs.sort_by_key(SocketAddr::is_ipv6);
+                let mut first = None;
+                for _ in 0..=o.connect_retries {
+                    for addr in &addrs {
+                        match dial(*addr, name, o.connect_timeout, tls).await {
+                            Ok(link) => return Ok(Session { link, version: o.version() }),
+                            Err(e) => {
+                                first.get_or_insert(e);
+                            }
+                        }
+                    }
+                }
+                last = first.unwrap_or(last);
+            }
+            Err(last)
+        }
+
+        /// Sends `req` and reads its answer.
+        pub(super) async fn ask(&mut self, req: &Request) -> Result<Answer, KmipFailure> {
+            let io = |e| KmipFailure::Io(text(&e));
+            self.link.send(&req.encode(self.version)).await.map_err(io)?;
+            let mut got = Vec::new();
+            loop {
+                if let Some(len) = message_len(&got)
+                    && got.len() >= len
+                {
+                    return req.answer(&got[..len]).map_err(KmipFailure::Kmip);
+                }
+                let data = self.link.recv().await.map_err(io)?;
+                if data.empty() {
+                    return Err(KmipFailure::Io(CLOSED.into()));
+                }
+                got.extend_from_slice(data.as_slice());
+            }
+        }
+
+        pub(super) async fn close(self) {
+            self.link.close().await;
+        }
+    }
+
+    /// A TLS connection to `addr`, the certificate checked against `name`.
+    async fn dial(
+        addr: SocketAddr,
+        name: &str,
+        timeout: Duration,
+        tls: &Arc<ClientConfig>,
+    ) -> Result<Link, String> {
+        let refused = || format!("Could not connect to KMIP server {addr}");
+        let sock = connect::connect(addr, timeout).await.map_err(|_| refused())?;
+        let t = tls_stream::client(sock, tls.clone(), Some(name), None, Some(timeout))
+            .await
+            .map_err(|e| format!("{}: {}", refused(), text(&e)))?;
+        Ok(Link::new(t.socket, Some(t.session), timeout))
+    }
+
+    async fn created(s: &mut Session, o: &KmipOpts, log: &mut Vec<String>) -> Result<String, String> {
+        let id = match s.ask(&Request::CreateKey).await {
+            Ok(Answer::Created(id)) => id,
+            Ok(_) => return Err("KMIP create key: an answer of another kind".into()),
+            Err(e) => return Err(format!("KMIP create key failed, {e}")),
+        };
+        log.push(format!("Created KMIP key keyId={id}"));
+        if o.activate_keys {
+            s.ask(&Request::Activate(id.clone()))
+                .await
+                .map_err(|e| format!("KMIP activate key '{id}' failed, {e}"))?;
+            log.push(format!("Activated KMIP key uid={id}"));
+        }
+        Ok(id)
+    }
+
+    /// The bytes of KMIP key `id`, which has to be active with `--kmipActivateKeys`.
+    async fn kmip_key(s: &mut Session, o: &KmipOpts, id: &str) -> Result<[u8; KEY_LEN], String> {
+        if o.activate_keys {
+            check_active(s, id).await?;
+        }
+        match s.ask(&Request::Get(id.to_owned())).await {
+            Ok(Answer::Key(mut bytes)) => {
+                let mut key = [0u8; KEY_LEN];
+                // The answer was checked to hold 256 bits.
+                key.copy_from_slice(&bytes[..KEY_LEN]);
+                bytes.fill(0);
+                Ok(key)
+            }
+            Ok(_) => Err(format!("KMIP get key '{id}': an answer of another kind")),
+            Err(e) => Err(format!("KMIP get key '{id}' failed, {e}")),
+        }
+    }
+
+    /// Whether KMIP key `id` is active; the reference server's message when it is not.
+    async fn check_active(s: &mut Session, id: &str) -> Result<(), String> {
+        match s.ask(&Request::State(id.to_owned())).await {
+            Ok(Answer::State(ACTIVE)) => Ok(()),
+            Ok(_) => Err(format!("KMIP Key used for ESE is not in active state key_uid={id}")),
+            Err(e) => Err(format!("KMIP get attributes of key '{id}' failed, {e}")),
+        }
+    }
+
+    /// What `ask` gets from the server, on one connection.
+    async fn fetch(o: &KmipOpts, tls: &Arc<ClientConfig>, ask: Ask) -> Result<Fetched, String> {
+        let mut s = Session::connect(o, tls).await?;
+        let mut log = Vec::new();
+        let got = async {
+            let id = match ask {
+                Ask::Create => created(&mut s, o, &mut log).await?,
+                Ask::Key(id) => id,
+            };
+            let key = kmip_key(&mut s, o, &id).await?;
+            Ok::<_, String>((id, key))
+        }
+        .await;
+        s.close().await;
+        let (id, key) = got?;
+        Ok(Fetched { id, key, log })
+    }
+
+    /// [`fetch`] on the node's engine, from the thread that starts the node.
+    pub(super) fn fetch_off_shard(
+        o: &KmipOpts,
+        tls: &Arc<ClientConfig>,
+        ask: Ask,
+    ) -> Result<Fetched, String> {
+        let (o, tls) = (o.clone(), tls.clone());
+        outbound::call(move || outbound::future(async move { fetch(&o, &tls, ask).await }))
+    }
+
+    /// Sends `req` to the first server of `o` that answers and reads its answer, on the node's
+    /// engine, from a thread that is not a shard (the start-up of the audit log); the outer error
+    /// is the connection's.
+    pub fn ask_once(o: &KmipOpts, req: Request) -> Result<Result<Answer, KmipFailure>, String> {
+        let tls = o.tls()?;
+        let o = o.clone();
+        outbound::call(move || {
+            outbound::future(async move {
+                let mut s = Session::connect(&o, &tls).await?;
+                let answer = s.ask(&req).await;
+                s.close().await;
+                Ok(answer)
+            })
+        })
+    }
+
+    /// One check of the key's state; `true` when the server says it is not active. A server out
+    /// of reach, or one that does not answer the question, is asked again at the next check.
+    async fn lost(o: &KmipOpts, tls: &Arc<ClientConfig>, id: &str) -> bool {
+        let Ok(mut s) = Session::connect(o, tls).await else { return false };
+        let answer = s.ask(&Request::State(id.to_owned())).await;
+        s.close().await;
+        matches!(answer, Ok(Answer::State(state)) if state != ACTIVE)
+    }
+
+    /// The checks every `every` until `stop` or a lost key, which sets `lost`.
+    async fn checks(
+        o: KmipOpts,
+        tls: Arc<ClientConfig>,
+        id: String,
+        every: Duration,
+        stop: Arc<AtomicBool>,
+        lost_flag: Arc<AtomicBool>,
+    ) {
         let step = POLL_STEP.min(every);
         loop {
             let mut waited = Duration::ZERO;
@@ -402,21 +545,62 @@ pub fn poll(
                 if stop.load(Ordering::Relaxed) {
                     return;
                 }
-                std::thread::sleep(step);
+                let _ = sleep_steady(step).await;
                 waited += step;
             }
-            let Ok(mut s) = Session::connect(&o) else { continue };
-            if let Ok(Answer::State(state)) = s.ask(&Request::State(id.clone()))
-                && state != ACTIVE
-            {
-                lost.store(true, Ordering::Relaxed);
+            if lost(&o, &tls, &id).await {
+                lost_flag.store(true, Ordering::Relaxed);
                 return;
             }
         }
-    })
+    }
+
+    /// Starts the background check of KMIP key `id` every `every` on the node's engine, until
+    /// `stop`; sets `lost` when the key is not active.
+    pub fn poll(
+        o: KmipOpts,
+        id: String,
+        every: Duration,
+        stop: Arc<AtomicBool>,
+        lost: Arc<AtomicBool>,
+    ) -> Result<Poller, String> {
+        let tls = o.tls()?;
+        let work = outbound::spawn(move || {
+            outbound::future(async move {
+                checks(o, tls, id, every, stop, lost).await;
+                Ok(())
+            })
+        })?;
+        Ok(Poller { work })
+    }
 }
 
-/// The log line of a node whose KMIP key stopped being active.
-pub fn lost_message(id: &str) -> String {
-    format!("KMIP Key used for ESE is not in active state. Shutting down server. key_uid={id}")
+#[cfg(target_os = "linux")]
+pub use on_engine::{ask_once, poll};
+#[cfg(target_os = "linux")]
+use on_engine::fetch_off_shard;
+
+#[cfg(not(target_os = "linux"))]
+fn fetch_off_shard(_o: &KmipOpts, _tls: &Arc<ClientConfig>, _ask: Ask) -> Result<Fetched, String> {
+    Err(crate::LINUX_ONLY.into())
+}
+
+/// The KMIP client runs on the engine, which only Linux has (023 D3).
+#[cfg(not(target_os = "linux"))]
+pub fn ask_once(o: &KmipOpts, _req: Request) -> Result<Result<Answer, KmipFailure>, String> {
+    o.tls()?;
+    Err(crate::LINUX_ONLY.into())
+}
+
+/// The KMIP client runs on the engine, which only Linux has (023 D3).
+#[cfg(not(target_os = "linux"))]
+pub fn poll(
+    o: KmipOpts,
+    _id: String,
+    _every: Duration,
+    _stop: Arc<AtomicBool>,
+    _lost: Arc<AtomicBool>,
+) -> Result<Poller, String> {
+    o.tls()?;
+    Err(crate::LINUX_ONLY.into())
 }

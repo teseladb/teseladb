@@ -44,15 +44,32 @@ impl Sts {
         Ok(Sts { url: url.to_owned(), target, https })
     }
 
-    /// Sends `req`: the answer's status and body.
-    pub fn send(&self, req: &StsRequest) -> Result<(u16, Vec<u8>), String> {
+    /// The HTTP request of `req`.
+    fn http(&self, req: &StsRequest) -> teseladb_http::http1::Request {
         let mut http =
             client::post(&self.target, crate::USER_AGENT, STS_CONTENT_TYPE, STS_BODY.as_bytes());
         for (name, value) in &req.headers {
             http = http.header(name, value);
         }
-        let answer = self.https.send(&self.target, &http)?;
+        http
+    }
+
+    /// Sends `req`: the answer's status and body. From a thread that is not a shard, on the
+    /// node's engine.
+    pub fn send(&self, req: &StsRequest) -> Result<(u16, Vec<u8>), String> {
+        let answer = self.https.send(&self.target, &self.http(req))?;
         Ok((answer.status, answer.body))
+    }
+
+    /// [`Sts::send`] on the shard that awaits it.
+    #[cfg(target_os = "linux")]
+    pub fn request(
+        &self,
+        req: &StsRequest,
+    ) -> teseladb::engine::core::future::Future<(u16, Vec<u8>)> {
+        self.https.request(&self.target, &self.http(req)).then(|answer| {
+            teseladb::engine::core::future::make_ready_future((answer.status, answer.body))
+        })
     }
 }
 
@@ -60,14 +77,35 @@ impl Sts {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    use crate::tls_stream::TlsStream;
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
-    use teseladb_tls::{CertifiedKey, ServerConfig, Trust};
-    use teseladb_x509::ext::GeneralName;
+    use teseladb_tls::Trust;
 
+    /// Only HTTPS, as the reference server, and a URL that does not parse.
+    #[test]
+    fn the_sts_url_is_checked() {
+        let https = Https::new(Trust::anchors(Vec::new()), STS_TIMEOUT);
+        assert_eq!(
+            Sts::with_https("http://localhost:1", https.clone()).unwrap_err(),
+            "STS URL must start with https://"
+        );
+        assert!(Sts::with_https("https://h:port", https).unwrap_err().contains("awsSTSUrl"));
+        let default = Sts::from_url(None, false);
+        assert!(default.is_err() || default.unwrap().url == aws::DEFAULT_STS_URL);
+        let fips = Sts::from_url(None, true);
+        assert!(
+            fips.is_err() || fips.unwrap().https.tls.suites.iter().all(|s| s.is_fips_approved())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_request_reaches_the_sts_with_the_clients_headers() {
+        use crate::tls_stream::TlsStream;
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use teseladb_tls::{CertifiedKey, ServerConfig};
+        use teseladb_x509::ext::GeneralName;
+
+        crate::outbound::test_engine::install();
         let dir = std::env::temp_dir().join(format!("teseladb-sts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()
@@ -85,18 +123,22 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = seen.clone();
+        // Two requests: one from a thread, one awaited on a shard.
         std::thread::spawn(move || {
-            let (sock, _) = listener.accept().unwrap();
-            let mut s = TlsStream::server(sock, config, &[]).unwrap();
-            let mut got = Vec::new();
-            while !String::from_utf8_lossy(&got).ends_with(STS_BODY) {
-                got.extend_from_slice(&s.recv().unwrap());
+            for _ in 0..2 {
+                let (sock, _) = listener.accept().unwrap();
+                let mut s = TlsStream::server(sock, config.clone(), &[]).unwrap();
+                let mut got = Vec::new();
+                while !String::from_utf8_lossy(&got).ends_with(STS_BODY) {
+                    got.extend_from_slice(&s.recv().unwrap());
+                }
+                record.lock().unwrap().extend_from_slice(&got);
+                let body = "<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:x</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>";
+                let answer =
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+                s.send(answer.as_bytes()).unwrap();
+                s.close();
             }
-            record.lock().unwrap().extend_from_slice(&got);
-            let body = "<GetCallerIdentityResponse><GetCallerIdentityResult><Arn>arn:x</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>";
-            let answer = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-            s.send(answer.as_bytes()).unwrap();
-            s.close();
         });
         let https = Https::new(Trust::anchors(vec![pki.ca.clone()]), STS_TIMEOUT);
         let sts = Sts::with_https(&format!("https://localhost:{port}"), https.clone()).unwrap();
@@ -106,6 +148,9 @@ mod tests {
             body: STS_BODY,
         };
         let (status, body) = sts.send(&req).unwrap();
+        assert_eq!(aws::caller(status, &body), Ok("arn:x".to_owned()));
+        let (on, again) = (sts.clone(), req.clone());
+        let (status, body) = crate::outbound::call(move || on.request(&again)).unwrap();
         assert_eq!(aws::caller(status, &body), Ok("arn:x".to_owned()));
         let text = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
         assert!(text.starts_with("POST / HTTP/1.1\r\n"), "{text}");
@@ -117,18 +162,7 @@ mod tests {
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
-        // Only HTTPS, as the reference server, and a URL that does not parse.
-        assert_eq!(
-            Sts::with_https("http://localhost:1", https.clone()).unwrap_err(),
-            "STS URL must start with https://"
-        );
-        assert!(Sts::with_https("https://h:port", https).unwrap_err().contains("awsSTSUrl"));
-        let default = Sts::from_url(None, false);
-        assert!(default.is_err() || default.unwrap().url == aws::DEFAULT_STS_URL);
-        let fips = Sts::from_url(None, true);
-        assert!(
-            fips.is_err() || fips.unwrap().https.tls.suites.iter().all(|s| s.is_fips_approved())
-        );
+        drop(https);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

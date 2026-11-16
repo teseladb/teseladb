@@ -4,10 +4,13 @@
 //! most once every `JWKSMinimumQuiescePeriodSecs` (60 seconds, the reference server's default).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use teseladb_auth::oidc::{self, KeySet, Providers};
+#[cfg(target_os = "linux")]
+use teseladb_auth::oidc;
+use teseladb_auth::oidc::{KeySet, Providers};
+#[cfg(target_os = "linux")]
 use teseladb_http::client::{self, Url};
 
 use crate::https::{Https, system_trust};
@@ -17,14 +20,14 @@ const IDP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `JWKSMinimumQuiescePeriodSecs` by default.
 pub const QUIESCE: Duration = Duration::from_secs(60);
 
-/// The node's providers and the keys read from them.
-#[derive(Debug)]
+/// The node's providers and the keys read from them; its clones share the keys.
+#[derive(Clone, Debug)]
 pub struct Oidc {
     /// `oidcIdentityProviders`.
     pub providers: Providers,
     https: Https,
     quiesce: Duration,
-    keys: Mutex<HashMap<String, (Instant, KeySet)>>,
+    keys: Arc<Mutex<HashMap<String, (Instant, KeySet)>>>,
 }
 
 impl PartialEq for Oidc {
@@ -48,36 +51,76 @@ impl Oidc {
     /// `quiesce`.
     pub fn with_https(json: &str, https: Https, quiesce: Duration) -> Result<Oidc, String> {
         let providers = Providers::parse(json).map_err(|e| e.0)?;
-        Ok(Oidc { providers, https, quiesce, keys: Mutex::new(HashMap::new()) })
+        Ok(Oidc { providers, https, quiesce, keys: Arc::new(Mutex::new(HashMap::new())) })
     }
 
-    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+    /// The JWKS of `issuer` read less than the quiet period ago (any age without `refresh`);
+    /// an issuer not configured is an error.
+    fn kept(&self, issuer: &str, refresh: bool) -> Result<Option<KeySet>, String> {
+        if self.providers.by_issuer(issuer).is_none() {
+            return Err(format!("Unknown Identity Provider '{issuer}'"));
+        }
+        let keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(keys
+            .get(issuer)
+            .filter(|(at, _)| !refresh || at.elapsed() < self.quiesce)
+            .map(|(_, k)| k.clone()))
+    }
+
+    /// The JWKS of the provider `issuer`; with `refresh`, read again unless it was read less
+    /// than the quiet period ago. From a thread that is not a shard: a read runs on the node's
+    /// engine.
+    pub fn keys(&self, issuer: &str, refresh: bool) -> Result<KeySet, String> {
+        if let Some(keys) = self.kept(issuer, refresh)? {
+            return Ok(keys);
+        }
+        self.read_keys_off_shard(issuer, refresh)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_keys_off_shard(&self, _issuer: &str, _refresh: bool) -> Result<KeySet, String> {
+        Err(crate::LINUX_ONLY.into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Oidc {
+    fn read_keys_off_shard(&self, issuer: &str, refresh: bool) -> Result<KeySet, String> {
+        let (o, issuer) = (self.clone(), issuer.to_owned());
+        crate::outbound::call(move || o.keys_on_shard(&issuer, refresh))
+    }
+
+    /// [`Oidc::keys`] on the shard that awaits it.
+    pub fn keys_on_shard(
+        &self,
+        issuer: &str,
+        refresh: bool,
+    ) -> teseladb::engine::core::future::Future<KeySet> {
+        let (o, issuer) = (self.clone(), issuer.to_owned());
+        crate::outbound::future(async move { o.read_keys(&issuer, refresh).await })
+    }
+
+    async fn read_keys(&self, issuer: &str, refresh: bool) -> Result<KeySet, String> {
+        if let Some(keys) = self.kept(issuer, refresh)? {
+            return Ok(keys);
+        }
+        let discovery =
+            self.get(&format!("{}{}", issuer.trim_end_matches('/'), oidc::DISCOVERY_PATH)).await?;
+        let uri = oidc::jwks_uri(&discovery).map_err(|e| e.0)?;
+        let keys = KeySet::parse(&self.get(&uri).await?).map_err(|e| e.0)?;
+        let mut kept = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+        kept.insert(issuer.to_owned(), (Instant::now(), keys.clone()));
+        Ok(keys)
+    }
+
+    async fn get(&self, url: &str) -> Result<Vec<u8>, String> {
         let target = Url::parse(url).map_err(|e| format!("{url}: {e:?}"))?;
-        let answer = self.https.send(&target, &client::get(&target, crate::USER_AGENT))?;
+        let request = self.https.request(&target, &client::get(&target, crate::USER_AGENT));
+        let answer = request.await.map_err(|e| crate::outbound::text(&e))?;
         if answer.status != 200 {
             return Err(format!("{url}: HTTP {}", answer.status));
         }
         Ok(answer.body)
-    }
-
-    /// The JWKS of the provider `issuer`; with `refresh`, read again unless it was read less
-    /// than the quiet period ago.
-    pub fn keys(&self, issuer: &str, refresh: bool) -> Result<KeySet, String> {
-        if self.providers.by_issuer(issuer).is_none() {
-            return Err(format!("Unknown Identity Provider '{issuer}'"));
-        }
-        let lock = || self.keys.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((at, keys)) = lock().get(issuer)
-            && (!refresh || at.elapsed() < self.quiesce)
-        {
-            return Ok(keys.clone());
-        }
-        let discovery =
-            self.get(&format!("{}{}", issuer.trim_end_matches('/'), oidc::DISCOVERY_PATH))?;
-        let uri = oidc::jwks_uri(&discovery).map_err(|e| e.0)?;
-        let keys = KeySet::parse(&self.get(&uri)?).map_err(|e| e.0)?;
-        lock().insert(issuer.to_owned(), (Instant::now(), keys.clone()));
-        Ok(keys)
     }
 }
 
@@ -85,14 +128,31 @@ impl Oidc {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::tls_stream::TlsStream;
+    #[cfg(target_os = "linux")]
     use std::net::TcpListener;
-    use std::sync::Arc;
+    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use teseladb_tls::{CertifiedKey, ServerConfig, Trust};
+    use teseladb_tls::Trust;
+    #[cfg(target_os = "linux")]
+    use teseladb_tls::{CertifiedKey, ServerConfig};
+    #[cfg(target_os = "linux")]
     use teseladb_x509::ext::GeneralName;
 
+    /// Providers that do not parse, an issuer not configured, and the system's authorities.
+    #[test]
+    fn providers_are_checked_before_any_read() {
+        let https = Https::new(Trust::anchors(Vec::new()), IDP_TIMEOUT);
+        assert!(Oidc::with_https("[1]", https.clone(), QUIESCE).is_err());
+        let o = Oidc::with_https("[]", https, QUIESCE).unwrap();
+        assert!(o.keys("https://other", false).unwrap_err().contains("Unknown Identity Provider"));
+        assert!(Oidc::from_json("[]", false).is_ok() || crate::https::system_trust().is_err());
+        assert!(Oidc::from_json("[]", true).is_ok() || crate::https::system_trust().is_err());
+    }
+
     /// A JWKS with the RSA key of the OIDC tests of `teseladb-auth` as `k1`.
+    #[cfg(target_os = "linux")]
     fn jwks() -> String {
         let pem = include_str!("../../teseladb-auth/tests/fixtures/oidc/rsa2048.pem");
         let teseladb_x509::PrivateKey::Rsa(key, _) =
@@ -115,6 +175,7 @@ mod tests {
     }
 
     /// A provider: its discovery document and its JWKS (one RSA key `k1`), counting the reads.
+    #[cfg(target_os = "linux")]
     fn provider(config: Arc<ServerConfig>, reads: Arc<AtomicUsize>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -151,8 +212,10 @@ mod tests {
         port
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn keys_are_read_through_discovery_and_kept() {
+        crate::outbound::test_engine::install();
         let dir = std::env::temp_dir().join(format!("teseladb-oidc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()
@@ -196,9 +259,14 @@ mod tests {
         let bad_url = "https://localhost:port";
         let o = Oidc::with_https(&json(bad_url), https.clone(), QUIESCE).unwrap();
         assert!(o.keys(bad_url, false).is_err());
-        assert!(Oidc::with_https("[1]", https, QUIESCE).is_err());
-        assert!(Oidc::from_json("[]", false).is_ok() || crate::https::system_trust().is_err());
-        assert!(Oidc::from_json("[]", true).is_ok() || crate::https::system_trust().is_err());
+        // A shard awaits the read; a clone shares what was read.
+        let fresh = Oidc::with_https(&json(&issuer), https, QUIESCE).unwrap();
+        let (on, at) = (fresh.clone(), issuer.clone());
+        assert_eq!(crate::outbound::call(move || on.keys_on_shard(&at, false)).unwrap().0.len(), 1);
+        // Two more reads after the six above and the one of the missing discovery document.
+        assert_eq!(reads.load(Ordering::SeqCst), 9);
+        fresh.keys(&issuer, true).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 9);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

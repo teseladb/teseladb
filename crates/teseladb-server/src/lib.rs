@@ -7,6 +7,11 @@
 /// The `User-Agent` of the node's own HTTP requests (OCSP, OIDC, STS).
 pub const USER_AGENT: &str = "teseladb";
 
+/// The error of an outbound client outside Linux: the clients run on the engine, which only
+/// Linux has (023 D3).
+#[cfg(not(target_os = "linux"))]
+pub const LINUX_ONLY: &str = "the node's outbound clients run on the engine, on Linux only";
+
 pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
@@ -66,6 +71,8 @@ pub mod node;
 pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
+#[cfg(target_os = "linux")]
+pub mod outbound;
 pub mod pki;
 pub mod pressure;
 pub mod pushed;
@@ -693,13 +700,21 @@ pub fn start(
     });
     let lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let poller =
-        polling.clone().map(|(id, k, every)| kmip::poll(k, id, every, done.clone(), lost.clone()));
+    let poller = match polling.clone().map(|(id, k, every)| {
+        kmip::poll(k, id, every, done.clone(), lost.clone())
+    }) {
+        Some(Err(e)) => {
+            let _ = writeln!(err, "teseladb: {e}");
+            drop(node.stop());
+            return 1;
+        }
+        p => p.and_then(Result::ok),
+    };
     let lost_or_stop = || stop() || lost.load(std::sync::atomic::Ordering::Relaxed);
     let mut code = serve(node, o.log_format, &log, out, &lost_or_stop, READY_TIMEOUT);
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(p) = poller {
-        let _ = p.join();
+        p.join();
     }
     if let Some((id, _, _)) = polling.filter(|_| lost.load(std::sync::atomic::Ordering::Relaxed)) {
         log.error(&kmip::lost_message(&id), &[]);
