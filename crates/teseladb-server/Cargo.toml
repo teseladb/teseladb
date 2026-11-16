@@ -145,6 +145,8 @@ teseladb-sys = { path = "../teseladb-sys" }
 teseladb-raft = { workspace = true }
 teseladb-raftlog = { workspace = true }
 teseladb-io = { path = "../teseladb-io" }
+# The engine (023): its package and library are `teseladb`; empty outside Linux.
+teseladb = { path = "../teseladb-engine", default-features = false }
 teseladb-multiraft = { path = "../teseladb-multiraft" }
 teseladb-meta = { path = "../teseladb-meta" }
 teseladb-router = { path = "../teseladb-router" }

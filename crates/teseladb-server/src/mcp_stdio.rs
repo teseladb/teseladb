@@ -5,17 +5,23 @@
 //! end of the input. The credential is the API key of `TESELADB_API_KEY` or the client
 //! certificate of `--tlsCertificateKeyFile`; none goes in the arguments.
 
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
+#[cfg(not(target_os = "linux"))]
+use std::io::Read;
+#[cfg(not(target_os = "linux"))]
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
+#[cfg(not(target_os = "linux"))]
+use teseladb_http::http1::{Limits, ResponseReader};
+use teseladb_http::http1::{Request, Response};
 use teseladb_http::sse;
 use teseladb_tls::ClientConfig;
 
 use crate::admin::AdminCredentials;
+#[cfg(not(target_os = "linux"))]
 use crate::tls_stream::TlsStream;
 
 /// The variable that holds the API key.
@@ -28,6 +34,9 @@ pub const SESSION_HEADER: &str = "Mcp-Session-Id";
 pub const VERSION_HEADER: &str = "MCP-Protocol-Version";
 /// How long an answer may take.
 const ANSWER_WAIT: Duration = Duration::from_secs(300);
+/// How long the lookup, the connection and the TLS handshake may each take.
+#[cfg(target_os = "linux")]
+const CONNECT_WAIT: Duration = Duration::from_secs(30);
 
 /// Options of `teseladb mcp`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +114,28 @@ impl Relay {
             req = req.header(VERSION_HEADER, v);
         }
         let bytes = req.encode().map_err(debugged)?;
+        self.send(bytes)
+    }
+
+    /// Sends the request `bytes` on a connection of its own and reads the answer to its end,
+    /// with the engine's network stack and TLS stream (023 FR-023).
+    #[cfg(target_os = "linux")]
+    fn send(&self, bytes: Vec<u8>) -> Result<Response, String> {
+        let (host, port) = crate::shard_client::split_addr(&self.addr).map_err(shown)?;
+        let target = crate::shard_client::Target {
+            host,
+            port,
+            tls: self.tls.clone(),
+            connect: CONNECT_WAIT,
+            answer: ANSWER_WAIT,
+        };
+        crate::shard_client::block_on(move || crate::shard_client::exchange(target, bytes))
+            .map_err(|e| format!("{}: {e}", self.addr))
+    }
+
+    /// [`Relay::send`] with blocking sockets, where the engine does not run.
+    #[cfg(not(target_os = "linux"))]
+    fn send(&self, bytes: Vec<u8>) -> Result<Response, String> {
         let s = TcpStream::connect(&self.addr).map_err(|e| format!("{}: {e}", self.addr))?;
         s.set_read_timeout(Some(ANSWER_WAIT)).map_err(shown)?;
         let answer = match &self.tls {

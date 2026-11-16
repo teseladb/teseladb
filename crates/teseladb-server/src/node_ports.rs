@@ -1,0 +1,300 @@
+//! The node's HTTP port (019) and administration port (007) on its engine (023 FR-022, FR-023):
+//! started from the node's start-up thread on shard 0, which listens and has every other shard
+//! listen too, and stopped before the engine stops.
+//!
+//! The node's services ([`NodeHttp`], the administration handler) still wait for the cores on
+//! channels: each of their calls runs off the shards through [`crate::shard_bridge`] until the
+//! backend answers with futures (023 T049). The port itself (connections, TLS, the protocols,
+//! deadlines, limits, CORS) runs on the shards.
+//!
+//! Outside Linux the engine does not exist and no port starts (D3).
+
+use std::io;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use teseladb_http::metrics::HttpMetrics;
+
+use crate::admin_http::{AdminTls, Handler};
+use crate::http_listener::HttpPortConfig;
+use crate::http_service::NodeHttp;
+
+#[cfg(target_os = "linux")]
+pub use on_linux::{AdminPort, HttpPort};
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::{AdminPort, HttpPort};
+
+/// Starts the administration port at `at`, answering with `handler`, over TLS with `tls`; the
+/// port's TLS is rotated with the node's certificates, `certs`.
+///
+/// # Errors
+///
+/// When the address does not listen, or outside Linux.
+pub fn start_admin(
+    at: SocketAddr,
+    handler: Handler,
+    tls: Option<AdminTls>,
+    certs: Option<&crate::certs::Certificates>,
+) -> io::Result<AdminPort> {
+    AdminPort::start(at, handler, tls, certs)
+}
+
+/// Starts the HTTP port of `cfg` with `service`, counting its requests in `metrics`; its TLS is
+/// rotated with the node's certificates, `certs`.
+///
+/// # Errors
+///
+/// When an address does not listen, or outside Linux.
+pub fn start_http(
+    cfg: HttpPortConfig,
+    service: Arc<NodeHttp>,
+    metrics: Arc<Mutex<HttpMetrics>>,
+    certs: Option<&crate::certs::Certificates>,
+) -> io::Result<HttpPort> {
+    HttpPort::start(cfg, service, metrics, certs)
+}
+
+#[cfg(target_os = "linux")]
+mod on_linux {
+    use std::cell::RefCell;
+    use std::io;
+    use std::net::SocketAddr;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use teseladb::engine::core::future::{Future, make_ready_future};
+    use teseladb::engine::core::reactor::internal_misc::run_in_background;
+    use teseladb_http::http1::Request;
+    use teseladb_http::metrics::HttpMetrics;
+    use teseladb_wire::commands::http_parameters::{HttpOptions, http_options};
+
+    use crate::admin_http::shard as admin;
+    use crate::admin_http::{AdminTls, Caller as AdminCaller, Handler, HttpRequest};
+    use crate::http_listener::shard::{self as http, Cancel, MakeService, Reply};
+    use crate::http_listener::{self as threaded, Caller, HttpPortConfig, HttpService};
+    use crate::http_service::NodeHttp;
+    use crate::shard_bridge;
+    use crate::shard_client::block_on;
+
+    /// How long a stop waits for the calls of the ports still running off the shards.
+    const DRAIN: Duration = Duration::from_secs(10);
+    /// How long a shard keeps the options it read.
+    const OPTIONS_TTL: Duration = Duration::from_secs(1);
+
+    /// The administration port of the node.
+    #[derive(Debug)]
+    pub struct AdminPort(admin::AdminPort);
+
+    impl AdminPort {
+        pub(super) fn start(
+            at: SocketAddr,
+            handler: Handler,
+            tls: Option<AdminTls>,
+            certs: Option<&crate::certs::Certificates>,
+        ) -> io::Result<AdminPort> {
+            let make: admin::MakeHandler = Arc::new(move || -> admin::Handler {
+                let handler = handler.clone();
+                Rc::new(move |req: HttpRequest, caller: AdminCaller| {
+                    let h = handler.clone();
+                    shard_bridge::run(move || h(&req, &caller))
+                })
+            });
+            let port_tls = tls.as_ref().map(|t| t.port.clone());
+            let port = block_on(move || admin::AdminPort::start(at, make, tls))?;
+            if let (Some(certs), Some(slot), Some(p)) = (certs, port.tls(), port_tls) {
+                certs.add_shard_port(slot.clone(), p);
+            }
+            Ok(AdminPort(port))
+        }
+
+        /// The address it listens on.
+        #[must_use]
+        pub fn local_addr(&self) -> SocketAddr {
+            self.0.local_addr()
+        }
+
+        /// Stops it and waits for its calls.
+        pub fn stop(self) {
+            let port = self.0;
+            let _ = block_on(move || port.stop());
+            let _ = block_on(|| shard_bridge::drain(DRAIN));
+        }
+    }
+
+    /// The HTTP port of the node.
+    #[derive(Debug)]
+    pub struct HttpPort(http::HttpPort);
+
+    impl HttpPort {
+        pub(super) fn start(
+            cfg: HttpPortConfig,
+            service: Arc<NodeHttp>,
+            metrics: Arc<Mutex<HttpMetrics>>,
+            certs: Option<&crate::certs::Certificates>,
+        ) -> io::Result<HttpPort> {
+            let port_tls = cfg.tls.clone();
+            let make: MakeService = Arc::new(move || -> Rc<dyn http::HttpService> {
+                Rc::new(Bridged::new(service.clone()))
+            });
+            let port = block_on(move || http::HttpPort::start(cfg, make, metrics))?;
+            if let (Some(certs), Some(p)) = (certs, port_tls) {
+                certs.add_shard_port(port.tls().clone(), p);
+            }
+            Ok(HttpPort(port))
+        }
+
+        /// The addresses it listens on.
+        #[must_use]
+        pub fn addrs(&self) -> &[SocketAddr] {
+            self.0.addrs()
+        }
+
+        /// Stops it and waits for its calls.
+        pub fn stop(self) {
+            let port = self.0;
+            let _ = block_on(move || port.stop());
+            let _ = block_on(|| shard_bridge::drain(DRAIN));
+        }
+    }
+
+    /// The node's service on a shard: its calls run off the shard.
+    struct Bridged {
+        service: Arc<NodeHttp>,
+        /// The options last read, and when.
+        options: Rc<RefCell<(Option<Instant>, HttpOptions)>>,
+        /// A read of the options is running.
+        reading: Rc<RefCell<bool>>,
+    }
+
+    impl Bridged {
+        fn new(service: Arc<NodeHttp>) -> Bridged {
+            Bridged {
+                service,
+                options: Rc::new(RefCell::new((None, http_options(None)))),
+                reading: Rc::new(RefCell::new(false)),
+            }
+        }
+    }
+
+    impl http::HttpService for Bridged {
+        fn serve(&self, request: Request, caller: Caller, cancel: Cancel) -> Future<Reply> {
+            let (service, flag) = (self.service.clone(), cancel.flag());
+            shard_bridge::run(move || service.serve(&request, &caller, &flag)).then(
+                move |reply| -> Result<Reply, teseladb::engine::core::future::ExceptionPtr> {
+                    Ok(match reply {
+                        threaded::Reply::Whole(r) => Reply::Whole(r),
+                        threaded::Reply::Stream { status, headers, pieces } => {
+                            Reply::Stream { status, headers, pieces: bridged_pieces(pieces) }
+                        }
+                    })
+                },
+            )
+        }
+
+        /// The options this shard read last; read again off the shard, in the background, once
+        /// they are older than a second (the service reads `httpOptions` from Group 0).
+        fn options(&self) -> HttpOptions {
+            let (at, current) = self.options.borrow().clone();
+            let stale = at.is_none_or(|t| t.elapsed() >= OPTIONS_TTL);
+            if stale && !self.reading.replace(true) {
+                let (service, slot, reading) =
+                    (self.service.clone(), self.options.clone(), self.reading.clone());
+                let read = shard_bridge::run(move || service.options());
+                run_in_background(read.then_wrapped(move |f: Future<HttpOptions>| {
+                    if let Ok(o) = f.get() {
+                        *slot.borrow_mut() = (Some(Instant::now()), o);
+                    }
+                    *reading.borrow_mut() = false;
+                    make_ready_future(())
+                }));
+            }
+            current
+        }
+
+        fn route(&self, request: &Request) -> String {
+            self.service.route(request)
+        }
+    }
+
+    /// The pieces of a stream of the node's service, each read off the shard.
+    fn bridged_pieces(pieces: threaded::Pieces) -> http::Pieces {
+        let pieces = Arc::new(Mutex::new(pieces));
+        Box::new(move |cancel: &Cancel| {
+            let (pieces, flag) = (pieces.clone(), cancel.flag());
+            shard_bridge::run(move || {
+                let mut p = pieces.lock().unwrap_or_else(PoisonError::into_inner);
+                p(&flag)
+            })
+        })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod unsupported {
+    use std::io;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use teseladb_http::metrics::HttpMetrics;
+
+    use crate::admin_http::{AdminTls, Handler};
+    use crate::http_listener::HttpPortConfig;
+    use crate::http_service::NodeHttp;
+
+    fn unsupported() -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, "the node's ports run on Linux only")
+    }
+
+    /// The administration port: none exists outside Linux.
+    #[derive(Debug)]
+    pub enum AdminPort {}
+
+    impl AdminPort {
+        pub(super) fn start(
+            _: SocketAddr,
+            _: Handler,
+            _: Option<AdminTls>,
+            _: Option<&crate::certs::Certificates>,
+        ) -> io::Result<AdminPort> {
+            Err(unsupported())
+        }
+
+        /// The address it listens on.
+        #[must_use]
+        pub fn local_addr(&self) -> SocketAddr {
+            match *self {}
+        }
+
+        /// Stops it.
+        pub fn stop(self) {
+            match self {}
+        }
+    }
+
+    /// The HTTP port: none exists outside Linux.
+    #[derive(Debug)]
+    pub enum HttpPort {}
+
+    impl HttpPort {
+        pub(super) fn start(
+            _: HttpPortConfig,
+            _: Arc<NodeHttp>,
+            _: Arc<Mutex<HttpMetrics>>,
+            _: Option<&crate::certs::Certificates>,
+        ) -> io::Result<HttpPort> {
+            Err(unsupported())
+        }
+
+        /// The addresses it listens on.
+        #[must_use]
+        pub fn addrs(&self) -> &[SocketAddr] {
+            match *self {}
+        }
+
+        /// Stops it.
+        pub fn stop(self) {
+            match self {}
+        }
+    }
+}

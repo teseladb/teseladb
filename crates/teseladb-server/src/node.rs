@@ -57,7 +57,7 @@ use teseladb_types::{Bytes, GroupId, NodeId};
 use teseladb_wire::commands::{NodeSessions, Shared};
 
 use crate::admin::{NodeAdmin, answer};
-use crate::admin_http::{AdminListener, Handler};
+use crate::admin_http::Handler;
 use crate::backend::NodeHandle;
 use crate::catalog_ops::{CatalogAnswer, CatalogReq};
 use crate::client_listener::{ClientConfig, ClientListener, NodeClockState, NodePresence};
@@ -751,8 +751,8 @@ pub struct Node {
     /// What opens and closes the replica set port as Group 0 says (018 FR-016).
     replica_port: Option<crate::replica_port::PortKeeper>,
     /// The administration port (007 FR-020).
-    admin: Option<AdminListener>,
-    http: Option<crate::http_listener::HttpListener>,
+    admin: Option<crate::node_ports::AdminPort>,
+    http: Option<crate::node_ports::HttpPort>,
     clock: ClockKeeper,
     routes: SharedRoutes,
     /// Issues enrollment tokens, on a node with a PKI.
@@ -1337,7 +1337,8 @@ impl Node {
                     data_dir: cfg.data_dir.clone(),
                 };
                 let handler: Handler = Arc::new(move |req, caller| answer(req, caller, &backend));
-                match AdminListener::spawn(at, handler, cfg.admin_tls.clone()) {
+                let certs = cfg.client.as_ref().and_then(|c| c.certificates.as_deref());
+                match crate::node_ports::start_admin(at, handler, cfg.admin_tls.clone(), certs) {
                     Ok(l) => Some(l),
                     Err(e) => {
                         if let Some(c) = client {
@@ -1383,7 +1384,8 @@ impl Node {
                 );
                 spawn_http_forwards(http_forwards_rx, service.clone(), backend);
                 let advertise = service.clone();
-                match crate::http_listener::HttpListener::spawn(h, service, http_metrics.clone()) {
+                let certs = cfg.client.as_ref().and_then(|c| c.certificates.as_deref());
+                match crate::node_ports::start_http(h, service, http_metrics.clone(), certs) {
                     Ok(l) => {
                         let listening = l.addrs().iter().find(|a| !a.ip().is_unspecified());
                         let authority = cfg
@@ -1484,7 +1486,7 @@ impl Node {
 
     /// Where the administration port listens, if the node opened it.
     pub fn admin_addr(&self) -> Option<SocketAddr> {
-        self.admin.as_ref().map(AdminListener::local_addr)
+        self.admin.as_ref().map(crate::node_ports::AdminPort::local_addr)
     }
 
     /// This node.

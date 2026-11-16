@@ -363,6 +363,7 @@ dependencies = [
 name = "teseladb-server"
 version = "0.1.13"
 dependencies = [
+ "teseladb",
  "teseladb-auth",
  "teseladb-bson",
  "teseladb-changestream",
