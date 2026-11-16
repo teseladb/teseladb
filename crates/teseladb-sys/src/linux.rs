@@ -1,252 +1,10 @@
-//! Linux: epoll and eventfd.
+//! Linux: the host facts of `host.rs`, AF_XDP and network namespaces. Waiting on descriptors and
+//! waking threads is the engine's reactor (023 FR-042).
 
 pub mod netns;
 pub mod xdp;
 
 use std::io;
-
-// ----- epoll and eventfd -----
-
-use std::io::{Read, Write};
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::poll::{Event, Interest, WAKE_TOKEN, timeout_ms};
-
-const EPOLL_CLOEXEC: i32 = 0o2000000;
-const EPOLL_CTL_ADD: i32 = 1;
-const EPOLL_CTL_DEL: i32 = 2;
-const EPOLL_CTL_MOD: i32 = 3;
-const EPOLLIN: u32 = 0x001;
-const EPOLLOUT: u32 = 0x004;
-const EPOLLERR: u32 = 0x008;
-const EPOLLHUP: u32 = 0x010;
-const EPOLLRDHUP: u32 = 0x2000;
-const EFD_CLOEXEC: i32 = 0o2000000;
-const EFD_NONBLOCK: i32 = 0o4000;
-const EINTR: i32 = 4;
-/// Events per `epoll_wait` call.
-const MAX_EVENTS: usize = 256;
-
-/// `struct epoll_event`: packed on x86_64 (12 bytes), aligned elsewhere (16 bytes).
-#[repr(C)]
-#[cfg_attr(target_arch = "x86_64", repr(packed))]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct EpollEvent {
-    events: u32,
-    data: u64,
-}
-
-unsafe extern "C" {
-    fn epoll_create1(flags: i32) -> i32;
-    fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
-    fn epoll_wait(epfd: i32, events: *mut EpollEvent, maxevents: i32, timeout: i32) -> i32;
-    fn eventfd(initval: u32, flags: i32) -> i32;
-}
-
-fn cvt(rc: i32) -> std::io::Result<i32> {
-    if rc < 0 { Err(std::io::Error::last_os_error()) } else { Ok(rc) }
-}
-
-/// New descriptor returned by a system call.
-fn owned(rc: i32) -> std::io::Result<OwnedFd> {
-    let fd = cvt(rc)?;
-    // SAFETY: the call has just created `fd` and nobody else owns it.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// A non-blocking `eventfd` closed on `exec`.
-pub(crate) fn new_eventfd() -> std::io::Result<OwnedFd> {
-    // SAFETY: no pointers.
-    owned(unsafe { eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK) })
-}
-
-fn raw(fd: &OwnedFd) -> RawFd {
-    use std::os::fd::AsRawFd;
-    fd.as_raw_fd()
-}
-
-fn ctl(ep: &OwnedFd, op: i32, fd: RawFd, events: u32, token: u64) -> std::io::Result<()> {
-    let mut ev = EpollEvent { events, data: token };
-    // SAFETY: `ev` lives during the call; `epoll_ctl` does not keep the pointer.
-    cvt(unsafe { epoll_ctl(raw(ep), op, fd, &mut ev) }).map(|_| ())
-}
-
-fn mask(i: Interest) -> u32 {
-    let mut m = 0;
-    if i.read {
-        m |= EPOLLIN | EPOLLRDHUP;
-    }
-    if i.write {
-        m |= EPOLLOUT;
-    }
-    m
-}
-
-#[derive(Debug)]
-pub(crate) struct Poller {
-    ep: OwnedFd,
-    wake: Arc<std::fs::File>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Waker {
-    wake: Arc<std::fs::File>,
-}
-
-impl Poller {
-    pub(crate) fn new() -> std::io::Result<Poller> {
-        // SAFETY: no pointers.
-        let ep = owned(unsafe { epoll_create1(EPOLL_CLOEXEC) })?;
-        // SAFETY: no pointers.
-        let efd = owned(unsafe { eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK) })?;
-        ctl(&ep, EPOLL_CTL_ADD, raw(&efd), EPOLLIN, WAKE_TOKEN)?;
-        Ok(Poller { ep, wake: Arc::new(std::fs::File::from(efd)) })
-    }
-
-    pub(crate) fn register(&self, fd: RawFd, token: u64, i: Interest) -> std::io::Result<()> {
-        ctl(&self.ep, EPOLL_CTL_ADD, fd, mask(i), token)
-    }
-
-    pub(crate) fn modify(&self, fd: RawFd, token: u64, i: Interest) -> std::io::Result<()> {
-        ctl(&self.ep, EPOLL_CTL_MOD, fd, mask(i), token)
-    }
-
-    pub(crate) fn deregister(&self, fd: RawFd) -> std::io::Result<()> {
-        ctl(&self.ep, EPOLL_CTL_DEL, fd, 0, 0)
-    }
-
-    pub(crate) fn wait(
-        &self,
-        out: &mut Vec<Event>,
-        timeout: Option<Duration>,
-    ) -> std::io::Result<()> {
-        let mut evs = [EpollEvent::default(); MAX_EVENTS];
-        // SAFETY: `evs` has `MAX_EVENTS` writable entries.
-        let n = unsafe {
-            epoll_wait(raw(&self.ep), evs.as_mut_ptr(), MAX_EVENTS as i32, timeout_ms(timeout))
-        };
-        if n < 0 {
-            let e = std::io::Error::last_os_error();
-            return if e.raw_os_error() == Some(EINTR) { Ok(()) } else { Err(e) };
-        }
-        for e in &evs[..n as usize] {
-            // Copies: fields of a packed struct cannot be taken by reference.
-            let (events, token) = (e.events, e.data);
-            if token == WAKE_TOKEN {
-                // Drain the counter; if another thread already drained it there is nothing to read.
-                let mut buf = [0u8; 8];
-                let _ = (&*self.wake).read(&mut buf);
-                out.push(Event { token, readable: false, writable: false, hangup: false });
-                continue;
-            }
-            out.push(Event {
-                token,
-                readable: events & EPOLLIN != 0,
-                writable: events & EPOLLOUT != 0,
-                hangup: events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP) != 0,
-            });
-        }
-        Ok(())
-    }
-
-    pub(crate) fn waker(&self) -> Waker {
-        Waker { wake: Arc::clone(&self.wake) }
-    }
-
-    pub(crate) fn raw_fd(&self) -> RawFd {
-        raw(&self.ep)
-    }
-}
-
-impl Waker {
-    pub(crate) fn wake(&self) -> std::io::Result<()> {
-        match (&*self.wake).write(&1u64.to_ne_bytes()) {
-            // Counter at its maximum: a wake-up is already pending.
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-            r => r.map(|_| ()),
-        }
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage, coverage(off))]
-mod tests {
-    use super::*;
-
-    /// Linux has no page-ins apart from `getrusage(2)`.
-    #[test]
-    fn there_are_no_page_ins_apart() {
-        assert_eq!(memory().unwrap().pageins, None);
-    }
-
-    unsafe extern "C" {
-        fn pthread_kill(thread: std::os::unix::thread::RawPthread, sig: i32) -> i32;
-        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
-    }
-
-    const SIGUSR1: i32 = 10;
-
-    extern "C" fn ignore(_sig: i32) {}
-
-    #[test]
-    fn system_call_errors_are_returned() {
-        // Waits on something that is not an epoll descriptor.
-        let not_an_epoll = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
-        let p =
-            Poller { ep: not_an_epoll, wake: Arc::new(std::fs::File::open("/dev/null").unwrap()) };
-        let err = p.wait(&mut Vec::new(), Some(Duration::ZERO)).unwrap_err();
-        assert_ne!(err.raw_os_error(), Some(EINTR));
-        // A wake-up that cannot be written is an error, not a pending wake-up.
-        assert!(p.waker().wake().is_err());
-    }
-
-    #[test]
-    fn a_wake_on_a_full_counter_is_already_pending() {
-        let p = Poller::new().unwrap();
-        // The largest value an eventfd counter holds: one more would block.
-        (&*p.wake).write_all(&(u64::MAX - 1).to_ne_bytes()).unwrap();
-        p.waker().wake().unwrap();
-        let mut out = Vec::new();
-        p.wait(&mut out, Some(Duration::ZERO)).unwrap();
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn a_signal_during_the_wait_returns_without_events() {
-        // SAFETY: `ignore` is a valid handler for the whole program and does nothing.
-        assert_ne!(unsafe { signal(SIGUSR1, ignore) }, usize::MAX);
-        // The signal may arrive before the thread enters `epoll_wait`: then the wait lasts its
-        // whole timeout and the round is repeated.
-        let interrupted = (0..50).any(|_| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let waiter = std::thread::spawn(move || {
-                let p = Poller::new().unwrap();
-                let mut out = Vec::new();
-                tx.send(()).unwrap();
-                let start = std::time::Instant::now();
-                p.wait(&mut out, Some(Duration::from_secs(2))).unwrap();
-                (start.elapsed(), out.len())
-            });
-            rx.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-            use std::os::unix::thread::JoinHandleExt;
-            // SAFETY: the thread is alive until `join`; `SIGUSR1` has a handler that does nothing.
-            assert_eq!(unsafe { pthread_kill(waiter.as_pthread_t(), SIGUSR1) }, 0);
-            let (elapsed, events) = waiter.join().unwrap();
-            assert_eq!(events, 0);
-            elapsed < Duration::from_secs(1)
-        });
-        assert!(interrupted, "no wait was interrupted by the signal");
-    }
-
-    #[test]
-    fn struct_layouts_match_the_system_headers() {
-        let expected = if cfg!(target_arch = "x86_64") { 12 } else { 16 };
-        assert_eq!(std::mem::size_of::<EpollEvent>(), expected);
-    }
-}
 
 // Host facts (`host.rs`).
 
@@ -258,9 +16,9 @@ pub(crate) const SC_PHYS_PAGES: i32 = 85;
 pub(crate) const SC_NPROCESSORS_ONLN: i32 = 84;
 /// `getrlimit(2)` resource of open files.
 pub(crate) const RLIMIT_NOFILE: i32 = 7;
-/// `ru_maxrss` is in kilobytes on Linux.
 /// `CLOCK_THREAD_CPUTIME_ID`: the CPU time of the calling thread.
 pub(crate) const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+/// `ru_maxrss` is in kilobytes on Linux.
 pub(crate) const MAXRSS_PER_KB: i64 = 1;
 
 /// Bytes of each field of `struct utsname`.
@@ -343,4 +101,23 @@ pub(crate) fn distribution() -> (String, String) {
 /// Microseconds of a `struct timeval`.
 pub(crate) fn usec(v: Suseconds) -> i64 {
     v
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// Linux has no page-ins apart from `getrusage(2)`.
+    #[test]
+    fn there_are_no_page_ins_apart() {
+        assert_eq!(memory().unwrap().pageins, None);
+    }
+
+    #[test]
+    fn the_utsname_fields_are_the_system_headers_sizes() {
+        assert_eq!(std::mem::size_of::<Utsname>(), 6 * UTS_LEN);
+        assert_eq!(usec(7), 7);
+        assert_eq!(Statvfs::default().sizes(), (0, 0, 0));
+    }
 }

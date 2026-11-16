@@ -12,7 +12,6 @@ use std::os::fd::AsRawFd;
 
 /// Safe forms of the engine's DMA file operations (023 FR-010).
 pub mod dma;
-pub mod handoff;
 pub mod host;
 pub mod latest;
 mod linux;
@@ -20,9 +19,7 @@ mod linux;
 pub use linux::netns;
 /// AF_XDP and its XDP program (012 FR-033).
 pub use linux::xdp;
-pub mod poll;
 pub mod process;
-pub mod ring;
 
 use linux as os;
 
