@@ -563,7 +563,9 @@ pub fn start(
     // server.
     let kmip = match o.at_rest.kmip.as_ref() {
         None => None,
-        Some(k) => match kmip::master_key(k, &o.dbpath, &mut |b| teseladb_sys::fill_random(b)) {
+        Some(k) => match with_start_engine(|| {
+            kmip::master_key(k, &o.dbpath, &mut |b| teseladb_sys::fill_random(b))
+        }) {
             Ok(m) => {
                 for line in &m.log {
                     log.info(line, &[]);
@@ -600,7 +602,13 @@ pub fn start(
             }
         }
     }
-    let audit = match audit_log::AuditLog::open(&o.audit) {
+    // The audit log's key wrapped by the KMIP server asks it now (013 T042).
+    let audit = if o.audit.encryption_key_uid.is_some() && o.audit.kmip.is_some() {
+        with_start_engine(|| audit_log::AuditLog::open(&o.audit))
+    } else {
+        audit_log::AuditLog::open(&o.audit)
+    };
+    let audit = match audit {
         Ok(a) => a,
         Err(e) => {
             let _ = writeln!(err, "teseladb: {e}");
@@ -724,6 +732,19 @@ pub fn start(
         a.system(AuditType::Shutdown, teseladb_auth::audit_param::shutdown());
     }
     code
+}
+
+/// Runs `f`, which asks the KMIP server, where the outbound clients have an engine: before the
+/// node's engine runs, one of its own for the duration of `f` (023 FR-024).
+#[cfg(target_os = "linux")]
+fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    outbound::with_engine(f)?
+}
+
+/// Outside Linux the clients answer that they run on Linux only.
+#[cfg(not(target_os = "linux"))]
+fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    f()
 }
 
 /// The prefix of the KMIP options, `--kmip<Name>` for `security.kmip.<name>`.

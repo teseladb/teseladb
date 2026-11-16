@@ -82,7 +82,11 @@ impl Deadline {
 
 impl Link {
     /// A link over `socket` (its plaintext side when `session` is a TLS one).
-    pub fn new(mut socket: ConnectedSocket, session: Option<TlsSession>, timeout: Duration) -> Link {
+    pub fn new(
+        mut socket: ConnectedSocket,
+        session: Option<TlsSession>,
+        timeout: Duration,
+    ) -> Link {
         // Requests are small and the client waits for each answer; Nagle would hold them.
         let _ = socket.set_nodelay(true);
         let input = socket.input(ConnectedSocketInputStreamConfig::default());
@@ -124,11 +128,6 @@ impl Link {
         let name = server_name.as_deref();
         let t = tls_stream::client(sock, config, name, resume, Some(timeout)).await?;
         Ok(Link::new(t.socket, Some(t.session), timeout))
-    }
-
-    /// What the TLS handshake agreed; `None` in clear.
-    pub fn session(&self) -> Option<&TlsSession> {
-        self.session.as_ref()
     }
 
     /// Sends `bytes` whole.

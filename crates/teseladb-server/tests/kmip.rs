@@ -1,7 +1,13 @@
 //! The master key from a KMIP server (013 FR-028), against a KMIP server of the test that speaks
 //! TLS with client certificates and keeps its keys and their states: the first start creates and
 //! activates a key and seals the node's own key with it, the next ones open it, a rotation seals it
-//! under a new key, and a key that is not active, unknown or out of reach stops the start.
+//! under a new key, and a key that is not active, unknown or out of reach stops the start. The
+//! client runs on the engine (023 FR-024, T064).
+
+#![cfg(target_os = "linux")]
+
+#[path = "common/blocking_tls.rs"]
+mod blocking_tls;
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -11,10 +17,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use blocking_tls::TlsStream;
 use teseladb_auth::kmip::{ACTIVE, Item, Value, message_len, operation, tag};
 use teseladb_server::kmip::{self, KEYSTORE, KmipOpts};
+use teseladb_server::outbound::test_engine;
 use teseladb_server::pki::{self, PkiParams};
-use teseladb_server::tls_stream::TlsStream;
 use teseladb_tls::{CertifiedKey, ClientAuth, ServerConfig, Trust};
 use teseladb_x509::ext::GeneralName;
 
@@ -226,6 +233,8 @@ impl Drop for Fixture {
 
 /// A KMIP server and the options that reach it with a client certificate of its CA.
 fn fixture(name: &str) -> Fixture {
+    // The client runs on the engine (023 FR-024): the test runner's, in this process.
+    test_engine::install();
     let base = dir(name);
     let mut random = |b: &mut [u8]| teseladb_sys::fill_random(b);
     let names = vec![GeneralName::Ip(vec![127, 0, 0, 1])];
@@ -459,7 +468,8 @@ fn a_key_that_stops_being_active_is_noticed() {
     let (stop, lost) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let every = Duration::from_millis(50);
     ops(&f);
-    let poller = kmip::poll(f.opts.clone(), m.id.clone(), every, stop.clone(), lost.clone());
+    let poller =
+        kmip::poll(f.opts.clone(), m.id.clone(), every, stop.clone(), lost.clone()).unwrap();
     // Two checks of an active key, then it is revoked.
     let until = Instant::now() + Duration::from_secs(10);
     let mut checks = 0;
@@ -475,7 +485,7 @@ fn a_key_that_stops_being_active_is_noticed() {
         assert!(Instant::now() < until, "the lost key was not noticed");
         std::thread::sleep(every);
     }
-    poller.join().unwrap();
+    poller.join();
     assert_eq!(
         kmip::lost_message("1"),
         "KMIP Key used for ESE is not in active state. Shutting down server. key_uid=1"
@@ -486,10 +496,10 @@ fn a_key_that_stops_being_active_is_noticed() {
     let gone = KmipOpts { servers: vec!["no-such-host.invalid".into()], ..f.opts.clone() };
     for (o, id) in [(gone, m.id.clone()), (f.opts.clone(), "unknown".to_owned())] {
         let stop = Arc::new(AtomicBool::new(false));
-        let poller = kmip::poll(o, id, every, stop.clone(), lost.clone());
+        let poller = kmip::poll(o, id, every, stop.clone(), lost.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        poller.join().unwrap();
+        poller.join();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let poller = kmip::poll(
@@ -498,15 +508,20 @@ fn a_key_that_stops_being_active_is_noticed() {
         Duration::from_secs(60),
         stop.clone(),
         lost.clone(),
-    );
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_millis(150));
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    poller.join().unwrap();
+    poller.join();
     assert!(!lost.load(std::sync::atomic::Ordering::Relaxed));
+    // Certificate files that do not read stop the check before it starts.
+    let missing = KmipOpts { ca_file: Some(f.base.join("missing.pem")), ..f.opts.clone() };
+    assert!(kmip::poll(missing, m.id.clone(), every, stop, lost).is_err());
 }
 
-/// `teseladb start` with `args` in a thread; its exit code and log once it ends.
-fn start(f: &Fixture, log: &std::path::Path, extra: &[&str]) -> std::thread::JoinHandle<i32> {
+/// `teseladb start` with `args` as a process of its own (D4: its engine is the process's, and
+/// this test process runs the test runner's); its exit code once it ends.
+fn start(f: &Fixture, log: &std::path::Path, extra: &[&str]) -> std::process::Child {
     let port = f.opts.port.to_string();
     let (ca, client) = (
         f.opts.ca_file.clone().unwrap().display().to_string(),
@@ -543,15 +558,20 @@ fn start(f: &Fixture, log: &std::path::Path, extra: &[&str]) -> std::thread::Joi
     args.extend(["--dbpath".into(), f.data.display().to_string()]);
     args.extend(["--logpath".into(), log.display().to_string()]);
     args.extend(extra.iter().map(|s| s.to_string()));
-    let stop = Arc::new(AtomicBool::new(false));
-    std::thread::spawn(move || {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = teseladb_server::run(&args, &mut out, &mut err, &|| {
-            stop.load(std::sync::atomic::Ordering::Relaxed)
-        });
-        assert!(err.is_empty() || code != 0, "{}", String::from_utf8_lossy(&err));
-        code
-    })
+    std::process::Command::new(env!("CARGO_BIN_EXE_teseladb"))
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The exit code of the node `child`; a node that ends with 0 wrote nothing on its error output.
+fn exit_code(child: std::process::Child) -> i32 {
+    let out = child.wait_with_output().unwrap();
+    let code = out.status.code().unwrap_or(-1);
+    assert!(out.stderr.is_empty() || code != 0, "{}", String::from_utf8_lossy(&out.stderr));
+    code
 }
 
 fn wait_for(log: &std::path::Path, what: &str) -> String {
@@ -579,13 +599,13 @@ fn a_node_starts_rotates_and_stops_with_its_kmip_key() {
     assert!(f.data.join(KEYSTORE).exists());
     // The key is revoked: the node notices at its next check and stops.
     set_state(&f, "1", COMPROMISED);
-    assert_eq!(node.join().unwrap(), 1);
+    assert_eq!(exit_code(node), 1);
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains(&kmip::lost_message("1")), "{text}");
     // A rotation (with the old key active again) starts no node and ends with 0.
     set_state(&f, "1", ACTIVE);
     let rotation = start(&f, &log, &["--kmipRotateMasterKey"]);
-    assert_eq!(rotation.join().unwrap(), 0);
+    assert_eq!(exit_code(rotation), 0);
     let text = std::fs::read_to_string(&log).unwrap();
     assert!(text.contains("Rotated master encryption key oldMasterKeyId=1 newMasterKeyId=2"));
     assert!(std::fs::read_to_string(f.data.join(KEYSTORE)).unwrap().starts_with("key=2\n"));
@@ -596,7 +616,7 @@ fn a_node_starts_rotates_and_stops_with_its_kmip_key() {
         data: f.data.clone(),
         keys: f.keys.clone(),
     };
-    assert_eq!(start(&gone, &log, &[]).join().unwrap(), 1);
+    assert_eq!(exit_code(start(&gone, &log, &[])), 1);
 }
 
 /// The audit log's key wrapped by the KMIP server (013 T042): the header names the KMIP key and

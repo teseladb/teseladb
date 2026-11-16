@@ -25,9 +25,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use teseladb_auth::kmip::KmipError;
 #[cfg(not(target_os = "linux"))]
 use teseladb_auth::kmip::{Answer, Request};
-use teseladb_auth::kmip::KmipError;
 #[cfg(target_os = "linux")]
 use teseladb_auth::kmip::{V1_0, V1_2, Version};
 use teseladb_crypto::aes::Aes;
@@ -369,7 +369,10 @@ mod on_engine {
     impl Session {
         /// Connects to the first server of `o` that answers, trying each `--kmipConnectRetries`
         /// more times; the reference server's message when none does.
-        pub(super) async fn connect(o: &KmipOpts, tls: &Arc<ClientConfig>) -> Result<Session, String> {
+        pub(super) async fn connect(
+            o: &KmipOpts,
+            tls: &Arc<ClientConfig>,
+        ) -> Result<Session, String> {
             let mut last = NO_SERVER.to_owned();
             for name in &o.servers {
                 let Ok(mut addrs) = blocking::resolve(name, o.port, o.connect_timeout).await else {
@@ -433,7 +436,11 @@ mod on_engine {
         Ok(Link::new(t.socket, Some(t.session), timeout))
     }
 
-    async fn created(s: &mut Session, o: &KmipOpts, log: &mut Vec<String>) -> Result<String, String> {
+    async fn created(
+        s: &mut Session,
+        o: &KmipOpts,
+        log: &mut Vec<String>,
+    ) -> Result<String, String> {
         let id = match s.ask(&Request::CreateKey).await {
             Ok(Answer::Created(id)) => id,
             Ok(_) => return Err("KMIP create key: an answer of another kind".into()),
@@ -576,9 +583,9 @@ mod on_engine {
 }
 
 #[cfg(target_os = "linux")]
-pub use on_engine::{ask_once, poll};
-#[cfg(target_os = "linux")]
 use on_engine::fetch_off_shard;
+#[cfg(target_os = "linux")]
+pub use on_engine::{ask_once, poll};
 
 #[cfg(not(target_os = "linux"))]
 fn fetch_off_shard(_o: &KmipOpts, _tls: &Arc<ClientConfig>, _ask: Ask) -> Result<Fetched, String> {

@@ -34,14 +34,22 @@ pub struct TlsStream {
 
 impl TlsStream {
     /// Connects as a client to `host` (the name its certificate has to hold) over `sock`.
-    pub fn client(sock: TcpStream, cfg: Arc<ClientConfig>, host: &str) -> Result<TlsStream, String> {
+    pub fn client(
+        sock: TcpStream,
+        cfg: Arc<ClientConfig>,
+        host: &str,
+    ) -> Result<TlsStream, String> {
         let conn = Connection::client(cfg, Some(host), now_ms(), &entropy()?, None)
             .map_err(|e| format!("{e:?}"))?;
         TlsStream::handshake(sock, conn, &[])
     }
 
     /// Accepts a client over `sock`, of which `first` was already read.
-    pub fn server(sock: TcpStream, cfg: Arc<ServerConfig>, first: &[u8]) -> Result<TlsStream, String> {
+    pub fn server(
+        sock: TcpStream,
+        cfg: Arc<ServerConfig>,
+        first: &[u8],
+    ) -> Result<TlsStream, String> {
         let conn = Connection::server(cfg, now_ms(), &entropy()?);
         TlsStream::handshake(sock, conn, first)
     }

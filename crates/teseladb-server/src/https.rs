@@ -86,7 +86,11 @@ impl Https {
 impl Https {
     /// Sends `req` to `url` (HTTPS only) over an engine connection and reads the whole answer;
     /// runs on the shard that awaits it.
-    pub fn request(&self, url: &Url, req: &Request) -> teseladb::engine::core::future::Future<Response> {
+    pub fn request(
+        &self,
+        url: &Url,
+        req: &Request,
+    ) -> teseladb::engine::core::future::Future<Response> {
         let (https, url, bytes) = (self.clone(), url.clone(), Https::encode(url, req));
         crate::outbound::future(async move { https.exchange(&url, bytes?).await })
     }
@@ -109,9 +113,8 @@ impl Https {
             server_name: Some(url.host.clone()),
             resume: None,
         };
-        let mut link = Link::dial(&url.host, url.port, Some(tls), self.timeout)
-            .await
-            .map_err(|e| text(&e))?;
+        let mut link =
+            Link::dial(&url.host, url.port, Some(tls), self.timeout).await.map_err(|e| text(&e))?;
         link.send(&bytes).await.map_err(|e| text(&e))?;
         let mut reader = ResponseReader::new(Limits::default());
         let answer = loop {

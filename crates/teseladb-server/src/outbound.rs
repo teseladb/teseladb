@@ -5,7 +5,8 @@
 //! result, and starts background work with [`spawn`].
 //!
 //! The node installs its engine's [`Runner`] once the engine runs (D4: one engine per process)
-//! and takes it out before the engine stops. Without one, [`call`] and [`spawn`] fail with
+//! and takes it out before the engine stops; before the node's engine runs, the start-up asks its
+//! KMIP server inside [`with_engine`]. Without a runner, [`call`] and [`spawn`] fail with
 //! [`NO_ENGINE`].
 
 use std::sync::mpsc;
@@ -14,6 +15,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::reactor::engine_is_ready;
+use teseladb_io::engine::{EngineConfig, EnginePost, NodeEngine};
 
 /// The error of [`call`] and [`spawn`] when no engine runs in the process.
 pub const NO_ENGINE: &str = "the node's engine is not running";
@@ -40,6 +42,41 @@ pub trait Runner: Send + Sync {
 }
 
 static RUNNER: RwLock<Option<Arc<dyn Runner>>> = RwLock::new(None);
+
+/// The node's engine as a [`Runner`]: each task on the next shard in turn. The engine has no
+/// scheduling groups of the node's classes yet, so both classes run in its default group.
+#[derive(Debug)]
+pub struct NodeRunner(pub EnginePost);
+
+impl Runner for NodeRunner {
+    fn post(&self, task: Box<dyn FnOnce() + Send>, _class: Class) -> bool {
+        self.0.post(task)
+    }
+}
+
+/// Memory of the engine [`with_engine`] starts: the TLS and the buffers of a few connections.
+const START_ENGINE_MEMORY: u64 = 128 << 20;
+
+/// Runs `f` with an engine for the outbound clients: the one installed, or else an engine of one
+/// shard of its own for the duration of `f` (the node's start-up asks its KMIP server before the
+/// node's engine runs; D4 allows one engine at a time, and this one stops before the node's
+/// starts).
+///
+/// # Errors
+///
+/// When the engine cannot start.
+pub fn with_engine<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    if runner().is_ok() {
+        return Ok(f());
+    }
+    let cfg = EngineConfig { shards: 1, cpus: Vec::new(), memory: Some(START_ENGINE_MEMORY) };
+    let engine = NodeEngine::start(&cfg).map_err(|e| format!("the engine: {e}"))?;
+    install(Arc::new(NodeRunner(engine.poster())));
+    let out = f();
+    uninstall();
+    engine.stop();
+    Ok(out)
+}
 
 /// Installs the engine's runner; returns the one it replaces.
 pub fn install(runner: Arc<dyn Runner>) -> Option<Arc<dyn Runner>> {

@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use teseladb_auth::ldap::{AuthzTemplate, LdapError, Login, Mapping};
 #[cfg(target_os = "linux")]
 use teseladb_auth::ldap::Step;
+use teseladb_auth::ldap::{AuthzTemplate, LdapError, Login, Mapping};
 use teseladb_auth::roles::ADMIN_DB;
 use teseladb_auth::users::RoleName;
 use teseladb_tls::{ClientConfig, Trust};
@@ -263,12 +263,12 @@ impl LdapServer {
         user: &str,
         password: &[u8],
     ) -> Result<Option<(Login, Vec<u8>, Option<Vec<String>>)>, String> {
-        let (mut login, first) = match Login::start(&self.inner.mapping, user, password, self.query())
-        {
-            Ok(l) => l,
-            Err(LdapError::NoUser | LdapError::Refused(_)) => return Ok(None),
-            Err(e) => return Err(e.to_string()),
-        };
+        let (mut login, first) =
+            match Login::start(&self.inner.mapping, user, password, self.query()) {
+                Ok(l) => l,
+                Err(LdapError::NoUser | LdapError::Refused(_)) => return Ok(None),
+                Err(e) => return Err(e.to_string()),
+            };
         let cached = self.cached(user);
         if let (Some(t), None) = (&self.inner.authz, &cached) {
             login = login.with_groups(t, user);
@@ -341,7 +341,9 @@ mod on_engine {
     use teseladb_io::engine::connect::TlsClient;
     use teseladb_io::engine::link::Link;
 
-    use super::{CLOSED, Ended, GroupsStart, LdapLogin, LdapServer, Login, NO_SERVER, RoleName, Step};
+    use super::{
+        CLOSED, Ended, GroupsStart, LdapLogin, LdapServer, Login, NO_SERVER, RoleName, Step,
+    };
     use crate::outbound::{self, text};
 
     impl LdapServer {
@@ -565,7 +567,7 @@ mod tests {
     fn answers_without_a_server() {
         #[cfg(target_os = "linux")]
         crate::outbound::test_engine::install();
-        let s =LdapServer::from_opts(&opts(1)).unwrap().unwrap();
+        let s = LdapServer::from_opts(&opts(1)).unwrap().unwrap();
         assert_eq!(s.login("jane", b""), Ok(LdapLogin::Refused));
         assert_eq!(s.groups("jane"), Ok(None));
         let o = LdapOpts {

@@ -60,7 +60,7 @@ pub use core_loop::{
 #[cfg(target_os = "linux")]
 pub use disk_port::{CoreDisk, DiskWaker, ThreadDisk};
 #[cfg(target_os = "linux")]
-pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, NodeEngine};
+pub use node_engine::{CoreConfig, CoreHandle, EngineConfig, EnginePost, NodeEngine};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::{CoreConfig, CoreDisk, CoreHandle, EngineConfig, NodeEngine, ThreadDisk};
 

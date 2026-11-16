@@ -54,7 +54,8 @@ fn answer(mut link: Peer, searches: &AtomicUsize) {
                 let dn = String::from_utf8_lossy(parts[1].1).into_owned();
                 let user = dn.strip_prefix("uid=").and_then(|d| d.strip_suffix(",ou=people"));
                 let ok = user.is_some_and(|u| parts[2].1 == format!("{u}-pw").as_bytes());
-                let _ = link.send(&reply(ldap_ber::element(0x61, &result(if ok { 0 } else { 49 }))));
+                let _ =
+                    link.send(&reply(ldap_ber::element(0x61, &result(if ok { 0 } else { 49 }))));
             }
             if t == 0x63 {
                 searches.fetch_add(1, Ordering::SeqCst);
@@ -290,7 +291,10 @@ fn a_shard_awaits_the_futures() {
     };
     let s = LdapServer::from_opts(&o).unwrap().unwrap();
     let (a, b) = (s.clone(), s.clone());
-    assert_eq!(outbound::call(move || a.login_on_shard("jane", b"jane-pw")), Ok(roles(&["cn=readers"])));
+    assert_eq!(
+        outbound::call(move || a.login_on_shard("jane", b"jane-pw")),
+        Ok(roles(&["cn=readers"]))
+    );
     let readers = Some(vec![RoleName::new("cn=readers", ADMIN_DB)]);
     assert_eq!(outbound::call(move || b.groups_on_shard("jane")), Ok(readers));
     let on_shard = outbound::call(move || {

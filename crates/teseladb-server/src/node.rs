@@ -1162,6 +1162,9 @@ impl<D: Disk + Send + 'static> Node<D> {
             EngineConfig { shards: cores, cpus: pinned.unwrap_or_default(), memory: None };
         let engine = NodeEngine::start(&engine_cfg)?;
         log.step("engine", &[("shards", &engine.shards())]);
+        // The outbound clients (LDAP, KMIP, HTTPS) run on it from now on (023 FR-024).
+        #[cfg(target_os = "linux")]
+        crate::outbound::install(Arc::new(crate::outbound::NodeRunner(engine.poster())));
         let mut ports = ports.into_iter();
         for k in 0..cores {
             let began = Instant::now();
@@ -1671,6 +1674,8 @@ impl<D: Disk + Send + 'static> Node<D> {
             l.stop();
         }
         // Nothing reaches the shards any more.
+        #[cfg(target_os = "linux")]
+        crate::outbound::uninstall();
         engine.stop();
         // Once the cores stopped, nothing asks for marks: the exact bound is written (D-158).
         self.clock.stop();
