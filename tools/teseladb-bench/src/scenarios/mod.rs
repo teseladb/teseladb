@@ -24,6 +24,7 @@ pub mod keys;
 pub mod lsm;
 pub mod lsm_compression;
 pub mod noisy_tenant;
+pub mod on_engine;
 pub mod open;
 pub mod prefetch;
 pub mod profiles;
@@ -47,7 +48,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb_raftlog::Disk;
 use teseladb_server::node::Node;
 use teseladb_types::Histogram;
 
@@ -63,11 +63,7 @@ const MIN_BATCHES: u64 = 20;
 static TEMPORARY_DIRS: AtomicU64 = AtomicU64::new(0);
 
 /// `node` once it serves, within `within`; otherwise it is stopped and the error is `failure`.
-pub fn ready<D: Disk + Send + 'static>(
-    node: Node<D>,
-    within: Duration,
-    failure: &str,
-) -> Result<Node<D>, String> {
+pub fn ready(node: Node, within: Duration, failure: &str) -> Result<Node, String> {
     if node.wait_ready(within) {
         return Ok(node);
     }
@@ -239,10 +235,10 @@ mod tests {
 
     #[test]
     fn a_node_not_ready_in_time_is_stopped_with_the_error() {
-        use teseladb_raftlog::MemDisk;
+        use teseladb_io::engine::disk::DiskPlace;
         use teseladb_server::node::NodeConfig;
         let cfg = NodeConfig { cores: Some(1), ..NodeConfig::default() };
-        let start = || Node::start(cfg.clone(), || Ok(MemDisk::new()), None).unwrap();
+        let start = || Node::start(cfg.clone(), DiskPlace::Memory, None).unwrap();
         // No time at all: `wait_ready` gives up before asking.
         let err = ready(start(), Duration::ZERO, "the node did not start").unwrap_err();
         assert_eq!(err, "the node did not start");

@@ -9,7 +9,6 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use teseladb_bson::{Document, RawDoc, RawValue, Value};
-use teseladb_raftlog::MemDisk;
 use teseladb_server::cli::DevOpts;
 use teseladb_server::node::Node;
 use teseladb_wire::msg::{HEADER_LEN, Header, OpMsg};
@@ -26,7 +25,7 @@ pub enum Target {
     /// A server by address.
     Remote(SocketAddr),
     /// A development cluster in this process, stopped when this is dropped.
-    Local(Vec<Node<MemDisk>>),
+    Local(Vec<Node>),
 }
 
 impl Target {

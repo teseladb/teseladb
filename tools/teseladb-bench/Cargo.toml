@@ -24,6 +24,8 @@ teseladb-wire = { path = "../../crates/teseladb-wire" }
 teseladb-fle = { path = "../../crates/teseladb-fle" }
 teseladb-raftlog = { workspace = true }
 teseladb-io = { path = "../../crates/teseladb-io" }
+# The engine (023): the disk scenarios run in its threads. Empty outside Linux.
+teseladb = { path = "../../crates/teseladb-engine" }
 teseladb-deflate = { workspace = true }
 teseladb-bson = { workspace = true }
 teseladb-js = { path = "../../crates/teseladb-js" }

@@ -1,7 +1,7 @@
 //! `disk-usage` (012 FR-009): bytes on disk per document against BSON, an encoding that carries the
 //! name and type of every field in every document (what the reference server keeps per document
-//! before its block compression). A node of one core on the real disk (`FileDisk`, in `--data` or a
-//! temporary folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire
+//! before its block compression). A node of one core on the real disk (the engine's files, in
+//! `--data` or a temporary folder) takes `--records` YCSB records (ten fields of 100 bytes) over the wire
 //! protocol, with small memtables so that the documents reach the LSM's files. It reports:
 //! - `disk_usage.bson_per_doc`: BSON bytes per document;
 //! - `disk_usage.sst_per_doc`: bytes of the LSM's files per document;
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use teseladb_bson::Value;
-use teseladb_io::FileDisk;
+use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::node::{Node, NodeConfig};
 
@@ -72,7 +72,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
         ..NodeConfig::default()
     };
     cfg.lsm.memtable_bytes = MEMTABLE_BYTES;
-    let node = Node::start(cfg, || FileDisk::open(&path), None).map_err(msg)?;
+    let node = Node::start(cfg, DiskPlace::Files(path.clone()), None).map_err(msg)?;
     let node = super::ready(node, READY, "the node did not start")?;
     let measured = measure(args, &node, &path);
     node.stop();
@@ -85,7 +85,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
     let ratio = if bson == 0 { 0.0 } else { sst as f64 / bson as f64 };
     report.push("disk_usage.sst_over_bson", "ratio", ratio, None);
     report.notes.push(format!(
-        "{} YCSB records of ten 100-byte fields, one node of one core on FileDisk, memtables of \
+        "{} YCSB records of ten 100-byte fields, one node of one core on the engine's files, memtables of \
          {} KiB",
         args.records,
         MEMTABLE_BYTES >> 10
@@ -94,7 +94,7 @@ pub fn run(args: &Args) -> Result<Report, String> {
 }
 
 /// Loads the records; returns their BSON bytes, the LSM's bytes and the directory's bytes.
-fn measure(args: &Args, node: &Node<FileDisk>, dir: &Path) -> Result<(u64, u64, u64), String> {
+fn measure(args: &Args, node: &Node, dir: &Path) -> Result<(u64, u64, u64), String> {
     let addr = *node.client_addrs().first().ok_or("the node has no clients' port")?;
     let mut c = Client::connect(addr)?;
     let mut rng = Rng::new(1);

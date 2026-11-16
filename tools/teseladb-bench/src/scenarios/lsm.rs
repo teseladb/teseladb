@@ -1,4 +1,5 @@
-//! `lsm` scenario (004 FR-021, SC-003), on the real disk through `FileDisk`:
+//! `lsm` scenario (004 FR-021, SC-003), on the real disk through the engine's disk executor (023
+//! FR-010, in an engine thread, [`super::on_engine`]):
 //! - `lsm.write`: a version into the memtable, under 1 µs at p50 (flushes run between batches,
 //!   outside the timing);
 //! - `lsm.flush_mb_s`: flushing a 64 MiB memtable, at least 300 MB/s on NVMe;
@@ -24,13 +25,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{BlockNeed, Lookup, Lsm, LsmConfig, SharedLsm, SharedRead, Step, ViewCache};
 use teseladb_raftlog::{Disk, MemDisk};
 use teseladb_types::{GroupId, Histogram, Nanos, Rng};
 
-use super::{DataDir, at, keep_going, msg, warm_up};
+use super::on_engine::BenchDisk;
+use super::{DataDir, keep_going, msg, warm_up};
 use crate::cli::Args;
 use crate::report::{Report, Target};
 
@@ -66,7 +67,7 @@ fn get(lsm: &mut Lsm, disk: &mut dyn Disk, key: &[u8], clock: &Instant) -> bool 
     }
 }
 
-fn scan_1000(lsm: &mut Lsm, disk: &mut FileDisk, from: u64, clock: &Instant) -> usize {
+fn scan_1000(lsm: &mut Lsm, disk: &mut dyn Disk, from: u64, clock: &Instant) -> usize {
     let v = lsm.view();
     let mut s = v.scan(&key(from), &key(from + 1000), ts(u64::MAX));
     let mut n = 0;
@@ -287,15 +288,21 @@ fn shared_scaling(
 }
 
 /// An LSM in its own subfolder of the data folder, with its own disk executor.
-fn open(dir: &DataDir, name: &str, cfg: &LsmConfig) -> Result<(Lsm, FileDisk), String> {
+fn open(dir: &DataDir, name: &str, cfg: &LsmConfig) -> Result<(Lsm, BenchDisk), String> {
     let path = dir.path.join(name);
-    let mut disk = FileDisk::open(&path).map_err(at(&path))?;
+    let mut disk = super::on_engine::disk(&path)?;
     let (lsm, _) = Lsm::recover(cfg, &mut disk).map_err(msg)?;
     Ok((lsm, disk))
 }
 
 /// Runs the scenario.
 pub fn run(args: &Args) -> Result<Report, String> {
+    let args = args.clone();
+    super::on_engine::run(move || run_here(&args))
+}
+
+/// [`run`] in an engine thread.
+fn run_here(args: &Args) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "lsm")?;
     let cfg =
         LsmConfig { dir: "lsm".into(), compaction_bytes_per_sec: 1 << 40, ..LsmConfig::default() };

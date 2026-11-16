@@ -1,6 +1,6 @@
 //! `lsm-compression` scenario (004 FR-023, SC-006, T036): the same corpus of documents written
-//! with zlib, zstd and zstd with the dictionary of each collection, on the real disk through
-//! `FileDisk`. For each codec it reports:
+//! with zlib, zstd and zstd with the dictionary of each collection, on the real disk through the
+//! engine's disk executor (023 FR-010, in an engine thread). For each codec it reports:
 //! - `lsm_compression.<codec>.rate`: bytes of the data blocks after compression per byte before,
 //!   for the blocks the compactions wrote once the dictionaries existed;
 //! - `lsm_compression.<codec>.small_rate`: the same for a collection of documents under 1 KiB,
@@ -18,13 +18,13 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use teseladb_bson::{Document, Value};
-use teseladb_io::FileDisk;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{Codec, Lookup, Lsm, LsmConfig};
 use teseladb_raftlog::Disk;
 use teseladb_types::{GroupId, Nanos, Rng};
 
-use super::{DataDir, at, msg};
+use super::on_engine::{self, BenchDisk};
+use super::{DataDir, msg};
 use crate::cli::Args;
 use crate::report::Report;
 
@@ -167,7 +167,7 @@ fn measure(
         ..LsmConfig::default()
     };
     let path = dir.path.join(name);
-    let mut disk = FileDisk::open(&path).map_err(at(&path))?;
+    let mut disk = on_engine::disk(&path)?;
     let (mut lsm, _) = Lsm::recover(&cfg, &mut disk).map_err(msg)?;
     // The first half trains the dictionaries in its compaction; the second is measured.
     write(&mut lsm, &mut disk, (0, shape.docs), &clock)?;
@@ -188,11 +188,11 @@ fn measure(
     drop(lsm);
     // The small documents alone, in an LSM of their own, the same way.
     let small = path.join("small");
-    let mut sdisk = FileDisk::open(&small).map_err(at(&small))?;
+    let mut sdisk = on_engine::disk(&small)?;
     let (mut s, _) = Lsm::recover(&cfg, &mut sdisk).map_err(msg)?;
     let mut rng = Rng::new(5);
     let mut index = 0;
-    let mut small_round = |s: &mut Lsm, d: &mut FileDisk, range: std::ops::Range<u64>| {
+    let mut small_round = |s: &mut Lsm, d: &mut BenchDisk, range: std::ops::Range<u64>| {
         for i in range {
             index += 1;
             let doc = document(&mut rng, EVENTS, i);
@@ -245,6 +245,12 @@ pub const MEASUREMENT: Shape = Shape { docs: 100_000, reads: 20_000 };
 
 /// Runs the scenario with `shape` (`MEASUREMENT` for the measurement; the tests run a smaller one).
 pub fn run_with(args: &Args, shape: Shape) -> Result<Report, String> {
+    let args = args.clone();
+    on_engine::run(move || run_here(&args, shape))
+}
+
+/// [`run_with`] in an engine thread.
+fn run_here(args: &Args, shape: Shape) -> Result<Report, String> {
     let dir = DataDir::new(args.data.as_deref(), "lsm-compression")?;
     let mut report = Report::new("lsm-compression");
     for codec in CODECS {
