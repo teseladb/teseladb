@@ -880,7 +880,12 @@ impl ThreadContext {
             let mut func =
                 std::mem::replace(&mut *ptr::addr_of_mut!((*this).func), ThreadFunc::empty());
             let done = ptr::addr_of_mut!((*this).done);
-            let result = func.call();
+            // The `try { _func(); } catch (...) { _done.set_exception(...); }` of the
+            // original: a panic of the function is caught here and fails the thread. It
+            // must not unwind further: this frame ends the stack (its return address is
+            // undefined above), so the unwinder would find no handler and abort.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func.call()))
+                .unwrap_or_else(|payload| Err(ExceptionPtr::from_panic(payload)));
             drop(func);
             match result {
                 Err(e) => HostedPromise::set_exception(done, e),
@@ -1123,7 +1128,13 @@ where
             if let Some(f) = (*ptr::addr_of_mut!((*w).func)).take()
                 && let Some(pr) = HostedPromise::take_writer(ptr::addr_of_mut!((*w).pr))
             {
-                R::invoke(f).forward_to_base(pr);
+                // futurize::invoke of the original turns a throw into a failed future;
+                // here a panic of the function fails the returned future the same way.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| R::invoke(f)))
+                    .unwrap_or_else(|payload| {
+                        R::make_exception_future(ExceptionPtr::from_panic(payload))
+                    })
+                    .forward_to_base(pr);
             }
         }
         Ok(())
