@@ -7,10 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
 use teseladb_auth::oidc;
 use teseladb_auth::oidc::{KeySet, Providers};
-#[cfg(target_os = "linux")]
 use teseladb_http::client::{self, Url};
 
 use crate::https::{Https, system_trust};
@@ -76,14 +74,8 @@ impl Oidc {
         }
         self.read_keys_off_shard(issuer, refresh)
     }
-
-    #[cfg(not(target_os = "linux"))]
-    fn read_keys_off_shard(&self, _issuer: &str, _refresh: bool) -> Result<KeySet, String> {
-        Err(crate::LINUX_ONLY.into())
-    }
 }
 
-#[cfg(target_os = "linux")]
 impl Oidc {
     fn read_keys_off_shard(&self, issuer: &str, refresh: bool) -> Result<KeySet, String> {
         let (o, issuer) = (self.clone(), issuer.to_owned());
@@ -128,16 +120,11 @@ impl Oidc {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
-    use crate::tls_stream::TlsStream;
-    #[cfg(target_os = "linux")]
+    use crate::blocking_tls::TlsStream;
     use std::net::TcpListener;
-    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicUsize, Ordering};
     use teseladb_tls::Trust;
-    #[cfg(target_os = "linux")]
     use teseladb_tls::{CertifiedKey, ServerConfig};
-    #[cfg(target_os = "linux")]
     use teseladb_x509::ext::GeneralName;
 
     /// Providers that do not parse, an issuer not configured, and the system's authorities.
@@ -152,7 +139,6 @@ mod tests {
     }
 
     /// A JWKS with the RSA key of the OIDC tests of `teseladb-auth` as `k1`.
-    #[cfg(target_os = "linux")]
     fn jwks() -> String {
         let pem = include_str!("../../teseladb-auth/tests/fixtures/oidc/rsa2048.pem");
         let teseladb_x509::PrivateKey::Rsa(key, _) =
@@ -175,7 +161,6 @@ mod tests {
     }
 
     /// A provider: its discovery document and its JWKS (one RSA key `k1`), counting the reads.
-    #[cfg(target_os = "linux")]
     fn provider(config: Arc<ServerConfig>, reads: Arc<AtomicUsize>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -212,7 +197,6 @@ mod tests {
         port
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn keys_are_read_through_discovery_and_kept() {
         crate::outbound::test_engine::install();

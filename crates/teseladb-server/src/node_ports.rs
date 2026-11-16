@@ -19,10 +19,7 @@ use crate::admin_http::{AdminTls, Handler};
 use crate::http_listener::HttpPortConfig;
 use crate::http_service::NodeHttp;
 
-#[cfg(target_os = "linux")]
 pub use on_linux::{AdminPort, HttpPort};
-#[cfg(not(target_os = "linux"))]
-pub use unsupported::{AdminPort, HttpPort};
 
 /// Starts the administration port at `at`, answering with `handler`, over TLS with `tls`; the
 /// port's TLS is rotated with the node's certificates, `certs`.
@@ -54,7 +51,6 @@ pub fn start_http(
     HttpPort::start(cfg, service, metrics, certs)
 }
 
-#[cfg(target_os = "linux")]
 mod on_linux {
     use std::cell::RefCell;
     use std::io;
@@ -230,71 +226,3 @@ mod on_linux {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-mod unsupported {
-    use std::io;
-    use std::net::SocketAddr;
-    use std::sync::{Arc, Mutex};
-
-    use teseladb_http::metrics::HttpMetrics;
-
-    use crate::admin_http::{AdminTls, Handler};
-    use crate::http_listener::HttpPortConfig;
-    use crate::http_service::NodeHttp;
-
-    fn unsupported() -> io::Error {
-        io::Error::new(io::ErrorKind::Unsupported, "the node's ports run on Linux only")
-    }
-
-    /// The administration port: none exists outside Linux.
-    #[derive(Debug)]
-    pub enum AdminPort {}
-
-    impl AdminPort {
-        pub(super) fn start(
-            _: SocketAddr,
-            _: Handler,
-            _: Option<AdminTls>,
-            _: Option<&crate::certs::Certificates>,
-        ) -> io::Result<AdminPort> {
-            Err(unsupported())
-        }
-
-        /// The address it listens on.
-        #[must_use]
-        pub fn local_addr(&self) -> SocketAddr {
-            match *self {}
-        }
-
-        /// Stops it.
-        pub fn stop(self) {
-            match self {}
-        }
-    }
-
-    /// The HTTP port: none exists outside Linux.
-    #[derive(Debug)]
-    pub enum HttpPort {}
-
-    impl HttpPort {
-        pub(super) fn start(
-            _: HttpPortConfig,
-            _: Arc<NodeHttp>,
-            _: Arc<Mutex<HttpMetrics>>,
-            _: Option<&crate::certs::Certificates>,
-        ) -> io::Result<HttpPort> {
-            Err(unsupported())
-        }
-
-        /// The addresses it listens on.
-        #[must_use]
-        pub fn addrs(&self) -> &[SocketAddr] {
-            match *self {}
-        }
-
-        /// Stops it.
-        pub fn stop(self) {
-            match self {}
-        }
-    }
-}

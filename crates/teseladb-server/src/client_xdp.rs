@@ -8,9 +8,7 @@
 //! `bpf_link`, no `CAP_NET_ADMIN` and `CAP_BPF`, or macOS) leaves the clients to the kernel's
 //! listener, and the node says why.
 
-#[cfg(target_os = "linux")]
 use std::net::{IpAddr, SocketAddr};
-#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 use crate::client_listener::ClientConfig;
@@ -18,7 +16,6 @@ use crate::client_listener::ClientConfig;
 /// The port on AF_XDP of a clients' port.
 pub(crate) struct XdpState {
     status: Option<Result<String, String>>,
-    #[cfg(target_os = "linux")]
     running: Option<(teseladb_io::engine::xdp_clients::XdpRun, teseladb_sys::xdp::XdpProgram)>,
 }
 
@@ -29,7 +26,6 @@ impl XdpState {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl XdpState {
     /// What wakes every connection on AF_XDP (the node's state changed), if the port runs.
     pub(crate) fn waker(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
@@ -44,7 +40,6 @@ impl XdpState {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for XdpState {
     /// Stops the queues on their shards, then takes the program off the interface.
     fn drop(&mut self) {
@@ -56,7 +51,6 @@ impl Drop for XdpState {
     }
 }
 
-#[cfg(target_os = "linux")]
 /// The address and port the XDP program takes: the first IPv4 address of `addrs` (any address
 /// of the interface when it is `0.0.0.0`).
 pub(crate) fn target(addrs: &[SocketAddr]) -> Option<(Option<std::net::Ipv4Addr>, u16)> {
@@ -66,7 +60,6 @@ pub(crate) fn target(addrs: &[SocketAddr]) -> Option<(Option<std::net::Ipv4Addr>
     })
 }
 
-#[cfg(target_os = "linux")]
 /// A secret for the initial sequence numbers (RFC 6528), from the keys the standard library
 /// seeds from the system.
 fn secret() -> u64 {
@@ -76,7 +69,6 @@ fn secret() -> u64 {
     h.finish()
 }
 
-#[cfg(target_os = "linux")]
 /// Starts the port on AF_XDP of `cfg`, if it asks for one, on the listener's addresses `addrs`
 /// (with the ports the system chose), with the sessions of `core`.
 pub(crate) fn start(

@@ -4,15 +4,9 @@
 //! staples a `good` answer that has a `nextUpdate`; without one it warns and staples nothing. The
 //! answer is asked for again halfway to its `nextUpdate`.
 
-#[cfg(not(target_os = "linux"))]
-use std::io::{Read, Write};
-#[cfg(not(target_os = "linux"))]
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use teseladb_http::client::{Scheme, Url, post};
-#[cfg(not(target_os = "linux"))]
-use teseladb_http::http1::{Limits, ResponseReader};
 use teseladb_tls::ServerConfig;
 use teseladb_x509::Certificate;
 use teseladb_x509::ocsp::{self, CertId, Status};
@@ -54,7 +48,6 @@ fn answer_of(url: &str, status: u16, body: Vec<u8>) -> Result<Vec<u8>, String> {
 
 /// Asks `url` (HTTP) about `id` on this shard, each step within `timeout` (023 FR-023); the
 /// DER answer. The future never fails: a failure is its `Err`.
-#[cfg(target_os = "linux")]
 pub fn fetch_on_shard(
     url: &str,
     id: &CertId,
@@ -83,37 +76,10 @@ pub fn fetch_on_shard(
 }
 
 /// Asks `url` (HTTP) about `id`; the DER answer. From a thread that is not a shard.
-#[cfg(target_os = "linux")]
 pub fn fetch(url: &str, id: &CertId, timeout: Duration) -> Result<Vec<u8>, String> {
     let (url, id) = (url.to_owned(), id.clone());
     crate::shard_client::block_on(move || fetch_on_shard(&url, &id, timeout))
         .map_err(crate::error_text)?
-}
-
-/// Asks `url` (HTTP) about `id`; the DER answer.
-#[cfg(not(target_os = "linux"))]
-pub fn fetch(url: &str, id: &CertId, timeout: Duration) -> Result<Vec<u8>, String> {
-    let (target, bytes) = ask_about(url, id)?;
-    let addr = (target.host.as_str(), target.port)
-        .to_socket_addrs()
-        .map_err(crate::error_text)?
-        .next()
-        .ok_or_else(|| format!("OCSP responder {url}: no address"))?;
-    let mut sock = TcpStream::connect_timeout(&addr, timeout).map_err(crate::error_text)?;
-    sock.set_read_timeout(Some(timeout)).map_err(crate::error_text)?;
-    sock.write_all(&bytes).map_err(crate::error_text)?;
-    let mut reader = ResponseReader::new(Limits::default());
-    let mut buf = [0u8; 16 * 1024];
-    let response = loop {
-        let n = sock.read(&mut buf).map_err(crate::error_text)?;
-        if n == 0 {
-            break reader.finish().map_err(crate::error_debug)?;
-        }
-        if let Some(r) = reader.feed(&buf[..n]).map_err(crate::error_debug)? {
-            break r;
-        }
-    };
-    answer_of(url, response.status, response.body)
 }
 
 /// What a stapling round gave: the answer to staple, if any, and when to ask again (seconds).
@@ -239,7 +205,6 @@ pub fn spawn(
 /// The stapler as a task of shard 0 (023 FR-023): each round asks the responder with the engine,
 /// puts the new staple in `port` and publishes it to every shard of each of `shards` before it
 /// waits, on the engine's timers, for the next round.
-#[cfg(target_os = "linux")]
 pub mod on_shard {
     use std::cell::Cell;
     use std::pin::Pin;

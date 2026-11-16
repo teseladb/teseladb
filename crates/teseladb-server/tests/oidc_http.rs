@@ -8,6 +8,9 @@
 //! addresses takes no token on `/mcp` until `mcpOptions.resourceUri` is set.
 #![cfg(target_os = "linux")]
 
+#[path = "common/blocking_tls.rs"]
+mod blocking_tls;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -26,10 +29,11 @@ use teseladb_server::http_listener::HttpPortConfig;
 use teseladb_server::https::Https;
 use teseladb_server::node::{Node, NodeConfig};
 use teseladb_server::oidc_client::{Oidc, QUIESCE};
-use teseladb_server::tls_stream::TlsStream;
 use teseladb_tls::{CertifiedKey, ServerConfig, Trust};
 use teseladb_x509::PrivateKey;
 use teseladb_x509::ext::GeneralName;
+
+use blocking_tls::TlsStream;
 
 const READY: Duration = Duration::from_secs(30);
 /// The audience of OIDC authentication, for the REST API.

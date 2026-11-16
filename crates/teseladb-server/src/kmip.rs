@@ -21,14 +21,9 @@ use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(not(target_os = "linux"))]
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use teseladb_auth::kmip::KmipError;
-#[cfg(not(target_os = "linux"))]
-use teseladb_auth::kmip::{Answer, Request};
-#[cfg(target_os = "linux")]
 use teseladb_auth::kmip::{V1_0, V1_2, Version};
 use teseladb_crypto::aes::Aes;
 use teseladb_crypto::modes::AesGcm;
@@ -53,13 +48,10 @@ const KEY_LINE: &str = "key=";
 const SEALED_LINE: &str = "sealed=";
 const KEYSTORE_MODE: u32 = 0o600;
 /// How often the poller looks at the node's stop while it waits.
-#[cfg(target_os = "linux")]
 const POLL_STEP: Duration = Duration::from_millis(100);
 /// The error of a server that closed the connection before it answered.
-#[cfg(target_os = "linux")]
 const CLOSED: &str = "the KMIP server closed the connection";
 /// The error without servers.
-#[cfg(target_os = "linux")]
 const NO_SERVER: &str = "no --kmipServerName";
 
 /// The KMIP options (`security.kmip.*`).
@@ -114,7 +106,6 @@ impl Default for KmipOpts {
 }
 
 impl KmipOpts {
-    #[cfg(target_os = "linux")]
     fn version(&self) -> Version {
         if self.legacy { V1_0 } else { V1_2 }
     }
@@ -330,19 +321,16 @@ pub fn lost_message(id: &str) -> String {
 /// The background check of a KMIP key's state started by [`poll`].
 #[derive(Debug)]
 pub struct Poller {
-    #[cfg(target_os = "linux")]
     work: crate::outbound::Spawned,
 }
 
 impl Poller {
     /// Waits until the check ended: the key was lost or the node stopped it.
     pub fn join(self) {
-        #[cfg(target_os = "linux")]
         self.work.join();
     }
 }
 
-#[cfg(target_os = "linux")]
 mod on_engine {
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -582,32 +570,6 @@ mod on_engine {
     }
 }
 
-#[cfg(target_os = "linux")]
 use on_engine::fetch_off_shard;
-#[cfg(target_os = "linux")]
 pub use on_engine::{ask_once, poll};
 
-#[cfg(not(target_os = "linux"))]
-fn fetch_off_shard(_o: &KmipOpts, _tls: &Arc<ClientConfig>, _ask: Ask) -> Result<Fetched, String> {
-    Err(crate::LINUX_ONLY.into())
-}
-
-/// The KMIP client runs on the engine, which only Linux has (023 D3).
-#[cfg(not(target_os = "linux"))]
-pub fn ask_once(o: &KmipOpts, _req: Request) -> Result<Result<Answer, KmipFailure>, String> {
-    o.tls()?;
-    Err(crate::LINUX_ONLY.into())
-}
-
-/// The KMIP client runs on the engine, which only Linux has (023 D3).
-#[cfg(not(target_os = "linux"))]
-pub fn poll(
-    o: KmipOpts,
-    _id: String,
-    _every: Duration,
-    _stop: Arc<AtomicBool>,
-    _lost: Arc<AtomicBool>,
-) -> Result<Poller, String> {
-    o.tls()?;
-    Err(crate::LINUX_ONLY.into())
-}

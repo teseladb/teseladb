@@ -498,7 +498,6 @@ pub(crate) fn with_command_stack<T>(run: impl FnOnce() -> T) -> impl FnOnce() ->
 
 /// The number of the port's next connection: one counter for every way the port takes them
 /// (the kernel's TCP and AF_XDP), so that no two connections share a number.
-#[cfg(target_os = "linux")]
 pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
     let id =
         ids.fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| Some(id.wrapping_add(1).max(1)));
@@ -506,7 +505,6 @@ pub(crate) fn next_connection_id(ids: &std::sync::atomic::AtomicI32) -> i32 {
 }
 
 /// The seed of the random numbers of backend `k`: the clock and the number.
-#[cfg(target_os = "linux")]
 pub(crate) fn seed(k: u64) -> u64 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     nanos ^ (k << 40) ^ 0x9e37_79b9_7f4a_7c15
@@ -514,7 +512,6 @@ pub(crate) fn seed(k: u64) -> u64 {
 
 /// The state the commands of a command's thread keep, saved while its engine thread waits (023
 /// FR-018): the hooks every process that runs commands on the engine sets once.
-#[cfg(target_os = "linux")]
 fn set_switch_hooks() {
     fn save() -> Box<dyn std::any::Any> {
         Box::new(teseladb_wire::commands::context::take())
@@ -534,10 +531,8 @@ fn set_switch_hooks() {
 pub struct ClientListener {
     addrs: Vec<SocketAddr>,
     /// The port on the engine's shards.
-    #[cfg(target_os = "linux")]
     port: teseladb_io::engine::client_port::PortRef,
     /// Wakes the port's connections; the node's presence keeps a weak reference to it.
-    #[cfg(target_os = "linux")]
     wake: Arc<dyn Fn() + Send + Sync>,
     /// Connections open on the port, on every shard and on AF_XDP.
     open: Arc<std::sync::atomic::AtomicUsize>,
@@ -558,14 +553,11 @@ impl std::fmt::Debug for ClientListener {
 
 /// How many tasks resolve the intents of the finished transactions: a resolution waits for a
 /// write of the log, so a few run side by side.
-#[cfg(target_os = "linux")]
 const RESOLVERS: usize = 4;
 /// How long an idle resolver pauses before it looks at the queue again; a transaction that ends
 /// wakes it at once.
-#[cfg(target_os = "linux")]
 const RESOLVER_IDLE: Duration = Duration::from_millis(100);
 
-#[cfg(target_os = "linux")]
 impl ClientListener {
     /// Listens on `cfg.addrs` on the shards of the process's engine.
     ///
@@ -781,62 +773,9 @@ impl ClientListener {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-impl ClientListener {
-    /// The clients' port runs on the engine, which runs on Linux only (D3).
-    ///
-    /// # Errors
-    ///
-    /// Always: no engine runs outside Linux.
-    pub fn spawn(cfg: &ClientConfig, state: Arc<dyn NodeState>) -> io::Result<ClientListener> {
-        ClientListener::spawn_with(cfg, state, Hooks::default())
-    }
-
-    /// [`ClientListener::spawn`] with `hooks`.
-    ///
-    /// # Errors
-    ///
-    /// Always: no engine runs outside Linux.
-    #[doc(hidden)]
-    pub fn spawn_with(
-        cfg: &ClientConfig,
-        _state: Arc<dyn NodeState>,
-        _hooks: Hooks,
-    ) -> io::Result<ClientListener> {
-        let xdp = crate::client_xdp::unsupported(cfg);
-        let why = xdp.status().and_then(Result::err).map(|e| format!(" ({e})")).unwrap_or_default();
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("the clients' port runs on Linux only{why}"),
-        ))
-    }
-
-    /// See the Linux port.
-    pub fn xdp(&self) -> Option<Result<String, String>> {
-        self.xdp.status()
-    }
-
-    /// See the Linux port.
-    pub fn addrs(&self) -> &[SocketAddr] {
-        &self.addrs
-    }
-
-    /// See the Linux port.
-    pub fn open_connections(&self) -> usize {
-        self.open.load(Ordering::Acquire)
-    }
-
-    /// See the Linux port.
-    pub fn stop(self) {
-        drop(self.tasks);
-        drop(self.builder);
-    }
-}
-
 /// Reaps the node's expired cursors and sessions, writes the sessions it used to
 /// `config.system.sessions`, runs the TTL monitor and the reapers of abandoned transactions, each
 /// on its own period, at the node's cluster time.
-#[cfg(target_os = "linux")]
 struct Keeper {
     handle: NodeHandle,
     diag: Arc<crate::diag::Diag>,
@@ -849,7 +788,6 @@ struct Keeper {
     capture: Option<std::path::PathBuf>,
 }
 
-#[cfg(target_os = "linux")]
 impl Keeper {
     /// Writes the node's diagnostic sample (010 FR-024). A sample that cannot be taken or
     /// written is logged and the next one comes a period later.

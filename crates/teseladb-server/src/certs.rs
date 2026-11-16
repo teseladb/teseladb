@@ -22,12 +22,10 @@ pub struct Certificates {
     names: Vec<GeneralName>,
     admin: Option<TlsPort>,
     /// The ports on the engine's shards and the settings each serves (023 FR-023).
-    #[cfg(target_os = "linux")]
     shards: std::sync::Mutex<Vec<ShardPort>>,
 }
 
 /// A port of the engine and the settings it serves.
-#[cfg(target_os = "linux")]
 type ShardPort = (crate::shard_tls::ShardTls, TlsPort);
 
 impl std::fmt::Debug for Certificates {
@@ -63,7 +61,6 @@ impl Certificates {
             peer,
             names,
             admin: None,
-            #[cfg(target_os = "linux")]
             shards: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -76,19 +73,16 @@ impl Certificates {
 
     /// Puts every later rotation in place on the shards of a port of the engine too: its shard
     /// copies take the settings of `port` (023 FR-023).
-    #[cfg(target_os = "linux")]
     pub fn add_shard_port(&self, slot: crate::shard_tls::ShardTls, port: TlsPort) {
         self.shard_ports().push((slot, port));
     }
 
-    #[cfg(target_os = "linux")]
     fn shard_ports(&self) -> std::sync::MutexGuard<'_, Vec<ShardPort>> {
         self.shards.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// [`Certificates::reload`] from a shard: the new settings are on every shard of every
     /// port of the engine before the future resolves; on error nothing changes.
-    #[cfg(target_os = "linux")]
     pub fn rotate(&self) -> teseladb::engine::core::future::Future<Result<(), String>> {
         use teseladb::engine::core::coroutine::make_coroutine;
         let reloaded = self.load_and_replace();
@@ -120,7 +114,6 @@ impl Certificates {
     ///
     /// When the engine stopped.
     pub fn publish(&self) -> Result<(), String> {
-        #[cfg(target_os = "linux")]
         for (slot, port) in self.shard_ports().clone() {
             crate::shard_client::block_on(move || slot.publish_port(&port))
                 .map_err(crate::error_text)?;

@@ -10,11 +10,6 @@
 /// The `User-Agent` of the node's own HTTP requests (OCSP, OIDC, STS).
 pub const USER_AGENT: &str = "teseladb";
 
-/// The error of an outbound client outside Linux: the clients run on the engine, which only
-/// Linux has (023 D3).
-#[cfg(not(target_os = "linux"))]
-pub const LINUX_ONLY: &str = "the node's outbound clients run on the engine, on Linux only";
-
 pub mod admin;
 pub mod admin_apikeys;
 pub mod admin_http;
@@ -30,7 +25,6 @@ pub mod certs;
 pub mod checksums;
 pub mod cli;
 pub mod client_listener;
-#[cfg(target_os = "linux")]
 mod client_session;
 pub mod client_tasks;
 mod client_xdp;
@@ -73,7 +67,6 @@ pub mod node_ports;
 pub mod node_versions;
 pub mod ocsp_staple;
 pub mod oidc_client;
-#[cfg(target_os = "linux")]
 pub mod outbound;
 pub mod pki;
 pub mod pressure;
@@ -90,21 +83,22 @@ pub mod routes;
 pub mod search_builder;
 pub mod search_segments;
 pub mod sessions_ops;
-#[cfg(target_os = "linux")]
 pub mod shard_bridge;
-#[cfg(target_os = "linux")]
 pub mod shard_client;
-#[cfg(target_os = "linux")]
 pub mod shard_port;
-#[cfg(target_os = "linux")]
 pub mod shard_tls;
 pub mod spill;
 pub mod sts_client;
 pub mod tenant_limits;
 pub mod tls_port;
-pub mod tls_stream;
 pub mod transfer;
 pub mod txn_wire;
+
+/// TLS over blocking sockets, for the servers the unit tests stand up on threads of their own (the
+/// node has none).
+#[cfg(test)]
+#[path = "../tests/common/blocking_tls.rs"]
+mod blocking_tls;
 
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -753,15 +747,8 @@ pub fn start(
 
 /// Runs `f`, which asks the KMIP server, where the outbound clients have an engine: before the
 /// node's engine runs, one of its own for the duration of `f` (023 FR-024).
-#[cfg(target_os = "linux")]
 fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     outbound::with_engine(f)?
-}
-
-/// Outside Linux the clients answer that they run on Linux only.
-#[cfg(not(target_os = "linux"))]
-fn with_start_engine<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    f()
 }
 
 /// The prefix of the KMIP options, `--kmip<Name>` for `security.kmip.<name>`.

@@ -5,29 +5,17 @@
 //! certificate (013 FR-017); a request without TLS only gets `/healthz`. The HTTP/1.1 messages
 //! are read and written by `teseladb-http` (019 T008), the same code as the HTTP port's.
 
-#[cfg(not(target_os = "linux"))]
-use std::io::{self, Read, Write};
-#[cfg(not(target_os = "linux"))]
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb_http::http1::Limits;
-#[cfg(not(target_os = "linux"))]
-use teseladb_http::http1::{Request, ResponseReader};
 use teseladb_http::server1::{Refused, RequestReader, encode_response};
-#[cfg(not(target_os = "linux"))]
-use teseladb_tls::ClientConfig;
 use teseladb_x509::{Certificate, Name, oid};
 
 use crate::tls_port::TlsPort;
-#[cfg(not(target_os = "linux"))]
-use crate::tls_stream::TlsStream;
 
 /// The port and its client on the engine's shards (023 FR-022).
-#[cfg(target_os = "linux")]
 pub mod shard;
-#[cfg(target_os = "linux")]
 pub use shard::{request, request_with};
 
 /// Bytes of a request line and headers at most.
@@ -242,77 +230,6 @@ impl AdminTls {
             Some(leaf) => Caller::User(leaf.subject.x509_user_name()),
         }
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn other(e: String) -> io::Error {
-    io::Error::other(e)
-}
-
-/// Sends `req` to the administration port at `addr` and returns the answer's status and body.
-#[cfg(not(target_os = "linux"))]
-pub fn request(
-    addr: &str,
-    method: Method,
-    target: &str,
-    body: &[u8],
-) -> io::Result<(u16, Vec<u8>)> {
-    request_with(addr, None, method, target, body)
-}
-
-/// The host of `addr` (`host:port` or `[v6]:port`).
-#[cfg(not(target_os = "linux"))]
-fn host_of(addr: &str) -> &str {
-    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
-    host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
-}
-
-/// [`request`], over TLS with `tls`: the server's certificate has to name the host of `addr`.
-#[cfg(not(target_os = "linux"))]
-pub fn request_with(
-    addr: &str,
-    tls: Option<Arc<ClientConfig>>,
-    method: Method,
-    target: &str,
-    body: &[u8],
-) -> io::Result<(u16, Vec<u8>)> {
-    let s = TcpStream::connect(addr)?;
-    s.set_read_timeout(Some(ANSWER_WAIT))?;
-    s.set_write_timeout(Some(IO_TIMEOUT))?;
-    let verb = match method {
-        Method::Get => "GET",
-        Method::Post => "POST",
-    };
-    let bad = |e: teseladb_http::http1::HttpError| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}"))
-    };
-    let req = Request::new(verb, target)
-        .header("Host", addr)
-        .header("Connection", "close")
-        .header("Content-Length", &body.len().to_string())
-        .body(body.to_vec())
-        .encode()
-        .map_err(bad)?;
-    let answer = match tls {
-        None => {
-            let mut s = s;
-            s.write_all(&req)?;
-            let mut answer = Vec::new();
-            s.read_to_end(&mut answer)?;
-            answer
-        }
-        Some(config) => {
-            let mut t = TlsStream::client(s, config, host_of(addr)).map_err(other)?;
-            t.send(&req).map_err(other)?;
-            t.recv_to_end().map_err(other)?
-        }
-    };
-    let mut reader = ResponseReader::new(Limits::default());
-    let r = match reader.feed(&answer).map_err(bad)? {
-        Some(r) => r,
-        None => reader.finish().map_err(bad)?,
-    };
-    Ok((r.status, r.body))
 }
 
 #[cfg(test)]

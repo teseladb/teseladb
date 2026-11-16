@@ -5,24 +5,16 @@
 //! end of the input. The credential is the API key of `TESELADB_API_KEY` or the client
 //! certificate of `--tlsCertificateKeyFile`; none goes in the arguments.
 
-#[cfg(not(target_os = "linux"))]
-use std::io::Read;
 use std::io::{BufRead, Write};
-#[cfg(not(target_os = "linux"))]
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(not(target_os = "linux"))]
-use teseladb_http::http1::{Limits, ResponseReader};
 use teseladb_http::http1::{Request, Response};
 use teseladb_http::sse;
 use teseladb_tls::ClientConfig;
 
 use crate::admin::AdminCredentials;
-#[cfg(not(target_os = "linux"))]
-use crate::tls_stream::TlsStream;
 
 /// The variable that holds the API key.
 pub const API_KEY_VAR: &str = "TESELADB_API_KEY";
@@ -35,7 +27,6 @@ pub const VERSION_HEADER: &str = "MCP-Protocol-Version";
 /// How long an answer may take.
 const ANSWER_WAIT: Duration = Duration::from_secs(300);
 /// How long the lookup, the connection and the TLS handshake may each take.
-#[cfg(target_os = "linux")]
 const CONNECT_WAIT: Duration = Duration::from_secs(30);
 
 /// Options of `teseladb mcp`.
@@ -119,7 +110,6 @@ impl Relay {
 
     /// Sends the request `bytes` on a connection of its own and reads the answer to its end,
     /// with the engine's network stack and TLS stream (023 FR-023).
-    #[cfg(target_os = "linux")]
     fn send(&self, bytes: Vec<u8>) -> Result<Response, String> {
         let (host, port) = crate::shard_client::split_addr(&self.addr).map_err(shown)?;
         let target = crate::shard_client::Target {
@@ -131,34 +121,6 @@ impl Relay {
         };
         crate::shard_client::block_on(move || crate::shard_client::exchange(target, bytes))
             .map_err(|e| format!("{}: {e}", self.addr))
-    }
-
-    /// [`Relay::send`] with blocking sockets, where the engine does not run.
-    #[cfg(not(target_os = "linux"))]
-    fn send(&self, bytes: Vec<u8>) -> Result<Response, String> {
-        let s = TcpStream::connect(&self.addr).map_err(|e| format!("{}: {e}", self.addr))?;
-        s.set_read_timeout(Some(ANSWER_WAIT)).map_err(shown)?;
-        let answer = match &self.tls {
-            None => {
-                let mut s = s;
-                s.write_all(&bytes).map_err(shown)?;
-                let mut out = Vec::new();
-                s.read_to_end(&mut out).map_err(shown)?;
-                out
-            }
-            Some(config) => {
-                let host = self.addr.rsplit_once(':').map_or(self.addr.as_str(), |(h, _)| h);
-                let host = host.trim_start_matches('[').trim_end_matches(']');
-                let mut t = TlsStream::client(s, config.clone(), host)?;
-                t.send(&bytes)?;
-                t.recv_to_end()?
-            }
-        };
-        let mut reader = ResponseReader::new(Limits::default());
-        match reader.feed(&answer).map_err(debugged)? {
-            Some(r) => Ok(r),
-            None => reader.finish().map_err(debugged),
-        }
     }
 
     /// Sends `line` and writes the messages of the answer to `out`.

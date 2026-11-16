@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
 use teseladb_auth::ldap::Step;
 use teseladb_auth::ldap::{AuthzTemplate, LdapError, Login, Mapping};
 use teseladb_auth::roles::ADMIN_DB;
@@ -34,10 +33,8 @@ const NONE: &str = "none";
 const TLS: &str = "tls";
 const SIMPLE: &str = "simple";
 /// The error of a server that closed the connection before the conversation ended.
-#[cfg(target_os = "linux")]
 pub const CLOSED: &str = "the LDAP server closed the connection";
 /// The error when the list of servers is empty.
-#[cfg(target_os = "linux")]
 const NO_SERVER: &str = "no LDAP server";
 
 /// The options as given.
@@ -128,7 +125,6 @@ fn host_port(text: &str, default: u16) -> Result<(String, u16), String> {
 
 /// How a conversation with one server ended: the groups it read (with a template), or the LDAP
 /// error that ended it.
-#[cfg(target_os = "linux")]
 type Ended = Result<Option<Vec<String>>, LdapError>;
 
 /// How the groups' search of a user starts.
@@ -247,7 +243,6 @@ impl LdapServer {
             .map(|(_, g)| g.clone())
     }
 
-    #[cfg(target_os = "linux")]
     fn remember(&self, user: &str, groups: &[String]) {
         let mut cache = self.inner.cache.lock().unwrap_or_else(PoisonError::into_inner);
         cache.insert(user.to_owned(), (Instant::now(), groups.to_vec()));
@@ -277,7 +272,6 @@ impl LdapServer {
     }
 
     /// What a PLAIN login that ended as `ended` gives, `cached` the groups it did not read.
-    #[cfg(target_os = "linux")]
     fn login_end(
         &self,
         user: &str,
@@ -316,7 +310,6 @@ impl LdapServer {
     }
 
     /// What a groups' search that ended as `ended` gives.
-    #[cfg(target_os = "linux")]
     fn groups_end(&self, user: &str, ended: Ended) -> Result<Option<Vec<RoleName>>, String> {
         match ended {
             Ok(groups) => {
@@ -335,7 +328,6 @@ fn as_roles(groups: Vec<String>) -> Vec<RoleName> {
     groups.into_iter().map(|g| RoleName::new(g, ADMIN_DB)).collect()
 }
 
-#[cfg(target_os = "linux")]
 mod on_engine {
     use teseladb::engine::core::future::Future;
     use teseladb_io::engine::connect::TlsClient;
@@ -461,26 +453,6 @@ mod on_engine {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-impl LdapServer {
-    /// The LDAP client runs on the engine, which only Linux has (023 D3); a login the options
-    /// refuse before any server is still answered.
-    pub fn login(&self, user: &str, password: &[u8]) -> Result<LdapLogin, String> {
-        match self.login_start(user, password)? {
-            None => Ok(LdapLogin::Refused),
-            Some(_) => Err(crate::LINUX_ONLY.into()),
-        }
-    }
-
-    /// See [`LdapServer::login`].
-    pub fn groups(&self, user: &str) -> Result<Option<Vec<RoleName>>, String> {
-        match self.groups_start(user)? {
-            GroupsStart::Answered(answer) => Ok(answer),
-            GroupsStart::Ask(..) => Err(crate::LINUX_ONLY.into()),
-        }
-    }
-}
-
 /// The node's LDAP server, shared by its workers; two are equal when they are the same one.
 #[derive(Clone, Debug)]
 pub struct SharedLdap(pub Arc<LdapServer>);
@@ -565,7 +537,6 @@ mod tests {
     /// without a template or of a name the mapping does not take.
     #[test]
     fn answers_without_a_server() {
-        #[cfg(target_os = "linux")]
         crate::outbound::test_engine::install();
         let s = LdapServer::from_opts(&opts(1)).unwrap().unwrap();
         assert_eq!(s.login("jane", b""), Ok(LdapLogin::Refused));

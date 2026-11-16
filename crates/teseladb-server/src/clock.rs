@@ -255,7 +255,6 @@ mod tests {
 
     /// While the node's shared log writes, the bound renews in its records (005 FR-003, D-172): it
     /// keeps ahead of the marks with hardly any write of `hlc.bound`.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_writing_log_renews_the_bound_in_its_records() {
         use teseladb_io::device_log::{DeviceLog, DeviceLogConfig, LogDisk};

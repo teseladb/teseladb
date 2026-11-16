@@ -70,7 +70,6 @@ impl Task {
 }
 
 /// Runs `body` in an engine thread of `shard` until it returns; `None` when no engine runs.
-#[cfg(target_os = "linux")]
 pub fn spawn(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task> {
     let stop = Arc::new(TaskStop::default());
     let (tx, ended) = answer::channel::<()>();
@@ -85,12 +84,6 @@ pub fn spawn(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task
         }),
     );
     posted.then_some(Task { stop, ended })
-}
-
-/// Outside Linux no engine runs (D3): no task starts.
-#[cfg(not(target_os = "linux"))]
-pub fn spawn(_shard: u32, _body: Box<dyn FnOnce(&TaskStop) + Send>) -> Option<Task> {
-    None
 }
 
 #[cfg(test)]

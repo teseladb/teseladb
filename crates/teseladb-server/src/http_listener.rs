@@ -23,7 +23,6 @@ use crate::tls_port::TlsPort;
 pub const ROUTES: Family = Family::new("teseladb_http", "route");
 
 /// The port on the engine's shards (023 FR-022).
-#[cfg(target_os = "linux")]
 pub mod shard;
 
 /// The default `--http-port`.

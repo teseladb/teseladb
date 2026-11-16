@@ -141,7 +141,6 @@ impl PartialEq for TlsPort {
 
 impl Eq for TlsPort {}
 
-#[cfg(target_os = "linux")]
 impl TlsPort {
     /// How the clients' port takes the first bytes of a new connection: plain with `disabled`
     /// (or without a server side), TLS only with `requireTLS`, and the first byte's choice with
@@ -360,7 +359,6 @@ mod tests {
         assert_eq!(key(&a), PrivateKey::ed25519(&[2; 32]).public_key());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn each_mode_takes_the_first_bytes_its_way() {
         use teseladb_io::engine::tls_stream::Sniff;

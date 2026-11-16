@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb_http::client::{Scheme, Url};
-#[cfg(target_os = "linux")]
 use teseladb_http::http1::{Limits, ResponseReader};
 use teseladb_http::http1::{Request, Response};
 use teseladb_tls::{ClientConfig, Trust};
@@ -82,7 +81,6 @@ impl Https {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Https {
     /// Sends `req` to `url` (HTTPS only) over an engine connection and reads the whole answer;
     /// runs on the shard that awaits it.
@@ -131,26 +129,13 @@ impl Https {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-impl Https {
-    /// The outbound clients run on the engine, which only Linux has (023 D3).
-    pub fn send(&self, url: &Url, req: &Request) -> Result<Response, String> {
-        Https::encode(url, req)?;
-        Err(crate::LINUX_ONLY.into())
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
-    use crate::tls_stream::TlsStream;
-    #[cfg(target_os = "linux")]
+    use crate::blocking_tls::TlsStream;
     use std::net::TcpListener;
-    #[cfg(target_os = "linux")]
     use teseladb_tls::{CertifiedKey, ServerConfig};
-    #[cfg(target_os = "linux")]
     use teseladb_x509::ext::GeneralName;
 
     #[test]
@@ -183,19 +168,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn outside_linux_a_request_says_so() {
-        let https = Https::new(Trust::anchors(Vec::new()), Duration::from_secs(1));
-        let url = Url::parse("https://localhost:1/").unwrap();
-        let req = teseladb_http::client::get(&url, crate::USER_AGENT);
-        assert_eq!(https.send(&url, &req).unwrap_err(), crate::LINUX_ONLY);
-        let plain = Url::parse("http://localhost:1/").unwrap();
-        assert!(https.send(&plain, &req).unwrap_err().contains("not HTTPS"));
-    }
-
     /// A server that answers each request with `answer` over TLS.
-    #[cfg(target_os = "linux")]
     fn server(config: Arc<ServerConfig>, answer: &'static [u8]) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -220,7 +193,6 @@ mod tests {
         port
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn requests_go_over_tls_and_answers_are_read_whole() {
         crate::outbound::test_engine::install();

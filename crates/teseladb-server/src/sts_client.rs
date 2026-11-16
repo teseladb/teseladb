@@ -62,7 +62,6 @@ impl Sts {
     }
 
     /// [`Sts::send`] on the shard that awaits it.
-    #[cfg(target_os = "linux")]
     pub fn request(
         &self,
         req: &StsRequest,
@@ -96,10 +95,9 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_request_reaches_the_sts_with_the_clients_headers() {
-        use crate::tls_stream::TlsStream;
+        use crate::blocking_tls::TlsStream;
         use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
         use teseladb_tls::{CertifiedKey, ServerConfig};
