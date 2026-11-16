@@ -154,8 +154,18 @@ impl fmt::Debug for StartupLog {
 }
 
 /// What a node that is not ready lacks, from core 0's view of Group 0 (`None`: core 0 did not
-/// answer).
-pub fn not_ready(view: Option<&Group0View>) -> String {
+/// answer), and why its clock gives no marks when the keeper of its bound failed (`clock`): Group
+/// 0 cannot go on without them, and nothing else says so.
+pub fn not_ready(view: Option<&Group0View>, clock: Option<&StorageError>) -> String {
+    let missing = group0_missing(view);
+    match clock {
+        Some(e) => format!("{missing}; the clock's bound cannot be written: {e}"),
+        None => missing,
+    }
+}
+
+/// What a node that is not ready lacks, from core 0's view of Group 0.
+fn group0_missing(view: Option<&Group0View>) -> String {
     let Some(v) = view else {
         return "core 0 does not answer".to_owned();
     };
@@ -1915,7 +1925,7 @@ mod tests {
 
     #[test]
     fn a_report_of_a_node_not_ready_says_what_is_missing() {
-        assert_eq!(not_ready(None), "core 0 does not answer");
+        assert_eq!(not_ready(None, None), "core 0 does not answer");
         let mut v = Group0View {
             bootstrapped: false,
             cluster_id: [0; 16],
@@ -1930,14 +1940,25 @@ mod tests {
             root_pending: true,
         };
         assert_eq!(
-            not_ready(Some(&v)),
+            not_ready(Some(&v), None),
             "Group 0 has not reached this node, Group 0 lacks this node's addresses, \
              the root user is not in Group 0 yet (leader 0)"
         );
         v.bootstrapped = true;
         v.addrs_current = true;
         v.leader = NodeId(1);
-        assert_eq!(not_ready(Some(&v)), "the root user is not in Group 0 yet (leader 1)");
+        assert_eq!(not_ready(Some(&v), None), "the root user is not in Group 0 yet (leader 1)");
+    }
+
+    #[test]
+    fn a_report_of_a_node_not_ready_says_why_its_clock_is_stuck() {
+        // The clock's keeper could not open or write the bound: no mark past the bound is given,
+        // so Group 0 cannot go on, and the report says why instead of only what is missing.
+        let failed = StorageError::Io { op: "open", errno: IoErrno::Io };
+        assert_eq!(
+            not_ready(None, Some(&failed)),
+            format!("core 0 does not answer; the clock's bound cannot be written: {failed}")
+        );
     }
 
     #[test]

@@ -980,7 +980,8 @@ pub fn serve(
 ) -> i32 {
     log.info("waiting for the cluster to be ready", &[]);
     let report = |v: Option<&logic::Group0View>| {
-        log.info("not ready yet", &[("missing", &node::not_ready(v))]);
+        let missing = node::not_ready(v, node.clock_error().as_ref());
+        log.info("not ready yet", &[("missing", &missing)]);
     };
     if !node.wait_ready_reporting(ready_timeout, node::READY_REPORT, report) {
         log.error("the cluster did not become ready", &[]);
