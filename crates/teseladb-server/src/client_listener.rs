@@ -661,7 +661,8 @@ impl ClientListener {
         let keeper = Keeper {
             handle: h.clone(),
             diag: diag.clone(),
-            capture: cfg.process.dbpath.clone(),
+            // What the directory holds is read now, before the keeper runs on its shard.
+            capture: cfg.process.dbpath.as_deref().map(crate::diagnostic_capture::Capture::new),
             shared: shared.clone(),
             refresh_every: cfg.refresh_every,
             ttl_every: hooks.ttl_every,
@@ -768,9 +769,8 @@ struct Keeper {
     refresh_every: Duration,
     /// Period of the TTL monitor (009 FR-010): `ttlMonitorSleepSecs`.
     ttl_every: Duration,
-    /// The data directory of a node with one, where its periodic diagnostic capture goes (010
-    /// FR-024).
-    capture: Option<std::path::PathBuf>,
+    /// The periodic diagnostic capture of a node with a data directory (010 FR-024).
+    capture: Option<crate::diagnostic_capture::Capture>,
 }
 
 impl Keeper {
@@ -780,6 +780,7 @@ impl Keeper {
         backend: &mut crate::backend::ServerBackend,
         shared: &teseladb_wire::commands::Shared,
         capture: &mut crate::diagnostic_capture::Capture,
+        disk: &mut Option<Box<dyn teseladb_raftlog::Disk>>,
     ) {
         use teseladb_wire::commands::Backend;
 
@@ -787,7 +788,9 @@ impl Keeper {
         let taken = teseladb_wire::commands::diagnostic_data::capture(backend, shared);
         teseladb_wire::commands::Backend::end_operation(backend);
         let written = match taken {
-            Ok(sample) => capture.write(at, sample).map_err(|e| e.to_string()),
+            Ok(sample) => Keeper::disk(capture, disk)
+                .and_then(|d| capture.write(d, at, sample))
+                .map_err(|e| e.to_string()),
             Err(e) => Err(e.errmsg),
         };
         if let Err(e) = written {
@@ -795,6 +798,21 @@ impl Keeper {
             let msg = "Diagnostic capture failed".to_owned();
             let id = crate::diagnostic_capture::FAILED_ID;
             crate::log::defer(crate::log::Pending { id, msg, attr });
+        }
+    }
+
+    /// The disk the capture writes to: this shard's executor of its directory (023 FR-010).
+    fn disk<'a>(
+        capture: &crate::diagnostic_capture::Capture,
+        disk: &'a mut Option<Box<dyn teseladb_raftlog::Disk>>,
+    ) -> io::Result<&'a mut dyn teseladb_raftlog::Disk> {
+        if disk.is_none() {
+            let place = teseladb_io::engine::disk::DiskPlace::Files(capture.dir().to_path_buf());
+            *disk = Some(Box::new(place.on_shard()?));
+        }
+        match disk.as_deref_mut() {
+            Some(d) => Ok(d),
+            None => Err(io::Error::other("no disk for the diagnostic capture")),
         }
     }
 
@@ -810,7 +828,9 @@ impl Keeper {
 
         let mut backend =
             crate::backend::ServerBackend::new(self.handle, seed(u64::MAX)).with_diag(self.diag);
-        let mut capture = self.capture.as_deref().map(crate::diagnostic_capture::Capture::new);
+        let mut capture = self.capture;
+        // The shard's disk executor of the capture's directory, opened on the first sample.
+        let mut capture_disk = None;
         let mut reapers = crate::backend::Reapers::default();
         let shared = &*self.shared;
         let start = std::time::Instant::now();
@@ -858,7 +878,7 @@ impl Keeper {
             }
             if now >= next_sample {
                 if let Some(c) = capture.as_mut() {
-                    Keeper::sample(&mut backend, shared, c);
+                    Keeper::sample(&mut backend, shared, c, &mut capture_disk);
                 }
                 next_sample = now + crate::diagnostic_capture::PERIOD;
             }
