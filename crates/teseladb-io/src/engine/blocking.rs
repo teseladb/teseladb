@@ -1,5 +1,5 @@
-//! What would block a shard, done off it (023 FR-029): names resolved by the system resolver, and
-//! configuration and certificate files read.
+//! What would block a shard, done off it (023 FR-029): names resolved by the system resolver,
+//! configuration and certificate files read, and any other blocking call.
 //!
 //! The engine's syscall pool is not used, for two reasons. It is private to the engine:
 //! `Reactor::thread_pool` is `pub(crate)`, and the engine does not change (023, owner decision
@@ -14,6 +14,9 @@
 //!   and a lookup it overtakes is cancelled with `gai_cancel` when it has not started yet.
 //! - [`read_file`] reads with the engine's file API (DMA reads on its I/O queues), which never
 //!   blocks the shard.
+//! - [`offload`] runs any other call that blocks (a `statvfs`, a file written and synced) on a
+//!   few threads of the process that are not shards, and posts its result back to the shard that
+//!   asked, as the resolver's completions are.
 //!
 //! Numeric addresses are answered at once, without the resolver.
 // glibc's resolver is a C interface, and the engine's file reads take a raw I/O intent; every
@@ -367,6 +370,87 @@ pub fn read_file(path: &str) -> Future<TemporaryBuffer<u8>> {
         closed.map_err(named)?;
         Ok(bytes)
     })
+}
+
+/// Threads of the process that run [`offload`]'s work.
+const OFFLOAD_THREADS: usize = 2;
+
+type OffloadJob = Box<dyn FnOnce() + Send>;
+
+/// The queue of [`offload`]'s threads, started by the first call.
+static OFFLOAD: std::sync::OnceLock<io::Result<std::sync::mpsc::Sender<OffloadJob>>> =
+    std::sync::OnceLock::new();
+
+thread_local! {
+    /// The promises of this shard's work on [`offload`]'s threads, by number.
+    static OFFLOADED: RefCell<(u64, std::collections::HashMap<u64, Box<dyn std::any::Any>>)> =
+        RefCell::new((0, std::collections::HashMap::new()));
+}
+
+/// Starts [`offload`]'s threads; they take jobs until the process ends.
+fn offload_threads() -> io::Result<std::sync::mpsc::Sender<OffloadJob>> {
+    let (tx, rx) = std::sync::mpsc::channel::<OffloadJob>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    for n in 0..OFFLOAD_THREADS {
+        let rx = std::sync::Arc::clone(&rx);
+        std::thread::Builder::new().name(format!("offload-{n}")).spawn(move || {
+            loop {
+                // Not a shard: these threads exist to wait.
+                let job = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv();
+                match job {
+                    Ok(job) => job(),
+                    Err(_) => return,
+                }
+            }
+        })?;
+    }
+    Ok(tx)
+}
+
+/// The end of offloaded work `id` on its shard: its result goes to whoever waits.
+fn offload_done<T: 'static>(id: u64, result: std::thread::Result<T>) {
+    let Some(slot) = OFFLOADED.with(|o| o.borrow_mut().1.remove(&id)) else { return };
+    let Ok(mut promise) = slot.downcast::<Promise<T>>() else { return };
+    match result {
+        Ok(v) => promise.set_value(v),
+        Err(panic) => promise.set_exception(ExceptionPtr::from_panic(panic)),
+    }
+}
+
+/// Runs `f`, which blocks (a file system call, a file written and synced, a child process), on
+/// one of the process's threads that are not shards, and resolves on the calling shard with its
+/// result: the shard runs its other work meanwhile, as the engine's syscall thread does for its
+/// own file operations. A panic of `f` fails the future. Runs on a shard.
+pub fn offload<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Future<T> {
+    let queue = match OFFLOAD.get_or_init(offload_threads) {
+        Ok(q) => q.clone(),
+        Err(e) => {
+            let e = io::Error::new(e.kind(), format!("the offload threads did not start: {e}"));
+            return make_exception_future(ExceptionPtr::from(e));
+        }
+    };
+    let mut promise = Promise::<T>::new();
+    let fut = promise.get_future();
+    let id = OFFLOADED.with(|o| {
+        let mut o = o.borrow_mut();
+        o.0 += 1;
+        let id = o.0;
+        o.1.insert(id, Box::new(promise));
+        id
+    });
+    let shard = this_shard_id();
+    let job: OffloadJob = Box::new(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        // A shard that is gone (the engine stopped) has nobody waiting.
+        let _ = super::wait::post(shard, Box::new(move || offload_done(id, result)));
+    });
+    if queue.send(job).is_err() {
+        OFFLOADED.with(|o| o.borrow_mut().1.remove(&id));
+        return make_exception_future(ExceptionPtr::from(io::Error::other(
+            "the offload threads are gone",
+        )));
+    }
+    fut
 }
 
 /// The text of `e`: the I/O error's when it is one.

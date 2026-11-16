@@ -338,7 +338,13 @@ fn machine_metrics(
     data_dir: Option<&std::path::Path>,
     engine: Option<&teseladb_io::engine::EngineProbe>,
 ) {
-    if let Some((used, total)) = data_dir.and_then(|d| teseladb_sys::host::fs_usage(d).ok()) {
+    // `statvfs` and the process's status file, off the shard that serves the port.
+    let dir = data_dir.map(std::path::Path::to_path_buf);
+    let (usage, memory) = teseladb_io::engine::wait::off_shard(move || {
+        (dir.and_then(|d| teseladb_sys::host::fs_usage(&d).ok()), teseladb_sys::host::memory().ok())
+    })
+    .unwrap_or((None, None));
+    if let Some((used, total)) = usage {
         let rows = [
             (
                 "teseladb_disk_used_bytes",
@@ -351,7 +357,7 @@ fn machine_metrics(
             let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {n}");
         }
     }
-    if let Ok(m) = teseladb_sys::host::memory() {
+    if let Some(m) = memory {
         let name = "teseladb_process_resident_memory_bytes";
         let _ = writeln!(out, "# HELP {name} Resident bytes of the node's process.");
         let _ = writeln!(out, "# TYPE {name} gauge\n{name} {}", m.resident);
@@ -1051,7 +1057,13 @@ impl AdminBackend for NodeAdmin {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-        c.renew(now, &mut |b| teseladb_sys::fill_random(b)).map_err(AdminError::unavailable)?;
+        // The new key and certificate are written and synced: off the shard that serves the port.
+        let c = std::sync::Arc::clone(c);
+        teseladb_io::engine::wait::off_shard(move || {
+            c.renew(now, &mut |b| teseladb_sys::fill_random(b))
+        })
+        .map_err(|e| AdminError::unavailable(e.to_string()))?
+        .map_err(AdminError::unavailable)?;
         Ok(Document::new().with("rotated", true))
     }
 
