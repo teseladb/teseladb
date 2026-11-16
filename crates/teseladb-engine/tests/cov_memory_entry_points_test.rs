@@ -161,8 +161,11 @@ engine_thread_test_case!(new_and_delete_operators_allocate_from_the_pool, {
             4096,
             tag,
         );
-        // The non-throwing operators return null when the request cannot be met.
-        assert!(op_new_nothrow(HUGE, tag).is_null());
-        assert!(op_new_array_aligned_nothrow(HUGE, 64, tag).is_null());
+        // The non-throwing operators return null when the request cannot be met. The results
+        // go through `black_box`: LLVM knows these symbols as the C++ allocation functions, and
+        // an allocation whose result is only compared with null may be removed and taken to
+        // have succeeded, which folded the check to false without calling the operator.
+        assert!(std::hint::black_box(op_new_nothrow(HUGE, tag)).is_null());
+        assert!(std::hint::black_box(op_new_array_aligned_nothrow(HUGE, 64, tag)).is_null());
     }
 });

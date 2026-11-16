@@ -52,6 +52,19 @@ pub fn set_deep_stack() {
     teseladb_wire::commands::js::set_deep_stack(runner);
 }
 
+/// Bounds what each call of server-side JavaScript takes by the free memory of the shard that
+/// runs it (023 FR-014): the shard's memory is a pool of its own and an allocation it cannot
+/// serve ends the node, where a thread with the system's allocator had the whole machine. A
+/// thread outside the engine's pools (none set up, or the allocator that counts nothing when
+/// the engine's is not built) keeps the interpreter's limit.
+pub fn set_js_memory_room() {
+    fn room() -> Option<usize> {
+        let s = teseladb::engine::core::memory::stats();
+        (s.total_memory() > 0 && s.mallocs() > 0).then(|| s.free_memory())
+    }
+    teseladb_wire::commands::js::set_memory_room(room);
+}
+
 /// What the clients' port needs to know.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
@@ -577,6 +590,7 @@ impl ClientListener {
 
         set_switch_hooks();
         set_deep_stack();
+        set_js_memory_room();
         teseladb_io::engine::stacks::set_stack_size(ENGINE_COMMAND_STACK);
         let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let port_no = cfg.addrs.first().map_or(0, SocketAddr::port);

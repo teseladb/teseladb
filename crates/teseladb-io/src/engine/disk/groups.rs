@@ -14,11 +14,14 @@
 //! engines than the engine has groups for runs the disk classes of the later ones in the default
 //! group.
 
+use std::cell::RefCell;
 use std::sync::{Mutex, PoisonError};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::reactor::create_scheduling_group;
 use teseladb::engine::core::scheduling::{SchedulingGroup, default_scheduling_group};
+use teseladb::engine::core::shared_future::SharedPromise;
+use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
 
 use crate::IoClass;
@@ -42,43 +45,35 @@ pub struct IoGroups {
 /// groups.
 static GROUPS: Mutex<Option<IoGroups>> = Mutex::new(None);
 
+/// The shard that makes the groups, so that callers on several shards share one creation.
+const CREATOR_SHARD: u32 = 0;
+
+thread_local! {
+    /// On [`CREATOR_SHARD`], the creation under way: the callers that come meanwhile wait for it.
+    static CREATING: RefCell<Option<SharedPromise<IoGroups>>> = const { RefCell::new(None) };
+}
+
 fn current() -> Option<IoGroups> {
     *GROUPS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Keeps `g` as the groups of the running engine, unless another call kept some first.
+/// Keeps `g` as the groups of the running engine, unless some were kept first.
 fn keep(g: IoGroups) -> IoGroups {
     *GROUPS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(g)
 }
 
 impl IoGroups {
-    /// The groups of the running engine, creating them on every shard the first time. Call it
-    /// from one shard at a time, before the shards open their disks (the node does on shard 0 at
-    /// start). When the engine has no scheduling groups left, every class runs in the default
-    /// group.
+    /// The groups of the running engine, creating them on every shard the first time. Callers
+    /// that come while they are being made, from any shard, wait for that one creation: a node's
+    /// start asks from several tasks at once (the clock's keeper, the device log's writer and
+    /// the cores' disks), and a second creation would make each group again under the same name,
+    /// which the engine refuses when it registers the group's metrics a second time. When the
+    /// engine has no scheduling groups left, every class runs in the default group.
     pub fn get_or_create() -> Future<IoGroups> {
         if let Some(g) = current() {
             return make_ready_future(g);
         }
-        let make = |name: &str, shares| {
-            create_scheduling_group(Sstring::from(name), Sstring::from(name), shares)
-        };
-        let made = make("disk-log", LOG_SHARES).then(move |log: SchedulingGroup| {
-            make("disk-data", DATA_SHARES).then(move |data: SchedulingGroup| {
-                make("disk-background", BACKGROUND_SHARES).then(
-                    move |background: SchedulingGroup| {
-                        Ok::<_, ExceptionPtr>(IoGroups { log, data, background })
-                    },
-                )
-            })
-        });
-        made.then_wrapped(|f: Future<IoGroups>| {
-            let g = f.get().unwrap_or_else(|_| {
-                let d = default_scheduling_group();
-                IoGroups { log: d, data: d, background: d }
-            });
-            Ok::<_, ExceptionPtr>(keep(g))
-        })
+        Smp::submit_to(CREATOR_SHARD, create_once)
     }
 
     /// Forgets the groups of the running engine, before it stops: the next engine makes its own.
@@ -95,4 +90,45 @@ impl IoGroups {
             IoClass::Background => self.background,
         }
     }
+}
+
+/// On [`CREATOR_SHARD`]: the groups once made, the creation under way, or a new one that the
+/// callers until it ends share.
+fn create_once() -> Future<IoGroups> {
+    if let Some(g) = current() {
+        return make_ready_future(g);
+    }
+    if let Some(waiting) =
+        CREATING.with(|c| c.borrow().as_ref().map(SharedPromise::get_shared_future))
+    {
+        return waiting;
+    }
+    let promise = SharedPromise::new();
+    let made = promise.get_shared_future();
+    CREATING.with(|c| *c.borrow_mut() = Some(promise));
+    drop(create().then_wrapped(|done: Future<IoGroups>| {
+        let ended = CREATING.with(|c| c.borrow_mut().take());
+        let mut promise = ended.expect("the creation under way has its promise");
+        let g = done.get().unwrap_or_else(|_| {
+            let d = default_scheduling_group();
+            IoGroups { log: d, data: d, background: d }
+        });
+        promise.set_value(keep(g));
+        make_ready_future(())
+    }));
+    made
+}
+
+/// Makes the three groups on every shard.
+fn create() -> Future<IoGroups> {
+    let make = |name: &str, shares| {
+        create_scheduling_group(Sstring::from(name), Sstring::from(name), shares)
+    };
+    make("disk-log", LOG_SHARES).then(move |log: SchedulingGroup| {
+        make("disk-data", DATA_SHARES).then(move |data: SchedulingGroup| {
+            make("disk-background", BACKGROUND_SHARES).then(move |background: SchedulingGroup| {
+                Ok::<_, ExceptionPtr>(IoGroups { log, data, background })
+            })
+        })
+    })
 }

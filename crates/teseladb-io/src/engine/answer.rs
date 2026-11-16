@@ -316,8 +316,13 @@ impl<T: Send + 'static> Receiver<T> {
             slot.parked.set(wait::parking_id(&p));
             shared.waiting.store(true, Ordering::SeqCst);
             // The last sender may have gone between the look above and `waiting`: it saw nobody
-            // waiting, so this side looks again instead of parking.
-            if shared.senders.load(Ordering::SeqCst) == 0 {
+            // waiting, so this side looks again instead of parking. Only when nothing is on its
+            // way either: an answer still on its way arrives as a message this shard has to poll,
+            // and its delivery wakes the parked receiver. Looking again without parking would
+            // keep the shard from polling it, spinning until the deadline.
+            if shared.senders.load(Ordering::SeqCst) == 0
+                && shared.in_flight.load(Ordering::SeqCst) == 0
+            {
                 wait::cancel_park(p);
             } else {
                 wait::finish_park(p, until);

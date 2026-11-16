@@ -7,6 +7,7 @@
 #![cfg(target_os = "linux")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::coroutine::make_coroutine;
@@ -81,6 +82,46 @@ teseladb::engine_test_case!(a_parked_receiver_wakes_when_its_last_sender_goes, {
             let start = Instant::now();
             assert_eq!(rx.recv_timeout(T), Err(RecvTimeoutError::Disconnected));
             assert!(start.elapsed() < T / 2, "woken by the sender, not by the deadline");
+        }))
+        .await
+    })
+});
+
+// The only sender answers from another shard and goes before the receiver looks: the answer is
+// still on its way to this shard (its message not polled yet) while no sender is left. The
+// receiver parks until it arrives instead of looking again without yielding, which kept the
+// shard from ever polling the message and spun until the deadline.
+teseladb::engine_test_case!(an_answer_on_its_way_after_its_last_sender_went_is_received, {
+    make_coroutine(async move {
+        stacks::run(Box::new(move || {
+            assert!(Smp::count() >= 2, "the case needs a second shard");
+            let (tx, rx) = answer::channel::<u32>();
+            let gone = Arc::new(AtomicBool::new(false));
+            let remote_gone = Arc::clone(&gone);
+            assert!(wait::post(
+                other_shard(),
+                Box::new(move || {
+                    drop(make_coroutine(async move {
+                        sleep_steady(Duration::from_millis(50)).await?;
+                        tx.send(42).unwrap();
+                        drop(tx);
+                        remote_gone.store(true, Ordering::SeqCst);
+                        Ok::<(), ExceptionPtr>(())
+                    }));
+                })
+            ));
+            // A short pause lets this shard send the post; from then on it does not poll, so the
+            // answer's message waits for it.
+            wait::sleep(Duration::from_millis(1));
+            let start = Instant::now();
+            while !gone.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < T, "the other shard ran the send");
+                std::hint::spin_loop();
+            }
+            let start = Instant::now();
+            assert_eq!(rx.recv_timeout(T), Ok(42));
+            assert!(start.elapsed() < T / 2, "received when it arrived, not at the deadline");
+            assert_eq!(rx.recv_timeout(T), Err(RecvTimeoutError::Disconnected));
         }))
         .await
     })

@@ -352,16 +352,13 @@ mod engine_allocator_tests {
         assert!(alien_cross_frees == 1);
     }
 
-    // The 12-byte size class lays its objects every 12 bytes, so every other one is only
-    // 4-aligned. Freeing them from another shard links them into the owner's cross-shard list
-    // through the objects themselves, and the owner's drain walks those links back.
-    engine_test_case!(test_cross_cpu_free_of_objects_not_pointer_aligned, {
+    /// One exchange of the test below: shard 1 allocates COUNT objects of 12 bytes, this
+    /// shard frees them, and shard 1 drains its cross-shard list and allocates COUNT objects
+    /// again. Returns how many of those are the objects freed here.
+    fn cross_cpu_exchange() -> teseladb::engine::core::future::Future<usize> {
         use teseladb::engine::core::smp::Smp;
         const OBJECT_SIZE: usize = 12;
         const COUNT: usize = 64;
-        if Smp::count() < 2 {
-            return make_ready_future(());
-        }
         Smp::submit_to(1, || {
             // SAFETY: malloc has no preconditions.
             let addrs: Vec<usize> =
@@ -379,7 +376,6 @@ mod engine_allocator_tests {
             Smp::submit_to(1, move || {
                 // The reactor's poller may have drained the list already.
                 memory::drain_cross_cpu_freelist();
-                // The drained objects are back in their pool, which hands them out again.
                 // SAFETY: malloc has no preconditions.
                 let again: Vec<usize> =
                     (0..COUNT).map(|_| unsafe { malloc(OBJECT_SIZE) } as usize).collect();
@@ -388,9 +384,113 @@ mod engine_allocator_tests {
                     // SAFETY: a live block of this shard, freed once.
                     unsafe { free(a as *mut c_void) };
                 }
-                assert!(reused > COUNT / 2, "only {reused} of {COUNT} objects came back");
-                make_ready_future(())
+                make_ready_future(reused)
             })
+        })
+    }
+
+    // The 12-byte size class lays its objects every 12 bytes, so every other one is only
+    // 4-aligned. Freeing them from another shard links them into the owner's cross-shard list
+    // through the objects themselves, and the owner's drain walks those links back into the
+    // pool, which hands them out again. Not on the first exchange: the pool then holds the
+    // objects of a whole new span, and the drained ones, at the head of its free list, take it
+    // past its limit, so trimming it gives exactly them back to their span (the reference does
+    // the same: none of the 64 comes back on its first exchange, all 64 on the next ones).
+    engine_test_case!(test_cross_cpu_free_of_objects_not_pointer_aligned, {
+        use teseladb::engine::core::smp::Smp;
+        if Smp::count() < 2 {
+            return make_ready_future(());
+        }
+        cross_cpu_exchange().then(|_| cross_cpu_exchange()).then(|reused: usize| {
+            assert_eq!(reused, 64, "only {reused} of 64 objects came back");
+            make_ready_future(())
+        })
+    });
+
+    /// Allocates `count` blocks of `size` bytes on this shard, each filled with a byte derived
+    /// from its index, and returns their addresses.
+    fn alloc_filled(size: usize, count: usize, seed: u8) -> Vec<usize> {
+        (0..count)
+            .map(|i| {
+                // SAFETY: malloc has no preconditions.
+                let p = unsafe { malloc(size) } as *mut u8;
+                assert!(!p.is_null());
+                // SAFETY: `p` is a fresh block of `size` bytes.
+                unsafe { std::ptr::write_bytes(p, seed.wrapping_add(i as u8), size) };
+                p as usize
+            })
+            .collect()
+    }
+
+    /// Checks that every block still holds the bytes `alloc_filled` wrote and that no two
+    /// blocks overlap.
+    fn check_filled(addrs: &[usize], size: usize, seed: u8, ctx: &str) {
+        let mut sorted = addrs.to_vec();
+        sorted.sort_unstable();
+        for w in sorted.windows(2) {
+            assert!(w[0] + size <= w[1], "{ctx}: blocks {:#x} and {:#x} overlap", w[0], w[1]);
+        }
+        for (i, &a) in addrs.iter().enumerate() {
+            // SAFETY: a live block of `size` bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(a as *const u8, size) };
+            let want = seed.wrapping_add(i as u8);
+            assert!(bytes.iter().all(|&b| b == want), "{ctx}: block {i} at {a:#x} overwritten");
+        }
+    }
+
+    // The same exchange for several size classes (10, 12 and 14 bytes give objects that are
+    // not pointer-aligned), four rounds each, checking every block's contents: shard 1
+    // allocates and fills 64 blocks, this shard frees them, shard 1 drains its cross-shard list
+    // and allocates and fills 64 again. The blocks must be intact and disjoint, and from the
+    // second round on they are exactly the drained ones. The reference, run the same way, gives
+    // 64 of 64 in every round except the first round of the 12-byte class (0 of 64, the trim
+    // described above).
+    engine_test_case!(test_cross_cpu_free_reuse_and_integrity_by_size, {
+        use teseladb::engine::core::smp::Smp;
+        use teseladb::engine::core::thread::async_ as thread_async;
+        const COUNT: usize = 64;
+        const ROUNDS: usize = 4;
+        if Smp::count() < 2 {
+            return make_ready_future(());
+        }
+        thread_async(|| {
+            for size in [10usize, 12, 14, 20, 24, 40] {
+                for round in 0..ROUNDS {
+                    let ctx = format!("size {size} round {round}");
+                    let seed = (size * 31 + round * 7) as u8;
+                    let addrs = Smp::submit_to(1, move || {
+                        make_ready_future(alloc_filled(size, COUNT, seed))
+                    })
+                    .get()?;
+                    if size < 16 && size % 8 != 0 {
+                        assert!(addrs.iter().any(|a| a % 8 != 0), "{ctx}: all pointer-aligned");
+                    }
+                    check_filled(&addrs, size, seed, &ctx);
+                    let before = memory::stats().cross_cpu_frees();
+                    for &a in &addrs {
+                        // SAFETY: a live block of shard 1, freed once.
+                        unsafe { free(a as *mut c_void) };
+                    }
+                    assert_eq!(memory::stats().cross_cpu_frees() - before, COUNT as u64, "{ctx}");
+                    let reused = Smp::submit_to(1, move || {
+                        // The reactor's poller may have drained the list already.
+                        memory::drain_cross_cpu_freelist();
+                        let again = alloc_filled(size, COUNT, !seed);
+                        check_filled(&again, size, !seed, &ctx);
+                        let reused = again.iter().filter(|a| addrs.contains(a)).count();
+                        for &a in &again {
+                            // SAFETY: a live block of this shard, freed once.
+                            unsafe { free(a as *mut c_void) };
+                        }
+                        make_ready_future(reused)
+                    })
+                    .get()?;
+                    if round > 0 {
+                        assert_eq!(reused, COUNT, "size {size} round {round}: objects came back");
+                    }
+                }
+            }
+            Ok(())
         })
     });
 
