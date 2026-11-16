@@ -79,6 +79,12 @@ pub mod routes;
 pub mod search_builder;
 pub mod search_segments;
 pub mod sessions_ops;
+#[cfg(target_os = "linux")]
+pub mod shard_client;
+#[cfg(target_os = "linux")]
+pub mod shard_port;
+#[cfg(target_os = "linux")]
+pub mod shard_tls;
 pub mod spill;
 pub mod sts_client;
 pub mod tenant_limits;

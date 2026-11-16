@@ -12,13 +12,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use teseladb_http::http1::{Limits, Request, ResponseReader};
+use teseladb_http::http1::Limits;
+#[cfg(not(target_os = "linux"))]
+use teseladb_http::http1::{Request, ResponseReader};
 use teseladb_http::server1::{Refused, RequestReader, encode_response};
+#[cfg(not(target_os = "linux"))]
 use teseladb_tls::ClientConfig;
 use teseladb_x509::{Certificate, Name, oid};
 
 use crate::tls_port::TlsPort;
 use crate::tls_stream::TlsStream;
+
+/// The port and its client on the engine's shards (023 FR-022). Until the node starts on shards
+/// (023 T034, T058), the node still serves with [`AdminListener`]; it goes once it does.
+#[cfg(target_os = "linux")]
+pub mod shard;
+#[cfg(target_os = "linux")]
+pub use shard::{request, request_with};
 
 /// Bytes of a request line and headers at most.
 pub const MAX_HEAD: usize = 16 * 1024;
@@ -349,6 +359,7 @@ fn serve(mut stream: TcpStream, handler: &Handler, tls: Option<&AdminTls>) -> io
 }
 
 /// Sends `req` to the administration port at `addr` and returns the answer's status and body.
+#[cfg(not(target_os = "linux"))]
 pub fn request(
     addr: &str,
     method: Method,
@@ -359,12 +370,14 @@ pub fn request(
 }
 
 /// The host of `addr` (`host:port` or `[v6]:port`).
+#[cfg(not(target_os = "linux"))]
 fn host_of(addr: &str) -> &str {
     let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
 /// [`request`], over TLS with `tls`: the server's certificate has to name the host of `addr`.
+#[cfg(not(target_os = "linux"))]
 pub fn request_with(
     addr: &str,
     tls: Option<Arc<ClientConfig>>,
@@ -414,6 +427,7 @@ pub fn request_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teseladb_tls::ClientConfig;
 
     fn parse(text: &str) -> Result<Option<HttpRequest>, HttpError> {
         parse_request(text.as_bytes())
@@ -617,8 +631,11 @@ mod tests {
         s.write_all(&[22, 3, 1]).unwrap();
         drop(s);
         assert_eq!(ask(client(None)), "Anonymous");
-        assert_eq!(host_of("[::1]:5"), "::1");
-        assert_eq!(host_of("h"), "h");
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(host_of("[::1]:5"), "::1");
+            assert_eq!(host_of("h"), "h");
+        }
         // A certificate of another CA with the cluster CA's name is not a node.
         let impostor = pki::load_or_create(&base.join("impostor"), &params, &mut random).unwrap();
         let same_name = AdminTls { ca: impostor.ca.clone(), ..tls_copy.clone() };

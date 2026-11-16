@@ -31,6 +31,11 @@ use teseladb_x509::Certificate;
 
 use crate::tls_port::{TlsPort, Transport};
 
+/// The port on the engine's shards (023 FR-022). Until the node starts on shards (023 T034,
+/// T058), the node still serves with the threads below; they go once it does.
+#[cfg(target_os = "linux")]
+pub mod shard;
+
 /// The default `--http-port`.
 pub const DEFAULT_HTTP_PORT: u16 = 27_080;
 /// How long a read waits before the connection looks at its answers and deadlines.

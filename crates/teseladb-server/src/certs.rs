@@ -21,6 +21,9 @@ pub struct Certificates {
     peer: PeerTls,
     names: Vec<GeneralName>,
     admin: Option<TlsPort>,
+    /// The ports on the engine's shards and the settings each serves (023 FR-023).
+    #[cfg(target_os = "linux")]
+    shards: Vec<(crate::shard_tls::ShardTls, TlsPort)>,
 }
 
 impl std::fmt::Debug for Certificates {
@@ -49,13 +52,48 @@ impl Certificates {
         peer: PeerTls,
         names: Vec<GeneralName>,
     ) -> Certificates {
-        Certificates { dir, opts, port, peer, names, admin: None }
+        Certificates {
+            dir,
+            opts,
+            port,
+            peer,
+            names,
+            admin: None,
+            #[cfg(target_os = "linux")]
+            shards: Vec::new(),
+        }
     }
 
     /// Rotates the administration port's TLS `admin` too.
     #[must_use]
     pub fn with_admin(self, admin: TlsPort) -> Certificates {
         Certificates { admin: Some(admin), ..self }
+    }
+
+    /// Puts every rotation in place on the shards of the ports `shards` too: each port's shard
+    /// copies take the settings of the [`TlsPort`] paired with it (023 FR-023).
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn with_shard_ports(self, shards: Vec<(crate::shard_tls::ShardTls, TlsPort)>) -> Self {
+        Certificates { shards, ..self }
+    }
+
+    /// [`Certificates::reload`] from a shard: the new settings are on every shard of every
+    /// port before the future resolves; on error nothing changes.
+    #[cfg(target_os = "linux")]
+    pub fn rotate(&self) -> teseladb::engine::core::future::Future<Result<(), String>> {
+        use teseladb::engine::core::coroutine::make_coroutine;
+        let reloaded = self.reload();
+        let shards = self.shards.clone();
+        make_coroutine(async move {
+            if let Err(e) = reloaded {
+                return Ok(Err(e));
+            }
+            for (slot, port) in &shards {
+                slot.publish_port(port).await?;
+            }
+            Ok(Ok(()))
+        })
     }
 
     /// `rotateCertificates`: loads the PKI and the `--tls*` files again and serves the new
