@@ -22,6 +22,8 @@ teseladb-deflate = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
 teseladb-tls = { workspace = true }
 teseladb-x509 = { workspace = true }
+# The engine (023): its package and library are `teseladb`; empty outside Linux.
+teseladb = { path = "../teseladb-engine", default-features = false }
 
 [dev-dependencies]
 teseladb-crypto = { workspace = true }
@@ -33,4 +35,11 @@ harness = false
 
 [[test]]
 name = "crash_real_lsm"
+harness = false
+
+# TLS on the engine against the blocking implementation (023 FR-016): a program with its own main
+# that runs inside the engine; empty outside Linux.
+[[bench]]
+name = "engine_tls"
+path = "benches/entry/engine_tls.rs"
 harness = false
