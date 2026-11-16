@@ -29,6 +29,14 @@ harness = false
 name = "admin_port"
 harness = false
 
+[[test]]
+name = "api_keys"
+harness = false
+
+[[test]]
+name = "backup"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }

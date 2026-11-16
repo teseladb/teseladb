@@ -1,18 +1,20 @@
-//! What the tests of a node started by `teseladb start` share (013): the start in a thread with
-//! its clients' and administration ports, a TLS client of the clients' port, SCRAM logins and a
+//! What the tests of a node started by `teseladb start` share (013): the start in a process of
+//! its own with its clients' and administration ports, a TLS client of the clients' port, SCRAM logins and a
 //! client certificate signed by the cluster's CA.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use teseladb_auth::scram::{ClientSession, Mechanism};
 use teseladb_bson::{Document, Value};
 use teseladb_server::pki::ROOT_CREDENTIALS;
+use teseladb_server::procs::STOP_WAIT;
 use teseladb_server::run;
+use teseladb_sys::signal::{Stop, send_stop};
 use teseladb_tls::{Connection, ENTROPY_LEN, Trust};
 use teseladb_wire::msg::{HEADER_LEN, OpMsg};
 use teseladb_x509::Certificate;
@@ -34,10 +36,10 @@ pub fn dir(name: &str) -> Dir {
     Dir(d)
 }
 
-/// A node started by `teseladb start` in a thread, stopped when dropped.
+/// A node started by `teseladb start` in a process of its own (D4: one process per node),
+/// stopped with `SIGTERM` when dropped; it has to end with 0.
 pub struct Started {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<i32>>,
+    child: Child,
     pub port: u16,
     /// The administration port's address.
     pub admin: String,
@@ -45,10 +47,24 @@ pub struct Started {
 
 impl Drop for Started {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            assert_eq!(t.join().unwrap(), 0);
+        if std::thread::panicking() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            return;
         }
+        send_stop(self.child.id(), Stop::Terminate).unwrap();
+        let until = Instant::now() + STOP_WAIT;
+        let status = loop {
+            match self.child.try_wait().unwrap() {
+                Some(s) => break s,
+                None if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+                None => {
+                    let _ = self.child.kill();
+                    panic!("the node did not stop in {STOP_WAIT:?}");
+                }
+            }
+        };
+        assert_eq!(status.code(), Some(0));
     }
 }
 
@@ -76,16 +92,25 @@ pub fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
     .chain(extra)
     .map(|s| s.to_string())
     .collect();
-    let stop = Arc::new(AtomicBool::new(false));
-    let s = stop.clone();
-    let thread = std::thread::spawn(move || {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        run(&args, &mut out, &mut err, &|| s.load(Ordering::Relaxed))
-    });
+    // Standard output has the ready line, and standard error what goes wrong before the log
+    // opens: both after the log, in the same directory.
+    let out = std::fs::File::create(log.with_extension("out")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_teseladb"))
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .unwrap();
     // The node logs its clients' port and then its administration port: the test waits for
     // both lines, since a read between the two writes sees only the first.
     let until = Instant::now() + READY_WAIT;
     let (port, admin) = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let out = std::fs::read_to_string(log.with_extension("out")).unwrap_or_default();
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            panic!("the node ended with {status} before it served: {out}{text}");
+        }
         let text = std::fs::read_to_string(log).unwrap_or_default();
         let port = text.lines().find_map(|l| {
             l.split("clients' port addr=").nth(1).and_then(|a| a.rsplit(':').next()?.parse().ok())
@@ -99,7 +124,7 @@ pub fn start_with(data: &Path, log: &Path, extra: &[&str]) -> Started {
         assert!(Instant::now() < until, "the node did not start: {text}");
         std::thread::sleep(Duration::from_millis(50));
     };
-    Started { stop, thread: Some(thread), port, admin }
+    Started { child, port, admin }
 }
 
 pub fn now_ms() -> i64 {

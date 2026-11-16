@@ -3,6 +3,9 @@
 //! keys over `/v1`; a key carries the roles of its user it was given and no more; and a revoked
 //! key is refused by every node in less than a second.
 
+#[path = "common/procs.rs"]
+mod procs;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -10,11 +13,36 @@ use std::time::{Duration, Instant};
 use teseladb_bson::{Document, Value, extjson};
 use teseladb_http::http1::{Limits, Request, Response, ResponseReader};
 use teseladb_http::server::Settings;
-use teseladb_raftlog::MemDisk;
+
 use teseladb_server::audit_log::{AuditLog, AuditOpts};
 use teseladb_server::client_listener::ClientConfig;
 use teseladb_server::http_listener::HttpPortConfig;
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::NodeConfig;
+use teseladb_server::procs::NodeProc;
+
+fn main() {
+    procs::main(
+        &[
+            (
+                "keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_second",
+                keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_second,
+            ),
+            (
+                "the_audit_log_records_each_request_without_bodies_keys_or_tokens",
+                the_audit_log_records_each_request_without_bodies_keys_or_tokens,
+            ),
+            (
+                "mcp_over_stdio_relays_each_message_with_the_key",
+                mcp_over_stdio_relays_each_message_with_the_key,
+            ),
+            (
+                "the_mcp_resource_metadata_is_public_and_named_by_the_challenge",
+                the_mcp_resource_metadata_is_public_and_named_by_the_challenge,
+            ),
+        ],
+        &[("keys", |a| node_config(a.join.clone(), a.param("audit").map(std::path::Path::new)))],
+    );
+}
 
 const READY: Duration = Duration::from_secs(30);
 
@@ -88,12 +116,21 @@ fn root_user() -> Vec<u8> {
     doc
 }
 
-fn start(join: Vec<String>) -> Node<MemDisk> {
+fn start(join: Vec<String>) -> NodeProc {
     start_with(join, None)
 }
 
-/// A node, with its audit log in JSON at `audit`.
-fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node<MemDisk> {
+/// A node process, with its audit log in JSON at `audit`.
+fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeProc {
+    let audit = audit.map(|p| format!("audit={}", p.display()));
+    let params: Vec<&str> = audit.iter().map(String::as_str).collect();
+    let node = procs::node("keys", &join, None, &params);
+    assert!(node.wait_ready(READY));
+    node
+}
+
+/// The configuration of a node, with its audit log in JSON at `audit`.
+fn node_config(join: Vec<String>, audit: Option<&std::path::Path>) -> NodeConfig {
     let http = HttpPortConfig {
         addrs: vec![SocketAddr::from(([127, 0, 0, 1], 0))],
         tls: None,
@@ -110,20 +147,17 @@ fn start_with(join: Vec<String>, audit: Option<&std::path::Path>) -> Node<MemDis
         };
         client.audit = AuditLog::open(&opts).unwrap();
     }
-    let cfg = NodeConfig {
+    NodeConfig {
         http: Some(http),
         client: Some(client),
         admin_listen: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
         root_user: join.is_empty().then(root_user),
         ..base
-    };
-    let node = Node::start(cfg, || Ok(MemDisk::new()), None).unwrap();
-    assert!(node.wait_ready(READY));
-    node
+    }
 }
 
 /// `teseladb admin --node <admin port> <args>`: exit code and output.
-fn admin(node: &Node<MemDisk>, args: &[&str]) -> (i32, String, String) {
+fn admin(node: &NodeProc, args: &[&str]) -> (i32, String, String) {
     let at = node.admin_addr().unwrap().to_string();
     let none = std::env::temp_dir().join("teseladb-apikeys-no-pki");
     let mut all = vec!["--node".to_owned(), at, "--dbpath".to_owned()];
@@ -142,11 +176,10 @@ fn text(d: &Document, f: &str) -> String {
     }
 }
 
-#[test]
 fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_second() {
     let first = start(Vec::new());
     let seed = vec![first.peer_addr().to_string()];
-    let others: Vec<Node<MemDisk>> = (0..2).map(|_| start(seed.clone())).collect();
+    let others: Vec<NodeProc> = (0..2).map(|_| start(seed.clone())).collect();
     let at: Vec<SocketAddr> =
         std::iter::once(&first).chain(others.iter()).map(|n| n.http_addrs()[0]).collect();
     // The first key comes from the administration port, printed once.
@@ -239,14 +272,13 @@ fn keys_carry_their_roles_and_a_revoked_key_is_refused_everywhere_within_a_secon
     let (code, _, err) = admin(&first, &["apikey", "create", "--user", "ghost", "--db", "admin"]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("ghost"), "{err}");
-    drop(others.into_iter().map(Node::stop).collect::<Vec<_>>());
-    drop(first.stop());
+    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
+    assert!(first.stop().success());
 }
 
 /// 019 T022, FR-018: each REST and MCP request goes to the audit log as `httpRequest` with its
 /// transport, user, route or tool, status and the key's `keyId`; neither the key, a token nor a
 /// body is written there.
-#[test]
 fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
     let dir = std::env::temp_dir().join(format!("teseladb-apikeys-audit-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -291,13 +323,12 @@ fn the_audit_log_records_each_request_without_bodies_keys_or_tokens() {
     for leaked in [key.as_str(), &key[4..], jwt, secret, &teseladb_auth::apikey::hash_hex(&key)] {
         assert!(!text.contains(leaked), "{leaked} in {text}");
     }
-    drop(node.stop());
+    assert!(node.stop().success());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 019 T025, FR-020: `teseladb mcp` relays stdio to `/mcp` with the key of `TESELADB_API_KEY`,
 /// keeps the session `initialize` opened and refuses to go on with a key the node refuses.
-#[test]
 fn mcp_over_stdio_relays_each_message_with_the_key() {
     use teseladb_server::mcp_stdio::{McpOpts, run};
     let node = start(Vec::new());
@@ -341,12 +372,11 @@ fn mcp_over_stdio_relays_each_message_with_the_key() {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     assert_eq!(run(&o, &mut input.as_bytes(), &mut out, &mut err, Some(other)), 1);
     assert!(String::from_utf8_lossy(&err).contains("401"));
-    drop(node.stop());
+    assert!(node.stop().success());
 }
 
 /// 019 T031, FR-027: the metadata of `/mcp` is public, and a `401` of `/mcp` names it. The
 /// resource is the address the port listens on, not the `Host` the client sent (`h`).
-#[test]
 fn the_mcp_resource_metadata_is_public_and_named_by_the_challenge() {
     let node = start(Vec::new());
     let at = node.http_addrs()[0];
@@ -361,5 +391,5 @@ fn the_mcp_resource_metadata_is_public_and_named_by_the_challenge() {
     let challenge = r.header("www-authenticate").unwrap();
     let url = format!("https://{at}/.well-known/oauth-protected-resource/mcp");
     assert!(challenge.contains(&format!("resource_metadata=\"{url}\"")), "{challenge}");
-    drop(node.stop());
+    assert!(node.stop().success());
 }
