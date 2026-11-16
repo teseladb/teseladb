@@ -68,6 +68,7 @@ pub mod ocsp_staple;
 pub mod oidc_client;
 pub mod pki;
 pub mod pressure;
+pub mod procs;
 pub mod pushed;
 pub mod ranges;
 pub mod relocations;

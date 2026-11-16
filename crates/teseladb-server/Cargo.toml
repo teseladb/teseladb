@@ -19,6 +19,16 @@ path = "src/main.rs"
 name = "cluster_local"
 harness = false
 
+# Their own `main` (tests/common/procs.rs): every node of a test runs in a process of its own, one
+# process per node (D4), and the binary is that process in node mode.
+[[test]]
+name = "admin"
+harness = false
+
+[[test]]
+name = "admin_port"
+harness = false
+
 [dependencies]
 teseladb-names = { workspace = true }
 teseladb-stages = { path = "../teseladb-stages" }
