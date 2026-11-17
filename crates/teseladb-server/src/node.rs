@@ -98,7 +98,10 @@ pub const DATA_FORMAT_FILE: &str = "data.format";
 /// directory of format 8 has none and starts as it is. 10: the device log's records of version 2,
 /// whose `FILL` frames stand for the padding of the cores' WAL batches, which a node of format 9
 /// would take for the end of its log; a directory of format 8 or 9 has none and starts as it is.
-pub const DATA_FORMAT: u32 = 10;
+/// 11: the regions of the cores' WALs go compressed as one LZ4 block when that makes them shorter,
+/// which a node of format 10 would take for the end of its log; a directory of format 8, 9 or 10
+/// has none and starts as it is.
+pub const DATA_FORMAT: u32 = 11;
 
 /// The format before the device log, which a node moves to [`DATA_FORMAT`] when it starts.
 const PER_CORE_LOG_FORMAT: u32 = 7;
@@ -110,6 +113,10 @@ const DEVICE_LOG_FORMAT: u32 = 8;
 /// The device log of version 1, without `FILL` frames, which a node moves to [`DATA_FORMAT`] when
 /// it starts by writing the format.
 const BOUND_LOG_FORMAT: u32 = 9;
+
+/// The device log of version 2, without compressed WAL regions, which a node moves to
+/// [`DATA_FORMAT`] when it starts by writing the format.
+const FILL_LOG_FORMAT: u32 = 10;
 
 /// Bytes of system randomness that seed the generator of the `$clusterTime` signing keys.
 const KEY_ENTROPY: usize = 48;
@@ -450,8 +457,8 @@ fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<bool, NodeEr
     match found {
         DATA_FORMAT => Ok(false),
         PER_CORE_LOG_FORMAT => Ok(true),
-        // Before its log writes a `BOUND` frame (D-172) or a `FILL` frame.
-        DEVICE_LOG_FORMAT | BOUND_LOG_FORMAT => {
+        // Before its log writes a `BOUND` frame (D-172), a `FILL` frame or a compressed region.
+        DEVICE_LOG_FORMAT | BOUND_LOG_FORMAT | FILL_LOG_FORMAT => {
             let text = DATA_FORMAT.to_string().into_bytes();
             write_atomic(disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
             Ok(false)

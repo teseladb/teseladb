@@ -8,6 +8,15 @@
 //! ```text
 //! sealed region := 0x5345(u16 LE) · zeros(2) · len(u32 LE) · trailer(32) · ciphertext · padding
 //! ```
+//!
+//! A region's records go compressed as one LZ4 block when that makes them shorter (data format
+//! 11): the documents the commands carry repeat their field names and much of their values. With
+//! encryption the compressed region is what is sealed.
+//!
+//! ```text
+//! compressed region := 0x5A4C(u16 LE) · zeros(2) · len(u32 LE) · varint(records' length)
+//!                      · LZ4 block of the records · padding
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +35,53 @@ pub const SEALED_REGION_MAGIC: u16 = 0x5345;
 pub const SEALED_REGION_HEAD: usize = 2 + 2 + 4 + TRAILER_LEN;
 /// Most bytes sealing adds to the records: the head and the CBC padding.
 const SEALING_OVERHEAD: usize = SEALED_REGION_HEAD + 16;
+
+/// First two bytes of a compressed region.
+pub const COMPRESSED_REGION_MAGIC: u16 = 0x5A4C;
+/// Bytes before a compressed region's LZ4 data.
+pub const COMPRESSED_REGION_HEAD: usize = 2 + 2 + 4;
+/// Records shorter than this go as they are: a hard state or a commit mark alone, where the
+/// block would save less than the time it takes.
+pub const COMPRESS_MIN: usize = 256;
+
+/// `records` as a compressed region, or `None` when that is not shorter.
+#[must_use]
+pub fn compress_region(records: &[u8]) -> Option<Vec<u8>> {
+    if records.len() < COMPRESS_MIN {
+        return None;
+    }
+    let packed = teseladb_lz4::compress(records);
+    if COMPRESSED_REGION_HEAD + packed.len() >= records.len() {
+        return None;
+    }
+    let len = u32::try_from(packed.len()).ok()?;
+    let mut out = Vec::with_capacity(COMPRESSED_REGION_HEAD + packed.len());
+    out.extend_from_slice(&COMPRESSED_REGION_MAGIC.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&packed);
+    Some(out)
+}
+
+/// Whether `region` starts as a compressed one.
+#[must_use]
+pub fn is_compressed_region(region: &[u8]) -> bool {
+    region.get(..2) == Some(&COMPRESSED_REGION_MAGIC.to_le_bytes()[..])
+}
+
+/// The records of compressed region `region`; `None` if it does not decompress (a region whose
+/// CRC matched was written whole, so this means a bug or a node of another format).
+#[must_use]
+pub fn decompress_region(region: &[u8]) -> Option<Vec<u8>> {
+    let head = region.get(..COMPRESSED_REGION_HEAD)?;
+    if !is_compressed_region(head) || head[2..4] != [0, 0] {
+        return None;
+    }
+    let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    let packed = region.get(COMPRESSED_REGION_HEAD..COMPRESSED_REGION_HEAD.checked_add(len)?)?;
+    // A region's records are at most what its `u32` length says.
+    teseladb_lz4::decompress(packed, u32::MAX as usize).ok()
+}
 
 /// What a sealed region is bound to: its segment and its batch.
 #[must_use]
@@ -92,6 +148,8 @@ pub struct WalWriter {
     key: Option<FileKey>,
     /// The next segment, made ahead (`spare`).
     spare: Option<Spare>,
+    /// Whether regions go compressed when that makes them shorter.
+    compress: bool,
 }
 
 /// A segment created ahead, once the active one is half full, so that the batch that opens it
@@ -145,6 +203,7 @@ impl WalWriter {
             encryption: None,
             key: None,
             spare: None,
+            compress: true,
         }
     }
 
@@ -198,6 +257,13 @@ impl WalWriter {
         WalWriter { encryption, ..self }
     }
 
+    /// The writer compressing the regions it writes from now on when that makes them shorter, or
+    /// writing them as they are.
+    #[must_use]
+    pub fn with_compression(self, compress: bool) -> WalWriter {
+        WalWriter { compress, ..self }
+    }
+
     /// Sets the next segment number (after recovery).
     pub fn set_next_file_seq(&mut self, seq: u64) {
         self.next_file_seq = self.next_file_seq.max(seq);
@@ -247,6 +313,8 @@ impl WalWriter {
         now_ms: u64,
     ) -> WalRegion {
         let records = core::mem::take(&mut self.records);
+        let packed = if self.compress { compress_region(&records) } else { None };
+        let records = packed.unwrap_or(records);
         let batch_hdr = record_len(25);
         let overhead = if self.encryption.is_some() { SEALING_OVERHEAD } else { 0 };
         let total = (batch_hdr + records.len() + overhead).next_multiple_of(BLOCK);
@@ -478,5 +546,70 @@ mod tests {
         assert!(!w.resumed);
         let r2 = w.close_batch(51, &mut next, 0);
         assert!(r2.prepare.is_empty());
+    }
+
+    #[test]
+    fn a_region_compresses_only_when_it_shrinks_and_decompresses_back() {
+        let records = b"{field: \"value\", pad: \"".repeat(40);
+        let packed = compress_region(&records).expect("repeated text shrinks");
+        assert!(is_compressed_region(&packed));
+        assert!(packed.len() < records.len() / 4);
+        assert_eq!(decompress_region(&packed).as_deref(), Some(&records[..]));
+        // With the padding of its block after it, as it lies in a segment.
+        let mut padded = packed.clone();
+        padded.resize(4096, crate::format::PAD_BYTE);
+        assert_eq!(decompress_region(&padded).as_deref(), Some(&records[..]));
+        // Too short, or not shrinking: as they are.
+        assert_eq!(compress_region(&records[..COMPRESS_MIN - 1]), None);
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let noise: Vec<u8> = (0..2000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x.to_le_bytes()[0]
+            })
+            .collect();
+        assert_eq!(compress_region(&noise), None);
+        // Not a compressed region, a damaged head or block, or one cut short: no records.
+        assert!(!is_compressed_region(&records));
+        assert_eq!(decompress_region(&records), None);
+        let mut bad = packed.clone();
+        bad[2] = 1;
+        assert_eq!(decompress_region(&bad), None);
+        assert_eq!(decompress_region(&packed[..packed.len() - 1]), None);
+        let mut long = packed.clone();
+        long[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decompress_region(&long), None);
+        let mut wrong = packed;
+        let last = wrong.len() - 1;
+        wrong[last] ^= 0xff;
+        assert_ne!(decompress_region(&wrong).as_deref(), Some(&records[..]));
+    }
+
+    #[test]
+    fn a_writer_without_compression_writes_the_records_as_they_are() {
+        let rec = WalRecord {
+            group: GroupId(3),
+            batch_seq: 1,
+            flags: 0,
+            payload: WalPayload::GroupCreate { conf: Bytes::from_vec(vec![b'a'; 3000]) },
+        };
+        let region_of = |compress: bool| {
+            let mut w = WalWriter::new(0, 1, 1 << 20).with_compression(compress);
+            w.push(&rec);
+            let r = w.close_batch(1, &mut ids(), 0);
+            let IoOp::WriteAt { data, .. } = &r.writes[1] else { panic!() };
+            (r.bytes, data[record_len(25)..].to_vec())
+        };
+        let (packed_bytes, packed) = region_of(true);
+        let (plain_bytes, plain) = region_of(false);
+        assert!(is_compressed_region(&packed));
+        assert!(!is_compressed_region(&plain));
+        assert_eq!((packed_bytes, plain_bytes), (BLOCK as u64, 2 * BLOCK as u64));
+        let mut want = Vec::new();
+        rec.encode_into(&mut want);
+        assert_eq!(&plain[..want.len()], &want[..]);
+        assert_eq!(decompress_region(&packed), Some(want));
     }
 }

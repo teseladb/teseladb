@@ -29,8 +29,11 @@ engine_test_case!(test_semaphore_timeout_of_first_waiter_serves_next, {
         let mut sem = Semaphore::new(100);
         // SAFETY (all the waits below): the semaphore stays alive and in place in this frame
         // until the units are gone and the futures have resolved.
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let held = unsafe { get_units(&mut sem, 60) }.get()?; // 40 units left
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let big = unsafe { get_units_for(&mut sem, 50, ms(10)) }; // can't be served
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let small = unsafe { get_units(&mut sem, 10) }; // fits, but is behind big
         sleep(ms(50)).get()?; // big has timed out
         assert!(matches!(big.get(), Err(ref e) if e.is::<SemaphoreTimedOut>()));
@@ -50,8 +53,11 @@ engine_test_case!(test_semaphore_abort_of_first_waiter_serves_next, {
         let mut as_: Pin<Box<AbortSource>> = Box::pin(AbortSource::new());
         // SAFETY (all the waits below): the semaphore and the abort source stay alive and in
         // place in this frame until the units are gone and the futures have resolved.
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let held = unsafe { get_units(&mut sem, 60) }.get()?; // 40 units left
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let big = unsafe { get_units_abortable(&mut sem, 50, as_.as_mut()) }; // can't be served
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let small = unsafe { get_units(&mut sem, 10) }; // fits, but is behind big
         as_.as_mut().request_abort();
         assert!(matches!(big.get(), Err(ref e) if e.is::<SemaphoreAborted>()));
@@ -71,9 +77,13 @@ engine_test_case!(test_semaphore_timeout_in_the_middle_keeps_order, {
         let mut sem = Semaphore::new(100);
         // SAFETY (all the waits below): the semaphore stays alive and in place in this frame
         // until the units are gone and the futures have resolved.
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let mut held = unsafe { get_units(&mut sem, 60) }.get()?; // 40 units left
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let first = unsafe { get_units(&mut sem, 50) }; // can't be served
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let middle = unsafe { get_units_for(&mut sem, 50, ms(10)) }; // will time out
+        // SAFETY: the waits above, the semaphore stays in place in this frame.
         let last = unsafe { get_units(&mut sem, 10) }; // fits, but is behind first
         sleep(ms(50)).get()?;
         assert!(matches!(middle.get(), Err(ref e) if e.is::<SemaphoreTimedOut>()));

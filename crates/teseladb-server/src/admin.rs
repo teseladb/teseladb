@@ -487,6 +487,35 @@ impl NodeAdmin {
 }
 
 /// `bytes` in hexadecimal.
+/// What each core's LSM wrote since it opened: the bytes its callers gave it, and the bytes of the
+/// files it wrote into each level (level 0 by its flushes, the others by compactions) and of its
+/// value files, to tell the disk's bytes per operation apart by source.
+fn lsm_written_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
+    let name = "teseladb_lsm_user_bytes_total";
+    let _ = writeln!(out, "# HELP {name} Bytes of the keys and values each core's LSM was given.");
+    let _ = writeln!(out, "# TYPE {name} counter");
+    for (core, s) in cores {
+        let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", s.user_bytes);
+    }
+    let name = "teseladb_lsm_written_bytes_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Bytes of the files each core's LSM wrote into each level: level 0 by its flushes, the others by compactions."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter");
+    for (core, s) in cores {
+        for (level, bytes) in s.level_written.iter().enumerate() {
+            let _ = writeln!(out, "{name}{{core=\"{core}\",level=\"{level}\"}} {bytes}");
+        }
+    }
+    let name = "teseladb_lsm_value_written_bytes_total";
+    let _ = writeln!(out, "# HELP {name} Bytes of the value files each core's LSM wrote.");
+    let _ = writeln!(out, "# TYPE {name} counter");
+    for (core, s) in cores {
+        let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", s.value_written);
+    }
+}
+
 /// The sizes of each core's LSM (004 FR-019): its files by level and what it holds in memory.
 fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     let series: [(&str, &str); 4] = [
@@ -586,6 +615,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             let _ = writeln!(out, "{name}{{core=\"{core}\"}} {}", value(s));
         }
     }
+    lsm_written_metrics(out, cores);
     let _ = writeln!(
         out,
         "# HELP teseladb_range_latch_waits_total Reads and writes of each core's ranges that waited for a latch."
@@ -1827,6 +1857,28 @@ mod tests {
             "teseladb_lsm_retired_cache_bytes{core=\"1\"} 7",
             "teseladb_lsm_unused_file_bytes{core=\"1\"} 4096",
             "# TYPE teseladb_lsm_shared_cache_bytes gauge",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in {out}");
+        }
+    }
+
+    #[test]
+    fn the_lsm_metrics_give_what_each_level_was_written() {
+        let sizes = crate::data::LsmSizes {
+            user_bytes: 1000,
+            level_written: vec![400, 0, 900],
+            value_written: 64,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        lsm_metrics(&mut out, &[(3, sizes)]);
+        for line in [
+            "teseladb_lsm_user_bytes_total{core=\"3\"} 1000",
+            "teseladb_lsm_written_bytes_total{core=\"3\",level=\"0\"} 400",
+            "teseladb_lsm_written_bytes_total{core=\"3\",level=\"1\"} 0",
+            "teseladb_lsm_written_bytes_total{core=\"3\",level=\"2\"} 900",
+            "teseladb_lsm_value_written_bytes_total{core=\"3\"} 64",
+            "# TYPE teseladb_lsm_written_bytes_total counter",
         ] {
             assert!(out.lines().any(|l| l == line), "{line} in {out}");
         }

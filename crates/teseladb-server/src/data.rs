@@ -195,6 +195,12 @@ pub struct LsmSizes {
     pub stalls: u64,
     /// Writes that came while the LSM rejected proposals.
     pub rejects: u64,
+    /// Bytes its callers wrote since it opened.
+    pub user_bytes: u64,
+    /// Bytes of the files it wrote since it opened into each level, level 0 (its flushes) first.
+    pub level_written: Vec<u64>,
+    /// Bytes of the value files it wrote since it opened.
+    pub value_written: u64,
 }
 
 /// What this node's replica of a range looks like.
@@ -707,6 +713,9 @@ impl DataCore {
                     write_amp_milli: (m.write_amp * 1000.0) as u64,
                     stalls: m.stalls_total,
                     rejects: m.rejects_total,
+                    user_bytes: m.user_bytes_total,
+                    level_written: m.level_written_total,
+                    value_written: m.value_written_total,
                 };
                 let _ = reply.send(Ok(DataReply::Lsm(sizes)));
                 return;

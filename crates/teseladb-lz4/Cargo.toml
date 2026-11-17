@@ -1,0 +1,11 @@
+[package]
+name = "teseladb-lz4"
+version = "0.1.0"
+description = "The LZ4 block format translated from liblz4 1.9.4: the block compressor and the safe block decompressor of the LSM's data blocks and the cores' WAL regions."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

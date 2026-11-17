@@ -151,7 +151,9 @@ pub(crate) fn unframe_with(
         COMPRESSION_ZSTD => {
             zstd::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec).map_err(|_| Bad)
         }
-        COMPRESSION_LZ4 => lz4::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec),
+        COMPRESSION_LZ4 => {
+            lz4::decompress(&body, MAX_PAYLOAD).map(Bytes::from_vec).map_err(|_| Bad)
+        }
         COMPRESSION_ZSTD_DICT => {
             let dict = dict.ok_or(Bad)?;
             zstd::decompress_with_dict(&body, MAX_PAYLOAD, dict)

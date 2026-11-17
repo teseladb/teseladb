@@ -255,17 +255,18 @@ fn a_directory_of_another_data_format_refuses_to_start_and_says_so() {
     let n = start(&dir, 1).unwrap();
     assert!(n.wait_ready(READY));
     n.stop();
-    // Format 8, the device log without the HLC bound in its records (D-172), and format 9, its
-    // records of version 1 without `FILL` frames, start and are left in the current format: from
-    // then on the log's records carry them.
-    for older in ["8", "9"] {
+    // Format 8, the device log without the HLC bound in its records (D-172), format 9, its
+    // records of version 1 without `FILL` frames, and format 10, its cores' WAL regions without
+    // compression, start and are left in the current format: from then on the log's records carry
+    // them.
+    for older in ["8", "9", "10"] {
         fs::write(&file, older).unwrap();
         let n = start(&dir, 1).unwrap();
         assert!(n.wait_ready(READY));
         n.stop();
         assert_eq!(fs::read_to_string(&file).unwrap(), DATA_FORMAT.to_string());
     }
-    assert_eq!(DATA_FORMAT, 10);
+    assert_eq!(DATA_FORMAT, 11);
 }
 
 /// Puts the cores' WAL back where format 7 kept it, one file per segment under `core-NN/wal`, and

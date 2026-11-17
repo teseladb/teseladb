@@ -14,6 +14,13 @@ pub struct LsmMetrics {
     pub level_files: Vec<usize>,
     /// `lsm_write_amp`: bytes written to files per byte written by the callers.
     pub write_amp: f64,
+    /// Bytes the callers wrote since the LSM opened: keys and values of their writes.
+    pub user_bytes_total: u64,
+    /// Bytes of the files written since the LSM opened into each level, level 0 (its flushes)
+    /// first, history files included: what each level's compactions cost the disk.
+    pub level_written_total: Vec<u64>,
+    /// Bytes of the value files written since the LSM opened (FR-034).
+    pub value_written_total: u64,
     /// `lsm_read_files_per_get`: files searched per point read that finished.
     pub read_files_per_get: f64,
     /// Point reads that finished, and the files they searched (for the ratio over a window).
@@ -161,6 +168,9 @@ impl Lsm {
             level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.bytes()).sum()).collect(),
             level_files: v.levels.iter().map(Vec::len).collect(),
             write_amp: ratio(c.written_bytes, c.user_bytes),
+            user_bytes_total: c.user_bytes,
+            level_written_total: c.level_written.clone(),
+            value_written_total: c.value_written,
             read_files_per_get: ratio(r.probes, r.gets),
             gets_total: r.gets,
             get_files_total: r.probes,

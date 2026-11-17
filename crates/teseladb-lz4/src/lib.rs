@@ -15,7 +15,8 @@
 //! only. The last 5 bytes of the input are literals, and the last match starts at least 12 bytes
 //! before the end.
 //!
-//! The LSM stores a block's decompressed length before it, as a varint.
+//! [`compress`] and [`decompress`] store a block's decompressed length before it, as a varint: the
+//! LSM's data blocks (004 FR-037) and the cores' WAL regions (012) are written that way.
 //!
 //! The code of liblz4 this module translates carries this notice:
 //!
@@ -51,12 +52,38 @@
 //!
 //! Unsafe code (D-151): every read and write goes through a raw pointer whose bounds the loop
 //! conditions of liblz4 guarantee; each function says which, and Miri runs the tests of this
-//! module, also on damaged blocks.
+//! crate, also on damaged blocks.
+#![cfg_attr(coverage, feature(coverage_attribute))]
 #![allow(unsafe_code)]
 
 use std::ptr;
 
-use super::{Bad, get_varint, put_varint};
+/// A block that does not decompress: damaged, cut short, or not of the length asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bad;
+
+/// Appends `n` as LEB128.
+fn put_varint(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+/// Reads a LEB128 value at `*at`, moving `*at` past it.
+fn get_varint(b: &[u8], at: &mut usize) -> Result<u64, Bad> {
+    let mut n = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *b.get(*at).ok_or(Bad)?;
+        *at += 1;
+        n |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Ok(n);
+        }
+    }
+    Err(Bad)
+}
 
 const MIN_MATCH: usize = 4;
 const WILDCOPY_LENGTH: usize = 8;
@@ -87,7 +114,7 @@ const INC32: [usize; 8] = [0, 1, 2, 1, 0, 4, 4, 4];
 const DEC64: [isize; 8] = [0, 0, 0, -1, -4, 1, 2, 3];
 
 /// The most bytes the block of an input of `n` bytes takes (liblz4's `LZ4_compressBound`).
-pub(crate) const fn compress_bound(n: usize) -> usize {
+pub const fn compress_bound(n: usize) -> usize {
     n + n / 255 + 16
 }
 
@@ -414,7 +441,7 @@ unsafe fn compress_generic<T: Table>(src: &[u8], dst: *mut u8, table: &mut T) ->
 }
 
 /// Appends the LZ4 block of `input` to `out`.
-pub(crate) fn compress_block_into(input: &[u8], out: &mut Vec<u8>) {
+pub fn compress_block_into(input: &[u8], out: &mut Vec<u8>) {
     assert!(input.len() <= MAX_INPUT_SIZE, "an LZ4 block holds at most 2,113,929,216 bytes");
     let bound = compress_bound(input.len());
     out.reserve(bound);
@@ -434,7 +461,7 @@ pub(crate) fn compress_block_into(input: &[u8], out: &mut Vec<u8>) {
 }
 
 /// `input` as an LZ4 block.
-pub(crate) fn compress_block(input: &[u8]) -> Vec<u8> {
+pub fn compress_block(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     compress_block_into(input, &mut out);
     out
@@ -861,11 +888,7 @@ unsafe fn copy_match(out: *mut u8, cap: usize, d: &mut Decoder) -> Result<(), Ba
 
 /// Appends to `out` the bytes an LZ4 block decompresses to, which must be `size` long; `out` is
 /// as it was when the block is refused.
-pub(crate) fn decompress_block_into(
-    block: &[u8],
-    size: usize,
-    out: &mut Vec<u8>,
-) -> Result<(), Bad> {
+pub fn decompress_block_into(block: &[u8], size: usize, out: &mut Vec<u8>) -> Result<(), Bad> {
     out.reserve(size);
     let len = out.len();
     // SAFETY: `reserve` leaves room for `size` bytes past `len`; `decompress_generic` writes every
@@ -881,14 +904,14 @@ pub(crate) fn decompress_block_into(
 }
 
 /// The bytes an LZ4 block decompresses to, which must be `size` long.
-pub(crate) fn decompress_block(block: &[u8], size: usize) -> Result<Vec<u8>, Bad> {
+pub fn decompress_block(block: &[u8], size: usize) -> Result<Vec<u8>, Bad> {
     let mut out = Vec::new();
     decompress_block_into(block, size, &mut out)?;
     Ok(out)
 }
 
 /// `payload` compressed: its length as a varint, then its LZ4 block.
-pub(crate) fn compress(payload: &[u8]) -> Vec<u8> {
+pub fn compress(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(10 + compress_bound(payload.len()));
     put_varint(&mut out, payload.len() as u64);
     compress_block_into(payload, &mut out);
@@ -896,7 +919,7 @@ pub(crate) fn compress(payload: &[u8]) -> Vec<u8> {
 }
 
 /// What [`compress`] wrote, back; at most `max` bytes.
-pub(crate) fn decompress(body: &[u8], max: usize) -> Result<Vec<u8>, Bad> {
+pub fn decompress(body: &[u8], max: usize) -> Result<Vec<u8>, Bad> {
     let mut at = 0;
     let size = usize::try_from(get_varint(body, &mut at)?).map_err(|_| Bad)?;
     if size > max {

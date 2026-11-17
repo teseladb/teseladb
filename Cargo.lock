@@ -227,9 +227,14 @@ dependencies = [
  "teseladb-deflate",
  "teseladb-hash",
  "teseladb-keys",
+ "teseladb-lz4",
  "teseladb-raftlog",
  "teseladb-types",
 ]
+
+[[package]]
+name = "teseladb-lz4"
+version = "0.1.0"
 
 [[package]]
 name = "teseladb-mcp"
@@ -304,6 +309,7 @@ version = "0.4.0"
 dependencies = [
  "teseladb-crypto",
  "teseladb-hash",
+ "teseladb-lz4",
  "teseladb-stages",
  "teseladb-types",
 ]

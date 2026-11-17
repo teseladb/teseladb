@@ -17,5 +17,6 @@ teseladb-crypto = { workspace = true }
 teseladb-deflate = { workspace = true }
 teseladb-hash = { workspace = true }
 teseladb-keys = { path = "../teseladb-keys" }
+teseladb-lz4 = { workspace = true }
 teseladb-raftlog = { workspace = true }
 teseladb-types = { workspace = true }

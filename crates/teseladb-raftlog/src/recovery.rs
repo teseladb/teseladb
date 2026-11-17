@@ -19,7 +19,7 @@ use crate::group_log::{GroupLog, HardState, LogEntry, SnapshotMeta};
 use crate::paths;
 use crate::sim_disk::SECTOR;
 use crate::wal::WalSegmentInfo;
-use crate::wal::{SEALED_REGION_MAGIC, open_region};
+use crate::wal::{SEALED_REGION_MAGIC, decompress_region, is_compressed_region, open_region};
 use teseladb_crypto::at_rest::{Encryption, FileKey};
 
 /// Recovered group.
@@ -296,7 +296,8 @@ fn segment_key(
         .map_err(|_| StorageError::Invalid("the master key does not open the WAL"))
 }
 
-/// The records of a region, opened with the segment's key when it is sealed.
+/// The records of a region, opened with the segment's key when it is sealed and decompressed when
+/// it is compressed.
 fn region_records(
     region: &[u8],
     path: &Path,
@@ -304,15 +305,21 @@ fn region_records(
     key: Option<(&FileKey, u64, u64)>,
 ) -> Result<Vec<WalRecord>, StorageError> {
     let sealed = region.get(..2) == Some(&SEALED_REGION_MAGIC.to_le_bytes()[..]);
-    match (sealed, key) {
-        (false, _) => wal_records(region, path, base),
+    let opened;
+    let plain = match (sealed, key) {
+        (false, _) => region,
         (true, Some((k, segment, batch))) => {
-            let plain =
+            opened =
                 open_region(k, segment, batch, region).ok_or_else(|| corrupt(path, base as u64))?;
-            wal_records(&plain, path, base)
+            &opened[..]
         }
-        (true, None) => Err(corrupt(path, base as u64)),
+        (true, None) => return Err(corrupt(path, base as u64)),
+    };
+    if is_compressed_region(plain) {
+        let records = decompress_region(plain).ok_or_else(|| corrupt(path, base as u64))?;
+        return wal_records(&records, path, base);
     }
+    wal_records(plain, path, base)
 }
 
 /// Records of a WAL region (up to the zero padding).

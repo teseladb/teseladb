@@ -27,4 +27,5 @@ undocumented_unsafe_blocks = "deny"
 teseladb-types.workspace = true
 teseladb-hash.workspace = true
 teseladb-crypto.workspace = true
+teseladb-lz4.workspace = true
 teseladb-stages = { path = "../teseladb-stages" }

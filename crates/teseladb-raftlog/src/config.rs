@@ -25,6 +25,9 @@ pub struct StorageConfig {
     /// current WAL segment is written while the ones before it wait for their syncs, and every
     /// batch becomes durable after those before it.
     pub max_inflight_batches: usize,
+    /// Whether the WAL's regions go compressed when that makes them shorter (data format 11);
+    /// `false` writes them as they are, as the nodes of format 10 did.
+    pub compress_wal: bool,
 }
 
 impl Default for StorageConfig {
@@ -39,6 +42,7 @@ impl Default for StorageConfig {
             node_id: 0,
             encryption: None,
             max_inflight_batches: 1,
+            compress_wal: true,
         }
     }
 }

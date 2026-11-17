@@ -477,6 +477,10 @@ impl Ops {
     }
 }
 
+/// A row a partition's filtered scan accepted, with how many documents the merged scan had
+/// examined when it took it (D-186).
+type SeenRow = (Vec<u8>, (usize, Vec<u8>));
+
 /// A backend whose every call first checks the operation's deadline and whether `killOp` marked
 /// it.
 pub struct Guarded<'a, B: Backend + ?Sized> {
@@ -581,7 +585,7 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
         limit: usize,
         backward: bool,
         concern: ReadConcern,
-    ) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, CommandError> {
+    ) -> Result<Option<crate::commands::Rows>, CommandError> {
         let Some(spans) = self.partition_spans(start, end) else { return Ok(None) };
         let spans: Vec<crate::commands::Span> = spans
             .into_iter()
@@ -1188,7 +1192,7 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
                 |k: &[u8]| frontier.as_deref().is_none_or(|f| after_number(k) < after_number(f));
             let examined: usize = parts.iter().map(|m| m.examined).sum();
             let mut seen_before = 0;
-            let lists: Vec<Vec<(Vec<u8>, (usize, Vec<u8>))>> = parts
+            let lists: Vec<Vec<SeenRow>> = parts
                 .into_iter()
                 .map(|m| {
                     let offset = seen_before;

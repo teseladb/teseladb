@@ -118,6 +118,11 @@ impl Completions {
 pub(crate) struct Counters {
     pub(crate) user_bytes: u64,
     pub(crate) written_bytes: u64,
+    /// Bytes of the files written into each level, level 0 (the flushes) first, history files
+    /// included; value files apart.
+    pub(crate) level_written: Vec<u64>,
+    /// Bytes of the value files written (FR-034).
+    pub(crate) value_written: u64,
     pub(crate) compactions: u64,
     pub(crate) stalls: u64,
     pub(crate) rejects: u64,

@@ -8,7 +8,6 @@ use teseladb_keys::partition::Partitions;
 use teseladb_meta::catalog::{CatalogCommand, CollectionEntry, Namespace, PARTITIONS};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{Group0Result, Group0Sm};
-use teseladb_multiraft::StateMachine;
 
 fn ns(coll: &str) -> Namespace {
     Namespace { db: "db".into(), coll: coll.into() }

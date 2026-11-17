@@ -75,7 +75,8 @@ fn fill(m: &mut Mem, coll: &str, parts: u8) {
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     m.partitions = 1;
     let index = d(&[("key", d(&[("v", 1.into())])), ("name", s("v_1"))]);
-    let r = guarded(m, doc(&[("createIndexes", s(coll)), ("indexes", Value::Array(vec![index]))]));
+    // A catalog change, which does not read the partitions: as the module runs it alone.
+    let r = m.run("db", doc(&[("createIndexes", s(coll)), ("indexes", Value::Array(vec![index]))]));
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     let docs: Vec<Value> = (0..3000)
         .map(|i: i32| d(&[("_id", i.into()), ("v", (i % 17).into()), ("g", (i % 5).into())]))

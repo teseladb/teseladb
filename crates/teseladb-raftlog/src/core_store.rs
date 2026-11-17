@@ -222,7 +222,8 @@ impl CoreStore {
     pub(crate) fn empty(cfg: StorageConfig, core: u16, first_batch: u64) -> CoreStore {
         let node_id = cfg.node_id;
         let wal = WalWriter::new(core, node_id, cfg.wal_segment_size)
-            .with_encryption(cfg.encryption.clone());
+            .with_encryption(cfg.encryption.clone())
+            .with_compression(cfg.compress_wal);
         let flush = FlushScheduler::new(&cfg);
         CoreStore {
             cfg,

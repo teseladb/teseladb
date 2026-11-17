@@ -28,6 +28,10 @@ fn every_metric_follows_what_happened() {
     assert_eq!(one.level_files[..2], [1, 0]);
     assert!(one.level_bytes[0] > 0 && one.cache_bytes > 0, "{one:?}");
     assert!(one.write_amp > 1.0, "a file is larger than the bytes written: {one:?}");
+    // The flush wrote level 0: every byte written so far, of the 1,001 its caller gave.
+    assert_eq!(one.user_bytes_total, 1001);
+    assert_eq!(one.level_written_total, [one.level_bytes[0]]);
+    assert_eq!(one.value_written_total, 0);
     // With two files in level 0 the next write is made while the LSM asks to slow down.
     lsm.put(G, 2, b"b", ts(2, 0), b"v").unwrap();
     lsm.flush();
@@ -42,6 +46,14 @@ fn every_metric_follows_what_happened() {
     assert_eq!(compacted.level_bytes[0], 0);
     assert_eq!(compacted.level_files[..2], [0, 1]);
     assert!(compacted.level_bytes[1] > 0);
+    // The compaction's file counts in level 1; the three flushes stay in level 0.
+    let flushed = compacted.level_written_total[0];
+    assert!(flushed > one.level_written_total[0], "{compacted:?}");
+    assert_eq!(compacted.level_written_total[1], compacted.level_bytes[1]);
+    assert_eq!(
+        (flushed + compacted.level_written_total[1]) as f64 / compacted.user_bytes_total as f64,
+        compacted.write_amp
+    );
     // A point read searches one file; the second read of the same block finds it cached.
     let v = lsm.view();
     get(&mut lsm, &mut disk, &v, b"a", ts(9, 0)).unwrap();

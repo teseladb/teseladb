@@ -27,7 +27,7 @@ pub(crate) mod columns;
 pub(crate) mod delta;
 pub(crate) mod elias_fano;
 pub(crate) mod filter;
-pub(crate) mod lz4;
+pub(crate) use teseladb_lz4 as lz4;
 pub(crate) mod meta;
 pub(crate) mod pgm;
 pub(crate) mod reader;

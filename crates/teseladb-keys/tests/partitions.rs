@@ -86,7 +86,7 @@ fn an_interval_of_the_collection_is_read_in_every_partition() {
     let entries = |n: u32| KeyBuilder::index_prefix(TENANT, n, 2).as_bytes().to_vec();
     // The documents of the collection: those of each partition.
     let spans =
-        parts.spans(&docs(40), &KeyBuilder::index_prefix(TENANT, 40, 1).as_bytes().to_vec());
+        parts.spans(&docs(40), KeyBuilder::index_prefix(TENANT, 40, 1).as_bytes());
     let want: Vec<_> = (40..43)
         .map(|n| (docs(n), KeyBuilder::index_prefix(TENANT, n, 1).as_bytes().to_vec()))
         .collect();

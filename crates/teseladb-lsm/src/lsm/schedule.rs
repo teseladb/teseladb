@@ -127,6 +127,7 @@ impl Lsm {
             if !old.contains_key(n) {
                 self.reader.cache.pin_meta(v.number, v.meta.clone());
                 self.counters.written_bytes += v.size;
+                self.counters.value_written += v.size;
                 self.counters.note_codes(v);
             }
         }
@@ -195,7 +196,7 @@ impl Lsm {
                     self.graveyard.push(flushed);
                 }
                 if let Some(t) = table {
-                    self.adopt(&t);
+                    self.adopt(0, &t);
                     v.levels[0].insert(0, Arc::new(*t));
                 }
                 let before = std::mem::replace(&mut self.version, Arc::new(v));
@@ -259,12 +260,17 @@ impl Lsm {
         }
     }
 
-    /// Takes a file this LSM wrote or ingested, and its history file: their metadata stays in
-    /// the cache and their bytes count as written.
-    fn adopt(&mut self, t: &Table) {
+    /// Takes a file this LSM wrote or ingested into `level`, and its history file: their
+    /// metadata stays in the cache and their bytes count as written, and as written into the level.
+    fn adopt(&mut self, level: u8, t: &Table) {
+        let level = usize::from(level);
+        if self.counters.level_written.len() <= level {
+            self.counters.level_written.resize(level + 1, 0);
+        }
         for f in std::iter::once(t).chain(t.history.as_deref()) {
             self.reader.cache.pin_meta(f.number, f.meta.clone());
             self.counters.written_bytes += f.size;
+            self.counters.level_written[level] += f.size;
             self.counters.note_codes(f);
         }
     }
@@ -288,7 +294,7 @@ impl Lsm {
             }
         }
         for (level, t) in added {
-            self.adopt(&t);
+            self.adopt(level, &t);
             v.levels[usize::from(level)].push(Arc::new(t));
         }
         // Level 0 from the newest file, as recovery orders it: an ingested file of level 0 has a

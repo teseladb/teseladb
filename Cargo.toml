@@ -14,6 +14,7 @@ teseladb-x509 = { path = "crates/teseladb-x509" }
 teseladb-tls = { path = "crates/teseladb-tls" }
 teseladb-bson = { path = "crates/teseladb-bson" }
 teseladb-compress = { path = "crates/teseladb-compress" }
+teseladb-lz4 = { path = "crates/teseladb-lz4" }
 teseladb-deflate = { path = "crates/teseladb-deflate" }
 teseladb-http = { path = "crates/teseladb-http" }
 teseladb-tz = { path = "crates/teseladb-tz" }
