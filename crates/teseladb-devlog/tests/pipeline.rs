@@ -123,6 +123,32 @@ impl Disk for Slow {
     }
 }
 
+/// Runs the copy forward due, if one is, as the node's writer does apart from its operations: its
+/// reads on `disk` and what they read back to the log. The answers it gives (a failed read).
+fn copy_apart(state: &mut LogState, disk: &mut dyn Disk) -> Vec<(u16, IoDone)> {
+    let Some(job) = state.copy_job() else { return Vec::new() };
+    let mut read = Ok(Vec::new());
+    for op in job.reads {
+        let IoOp::ReadAt { offset, len, .. } = op else { panic!("a copy only reads") };
+        match disk.execute(op) {
+            IoDone::Read { data: Ok(d), .. } if d.len() == len as usize => {
+                if let Ok(v) = &mut read {
+                    v.push((offset, d));
+                }
+            }
+            IoDone::Read { data: Err(e), .. } | IoDone::Err { errno: e, .. } => {
+                read = Err(e);
+                break;
+            }
+            _ => {
+                read = Err(IoErrno::Io);
+                break;
+            }
+        }
+    }
+    state.copy_done(job.file, read)
+}
+
 /// A write of `data` to the end of a core's segment followed by a sync, at `at`. With `rotate`
 /// the core first starts a new segment and removes the one before.
 struct Arrival {
@@ -191,6 +217,8 @@ fn drive(state: &mut LogState, slow: &mut Slow, arrivals: &[Arrival]) -> Vec<Ans
             }
             let ready = state.next(slow, &mut ops);
             got.extend(ready.into_iter().map(|a| (slow.now, state.syncs(), a)));
+            let copied = copy_apart(state, slow);
+            got.extend(copied.into_iter().map(|a| (slow.now, state.syncs(), a)));
             for op in ops.drain(..) {
                 slow.submit(op);
             }
@@ -361,6 +389,7 @@ fn settle(state: &mut LogState, disk: &mut SimDisk) -> Vec<(u16, IoDone)> {
     let mut ops = Vec::new();
     loop {
         answers.extend(state.next(disk, &mut ops));
+        answers.extend(copy_apart(state, disk));
         if ops.is_empty() {
             return answers;
         }

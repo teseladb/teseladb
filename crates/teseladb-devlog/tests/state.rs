@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use teseladb_devlog::state::{KEPT_FILES, LogState, SpareJob};
+use teseladb_devlog::state::{CopyJob, KEPT_FILES, LogState, SpareJob};
 use teseladb_raftlog::{
     Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, SimDisk, SimDiskConfig, StorageError,
 };
@@ -876,4 +876,139 @@ fn a_crash_while_a_file_is_made_ahead_keeps_every_answered_write() {
             assert!(matches!(s.flush(&mut disk)[0].1, IoDone::Ok(_)), "cut {cut}");
         }
     }
+}
+
+/// Runs the reads of a [`CopyJob`] on `disk`: what they read at each offset.
+fn run_copy(
+    disk: &mut dyn Disk,
+    job: CopyJob,
+) -> Result<Vec<(u64, teseladb_types::Bytes)>, IoErrno> {
+    let mut out = Vec::new();
+    for op in job.reads {
+        let IoOp::ReadAt { offset, .. } = op else { panic!("a copy only reads") };
+        match disk.execute(op) {
+            IoDone::Read { data: Ok(d), .. } => out.push((offset, d)),
+            IoDone::Read { data: Err(e), .. } | IoDone::Err { errno: e, .. } => return Err(e),
+            IoDone::Ok(_) => panic!("a read gives its data"),
+        }
+    }
+    Ok(out)
+}
+
+/// A sync of `core` driven as the node's writer drives it, with `next` and the results of its
+/// operations: no copy forward runs inside it.
+fn pipeline_sync(s: &mut LogState, disk: &mut dyn Disk, core: u16, n: u64) {
+    s.sync(core, sync_op(n));
+    let mut answers = Vec::new();
+    let mut ops = Vec::new();
+    loop {
+        answers.extend(s.next(disk, &mut ops));
+        if ops.is_empty() {
+            break;
+        }
+        for op in ops.drain(..) {
+            answers.extend(s.on_done(&disk.execute(op)));
+        }
+    }
+    assert!(answers.iter().all(|(_, d)| matches!(d, IoDone::Ok(_))), "{answers:?}");
+}
+
+/// A copy forward reads the pieces the oldest file still holds in few long reads, apart from the
+/// writer; what the cores write, cut or remove while those reads run wins over the copy.
+#[test]
+fn a_copy_forward_reads_apart_and_what_comes_meanwhile_wins() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    let mut model = Model::new();
+    // Core 1: twenty small pieces of segment 1 and a padded batch of segment 2, in one record of
+    // the first file.
+    s.create(1, 1, 0);
+    s.create(1, 2, 0);
+    model.insert((1, 1), Vec::new());
+    for i in 0..20u64 {
+        let piece: Vec<u8> = (0..100).map(|b| (b + i) as u8).collect();
+        s.write(1, 1, i * 100, &piece);
+        put(&mut model, (1, 1), i * 100, &piece);
+    }
+    s.write(1, 2, 0, &batch(b"padded"));
+    model.insert((1, 2), batch(b"padded"));
+    pipeline_sync(&mut s, &mut disk, 1, 0);
+    // Core 0 writes until the oldest file is due for a copy.
+    let block = varied(8000);
+    let mut job = None;
+    let mut last = 0;
+    for w in 1..40u64 {
+        s.create(0, w, 0);
+        s.write(0, w, 0, &block);
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+        pipeline_sync(&mut s, &mut disk, 0, w);
+        job = s.copy_job();
+        if job.is_some() {
+            model.insert((0, w), block.clone());
+            last = w;
+            break;
+        }
+    }
+    let job = job.expect("the oldest file is due for a copy");
+    assert_eq!(job.reads.len(), 1, "{:?}", job.reads);
+    assert!(s.copy_job().is_none(), "one copy at a time");
+    // Meanwhile core 1 overwrites a piece, cuts the segment in the middle of another and removes
+    // its second segment.
+    s.write(1, 1, 300, b"newer");
+    put(&mut model, (1, 1), 300, b"newer");
+    s.truncate(1, 1, 1250);
+    model.get_mut(&(1, 1)).unwrap().truncate(1250);
+    s.remove(1, 2);
+    model.remove(&(1, 2));
+    pipeline_sync(&mut s, &mut disk, 1, 50);
+    let file = job.file;
+    let read = run_copy(&mut disk, job);
+    assert!(s.copy_done(file, read).is_empty());
+    pipeline_sync(&mut s, &mut disk, 1, 51);
+    assert!(s.stats().copied_bytes > 0 && s.stats().copied_bytes < 2000, "{:?}", s.stats());
+    // The copied file goes, and everything reads as the cores left it.
+    for k in 1..5u64 {
+        s.write(0, last, 8000 * k, &block);
+        put(&mut model, (0, last), 8000 * k, &block);
+        pipeline_sync(&mut s, &mut disk, 0, 100 + k);
+    }
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let w0: Vec<u64> = model.keys().filter(|k| k.0 == 0).map(|k| k.1).collect();
+    assert_eq!(again.segments_of(0), w0);
+    for (key, want) in &model {
+        assert_eq!(&again.read(&mut disk, key.0, key.1).unwrap(), want, "{key:?}");
+    }
+    assert!(!files(&mut disk).iter().any(|p| p == &teseladb_devlog::format::segment_path(file)));
+}
+
+/// A read of a copy forward that fails stops the log, as the read did when it ran in the writer.
+#[test]
+fn a_failed_read_of_a_copy_forward_stops_the_log() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.create(1, 1, 0);
+    s.write(1, 1, 0, b"held");
+    pipeline_sync(&mut s, &mut disk, 1, 0);
+    let block = varied(8000);
+    let job = (1..40u64)
+        .find_map(|w| {
+            s.create(0, w, 0);
+            s.write(0, w, 0, &block);
+            if w > 1 {
+                s.remove(0, w - 1);
+            }
+            pipeline_sync(&mut s, &mut disk, 0, w);
+            s.copy_job()
+        })
+        .expect("due");
+    s.sync(0, sync_op(77));
+    let answers = s.copy_done(job.file, Err(IoErrno::Io));
+    assert!(matches!(answers[..], [(0, IoDone::Err { errno: IoErrno::Io, .. })]), "{answers:?}");
+    assert_eq!(s.failed(), Some(IoErrno::Io));
 }
