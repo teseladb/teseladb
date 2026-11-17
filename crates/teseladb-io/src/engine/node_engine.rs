@@ -59,6 +59,9 @@ thread_local! {
 /// How long a start waits for the node engine running in the process to stop.
 const TURN_WAIT: Duration = Duration::from_secs(600);
 
+/// How long an engine that stops waits for the exchanges of its leases ([`EngineLease`]).
+const LEASE_WAIT: Duration = Duration::from_secs(60);
+
 /// The memory of the client engine, in bytes: a client needs little.
 const CLIENT_MEMORY: u64 = 256 << 20;
 
@@ -70,7 +73,7 @@ struct Process {
     gate: Option<Arc<Gate>>,
     /// The client engine, when the engine that runs is one ([`lease_engine`]).
     client: Option<NodeEngine>,
-    /// The leases of the client engine not yet dropped.
+    /// The leases of the engine that runs not yet dropped.
     busy: usize,
 }
 
@@ -128,12 +131,11 @@ impl Drop for Turn {
 /// A way into the engine of the process for a thread that is not a shard (a command of the
 /// command line, a node's own threads): the engine of the node that runs, or else a client
 /// engine of one shard started for it, which runs until a node engine wants the turn and no
-/// lease of it is left. While a lease of a client engine lives, the engine does not stop; a
-/// node engine stops when its node stops it, and what is posted to it then fails instead.
+/// lease of it is left. While a lease lives, its engine does not stop: a node engine stopped
+/// meanwhile waits for it (at most [`LEASE_WAIT`]), and what is posted after the stop fails.
 #[derive(Debug)]
 pub struct EngineLease {
     gate: Arc<Gate>,
-    client: bool,
 }
 
 impl EngineLease {
@@ -154,10 +156,8 @@ impl EngineLease {
 
 impl Drop for EngineLease {
     fn drop(&mut self) {
-        if self.client {
-            process().busy -= 1;
-            CHANGED.notify_all();
-        }
+        process().busy -= 1;
+        CHANGED.notify_all();
     }
 }
 
@@ -172,11 +172,8 @@ pub fn lease_engine(start_client: bool) -> io::Result<EngineLease> {
     loop {
         if let Some(gate) = &p.gate {
             let gate = gate.clone();
-            let client = p.client.is_some();
-            if client {
-                p.busy += 1;
-            }
-            return Ok(EngineLease { gate, client });
+            p.busy += 1;
+            return Ok(EngineLease { gate });
         }
         if !p.running {
             if !start_client {
@@ -518,11 +515,21 @@ impl NodeEngine {
         // A peer port reserved and never listened on goes while shard 0 still runs: queued
         // before the stop below, it runs first.
         let _ = self.post(0).post(peers::release_here);
-        // No lease reaches it any more, and no thread that is not a shard enters it.
+        // No new lease reaches it, and the exchanges of the leases taken end first: one left
+        // waiting on a stopped engine would never get its answer. Then no thread that is not a
+        // shard enters it.
         {
             let mut p = process();
             if p.gate.as_ref().is_some_and(|g| Arc::ptr_eq(g, &self.gate)) {
                 p.gate = None;
+                let until = Instant::now() + LEASE_WAIT;
+                while p.busy > 0 {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    p = CHANGED.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
+                }
             }
         }
         self.gate.close();

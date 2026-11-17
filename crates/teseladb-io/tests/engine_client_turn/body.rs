@@ -57,24 +57,32 @@ fn a_node_engine_takes_the_turn_of_an_idle_client_engine() {
     println!("a_node_engine_takes_the_turn_of_an_idle_client_engine: ok");
 }
 
-/// A lease of a node engine that stops fails its posts instead of aborting, and the next lease
-/// starts a client engine.
-fn a_lease_of_a_stopped_node_engine_fails_and_the_next_one_starts_a_client() {
+/// A node engine that stops waits for the leases taken on it (an exchange left on a stopped
+/// engine would never get its answer: the bench's tests hung so), and the next lease starts a
+/// client engine.
+fn a_stopping_node_engine_waits_for_its_leases_and_the_next_one_starts_a_client() {
     let node = node_engine();
     let lease = lease_engine(false).expect("the node engine is the process's");
-    node.stop();
-    assert!(!lease.post(|| {}), "a post to a stopped engine fails");
+    let (tx, rx) = mpsc::channel();
+    let stopper = thread::spawn(move || {
+        node.stop();
+        let _ = tx.send(());
+    });
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the stop waits for the lease");
+    assert!(runs_on_a_shard(&lease), "the engine still runs under its lease");
     drop(lease);
+    rx.recv_timeout(T).expect("the stop ends once the lease is gone");
+    stopper.join().expect("the stopper");
     assert!(lease_engine(false).is_err(), "no engine runs");
     let lease = lease_engine(true).expect("a client engine starts");
     assert!(runs_on_a_shard(&lease));
     drop(lease);
     // The client engine gives its turn to the next node engine.
     node_engine().stop();
-    println!("a_lease_of_a_stopped_node_engine_fails_and_the_next_one_starts_a_client: ok");
+    println!("a_stopping_node_engine_waits_for_its_leases_and_the_next_one_starts_a_client: ok");
 }
 
 pub fn main() {
     a_node_engine_takes_the_turn_of_an_idle_client_engine();
-    a_lease_of_a_stopped_node_engine_fails_and_the_next_one_starts_a_client();
+    a_stopping_node_engine_waits_for_its_leases_and_the_next_one_starts_a_client();
 }
