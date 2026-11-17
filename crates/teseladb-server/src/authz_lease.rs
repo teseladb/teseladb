@@ -765,6 +765,8 @@ mod tests {
     /// requests and answers that went (013 FR-012).
     #[test]
     fn a_node_without_a_lease_says_why() {
+        // In its turn: a node's start-up takes the pending log lines of the whole process.
+        let _turn = crate::outbound::test_engine::exclusive();
         let mut c = Cluster::new();
         c.steps(300);
         let held = c.cut_off_the_leader();

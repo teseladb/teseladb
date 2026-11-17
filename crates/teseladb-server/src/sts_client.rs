@@ -103,7 +103,7 @@ mod tests {
         use teseladb_tls::{CertifiedKey, ServerConfig};
         use teseladb_x509::ext::GeneralName;
 
-        crate::outbound::test_engine::install();
+        let _engine = crate::outbound::test_engine::scoped();
         let dir = std::env::temp_dir().join(format!("teseladb-sts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()

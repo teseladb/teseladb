@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn keys_are_read_through_discovery_and_kept() {
-        crate::outbound::test_engine::install();
+        let _engine = crate::outbound::test_engine::scoped();
         let dir = std::env::temp_dir().join(format!("teseladb-oidc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = std::time::SystemTime::now()

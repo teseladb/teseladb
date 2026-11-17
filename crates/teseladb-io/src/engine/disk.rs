@@ -7,8 +7,8 @@
 //! One [`ShardDisk`] per shard, made on that shard and used only there (it is not `Send`):
 //!
 //! - [`IoGroups::get_or_create`], from any shard and any number of callers at once: the
-//!   scheduling groups of the three classes, made once per engine on shard 0 and destroyed when
-//!   that engine exits.
+//!   scheduling groups of the three classes, made once per engine on shard 0 and known only to
+//!   that engine's shards.
 //! - [`ShardDisk::open`] (the files under a data directory), or [`ShardDisk::mem`] (a [`MemDisk`]
 //!   or any other model of a disk, [`ShardDisk::model`],
 //!   for `teseladb dev` and the tests), with the same contract.

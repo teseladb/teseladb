@@ -39,9 +39,19 @@ fn temp_file(name: &str, bytes: &[u8]) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// One try of 2 s per query (`RES_OPTIONS`), set before the first lookup of the process: glibc's
+/// resolver threads read it once, when they start, and the tests run in either order (with the
+/// default 5 s and 2 tries a lookup the silent server holds outlives its 10 s deadline).
+fn quick_resolver() {
+    // SAFETY: set on the engine's thread before this test's lookups; the tests of this file run
+    // their cases one at a time on it, and every case that looks up a name calls this first.
+    unsafe { std::env::set_var("RES_OPTIONS", "timeout:2 attempts:1") };
+}
+
 // Names of /etc/hosts and numeric addresses; a name with a NUL is refused.
 teseladb::engine_test_case!(resolves_hosts_and_literals, {
     make_coroutine(async move {
+        quick_resolver();
         let local = resolve("localhost", 80, T).await?;
         assert!(local.contains(&"127.0.0.1:80".parse().unwrap()), "{local:?}");
         let mut unique = local.clone();
@@ -83,6 +93,7 @@ teseladb::engine_test_case!(reads_files_with_the_engine, {
 
 /// A DNS server that never answers, on 127.0.0.1:53, while the process lives.
 fn silent_dns() {
+    quick_resolver();
     let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
     let first = conf.lines().find_map(|l| l.strip_prefix("nameserver")).map(str::trim);
     assert_eq!(first, Some("127.0.0.1"), "run the container with --dns 127.0.0.1");
@@ -91,8 +102,6 @@ fn silent_dns() {
         let mut buf = [0u8; 512];
         while sock.recv(&mut buf).is_ok() {}
     });
-    // SAFETY: set before any lookup of this test starts its threads; one try of 2 s per query.
-    unsafe { std::env::set_var("RES_OPTIONS", "timeout:2 attempts:1") };
 }
 
 // A lookup that waits 2 s on a DNS server that does not answer leaves the shard free: its timers

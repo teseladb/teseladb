@@ -5,27 +5,27 @@
 //! with the least, so the log does not wait behind the data nor a client's read behind a
 //! compaction. The groups also account the CPU time of the operations' continuations.
 //!
-//! The groups belong to the engine that made them, not to the process: a scheduling group has a
-//! task queue on each reactor of its engine, and an engine stopped and started again in one
-//! process (a node restarted, the tests) has new reactors with no queue for the groups of the
-//! previous one. So the groups are made once per engine, and destroyed when that engine exits,
-//! which also gives their ids back (the engine has a fixed number of them for the whole process).
+//! The groups belong to the engine that made them: a scheduling group has a task queue only on
+//! the reactors of the engine that created it, and an engine stopped and started again in one
+//! process (a node restarted in place, the tests) has new reactors with no queue for the groups
+//! of the previous one. So what an engine knows of its groups lives in the thread-locals of its
+//! own shards, and goes with them: the next engine makes its own, and a late caller of a
+//! stopping engine can never hand its groups to the next one.
+//!
+//! The groups are not destroyed when their engine stops: tasks of a stopping node (an engine
+//! thread parked on a timer) may still be scheduled in them until the last shard stops, and a
+//! destroyed group's tasks have no queue. Their numbers stay taken, as in a process of the
+//! reference, which runs one engine; a process that starts more engines than the engine has
+//! groups for runs the disk classes of the later ones in the default group.
 
 use std::cell::{Cell, RefCell};
 
-use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::future::{
-    ExceptionPtr, Future, make_exception_future, make_ready_future,
-};
-use teseladb::engine::core::reactor::{
-    create_scheduling_group, destroy_scheduling_group, engine_logger, internal,
-};
-use teseladb::engine::core::scheduling::SchedulingGroup;
+use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
+use teseladb::engine::core::reactor::{create_scheduling_group, internal};
+use teseladb::engine::core::scheduling::{SchedulingGroup, default_scheduling_group};
 use teseladb::engine::core::shared_future::SharedPromise;
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
-use teseladb::engine::util::log::FormatInfo;
-use teseladb::engine::util::noncopyable_function::NoncopyableFunction;
 
 use crate::IoClass;
 
@@ -47,28 +47,22 @@ pub struct IoGroups {
 /// The shard that makes the groups, so that callers on several shards share one creation.
 const CREATOR_SHARD: u32 = 0;
 
-/// On [`CREATOR_SHARD`], where the groups of the running engine are.
+/// On [`CREATOR_SHARD`], where the groups of its engine are.
 enum Creation {
-    /// Not asked for yet in this engine.
+    /// Not asked for yet.
     Absent,
     /// Being made: the callers that come meanwhile wait for it.
     Making(SharedPromise<IoGroups>),
-    /// Made, until the engine exits.
+    /// Made (or, with no group left, the default group for every class).
     Made(IoGroups),
-    /// The engine is exiting and the groups are gone (or going): nothing makes them again.
-    Gone,
 }
 
 thread_local! {
     /// On [`CREATOR_SHARD`], the groups of the engine whose shard this thread is.
     static CREATION: RefCell<Creation> = const { RefCell::new(Creation::Absent) };
-    /// On [`CREATOR_SHARD`], whether the engine of this thread destroys the groups at its exit.
-    static EXIT_HOOKED: Cell<bool> = const { Cell::new(false) };
-    /// On every shard, the groups this shard already got from [`CREATOR_SHARD`]. Forgotten when
-    /// the engine exits and again when the shard's reactor is destroyed, so that a later engine on
-    /// the same thread never sees the groups of an earlier one.
+    /// On every shard, the groups this shard already got from [`CREATOR_SHARD`].
     static KNOWN: Cell<Option<IoGroups>> = const { Cell::new(None) };
-    /// Whether this shard's reactor forgets [`KNOWN`] when it is destroyed.
+    /// Whether this shard's reactor forgets its groups when it is destroyed.
     static FORGET_HOOKED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -77,9 +71,8 @@ impl IoGroups {
     /// that come while they are being made, from any shard, wait for that one creation: a node's
     /// start asks from several tasks at once (the clock's keeper, the device log's writer and the
     /// cores' disks), and a second creation would make each group again under the same name,
-    /// which the engine refuses when it registers the group's metrics a second time.
-    ///
-    /// Fails once the engine is exiting (the groups are destroyed then).
+    /// which the engine refuses when it registers the group's metrics a second time. When the
+    /// engine has no scheduling groups left, every class runs in the default group.
     pub fn get_or_create() -> Future<IoGroups> {
         if let Some(g) = KNOWN.get() {
             return make_ready_future(g);
@@ -88,16 +81,6 @@ impl IoGroups {
             remember(g);
             Ok::<_, ExceptionPtr>(g)
         })
-    }
-
-    /// Ties the groups to the life of the running engine before any is made: they are destroyed
-    /// when it exits. Called on [`CREATOR_SHARD`] when the engine starts, while it is not stopping
-    /// (the engine takes exit hooks only then). [`IoGroups::get_or_create`] ties them by itself
-    /// when nothing did; this call only makes sure a creation that starts while the engine is
-    /// already stopping finds the hook in place.
-    pub fn tie_to_engine() {
-        debug_assert_eq!(teseladb::engine::core::shard_id::this_shard_id(), CREATOR_SHARD);
-        hook_exit();
     }
 
     /// The scheduling group of `class`.
@@ -109,67 +92,50 @@ impl IoGroups {
             IoClass::Background => self.background,
         }
     }
-
-    fn all(self) -> [SchedulingGroup; 3] {
-        [self.log, self.data, self.background]
-    }
 }
 
-/// Keeps `g` on the calling shard until its engine exits or its reactor goes.
+/// Keeps `g` on the calling shard until its reactor goes: an engine run again on the same thread
+/// (an application's run after another) starts from nothing.
 fn remember(g: IoGroups) {
     KNOWN.set(Some(g));
-    if !FORGET_HOOKED.replace(true) {
-        internal::at_destroy(|| {
-            KNOWN.set(None);
-            FORGET_HOOKED.set(false);
-        });
-    }
+    hook_forget();
 }
 
-/// Registers, once per engine, the destruction of the groups at the engine's exit.
-fn hook_exit() {
-    if EXIT_HOOKED.replace(true) {
+/// Registers, once per reactor, forgetting this shard's groups when the reactor is destroyed.
+fn hook_forget() {
+    if FORGET_HOOKED.replace(true) {
         return;
     }
-    internal::at_exit(NoncopyableFunction::<fn() -> Future<()>>::new(destroy_at_exit));
-    // The next engine on this thread starts from nothing.
     internal::at_destroy(|| {
+        KNOWN.set(None);
         CREATION.with(|c| *c.borrow_mut() = Creation::Absent);
-        EXIT_HOOKED.set(false);
+        FORGET_HOOKED.set(false);
     });
 }
 
 /// On [`CREATOR_SHARD`]: the groups once made, the creation under way, or a new one that the
-/// callers until it ends share. A creation that fails is not kept: the next caller tries again.
+/// callers until it ends share.
 fn create_once() -> Future<IoGroups> {
-    let waiting = CREATION.with(|c| match &*c.borrow() {
+    let ready = CREATION.with(|c| match &*c.borrow() {
         Creation::Absent => None,
         Creation::Making(p) => Some(p.get_shared_future()),
         Creation::Made(g) => Some(make_ready_future(*g)),
-        Creation::Gone => Some(make_exception_future(ExceptionPtr::from(std::io::Error::other(
-            "the engine is exiting: its disk groups are gone",
-        )))),
     });
-    if let Some(f) = waiting {
+    if let Some(f) = ready {
         return f;
     }
-    hook_exit();
+    hook_forget();
     let promise = SharedPromise::new();
     let made = promise.get_shared_future();
     CREATION.with(|c| *c.borrow_mut() = Creation::Making(promise));
     drop(create().then_wrapped(|done: Future<IoGroups>| {
-        let result = done.get();
-        let kept = match &result {
-            Ok(g) => Creation::Made(*g),
-            Err(_) => Creation::Absent,
-        };
-        // Only this continuation ends a creation: the exit hook waits for it on its promise.
-        let ended = CREATION.with(|c| std::mem::replace(&mut *c.borrow_mut(), kept));
+        let g = done.get().unwrap_or_else(|_| {
+            let d = default_scheduling_group();
+            IoGroups { log: d, data: d, background: d }
+        });
+        let ended = CREATION.with(|c| std::mem::replace(&mut *c.borrow_mut(), Creation::Made(g)));
         if let Creation::Making(mut promise) = ended {
-            match result {
-                Ok(g) => promise.set_value(g),
-                Err(e) => promise.set_exception(e),
-            }
+            promise.set_value(g);
         }
         make_ready_future(())
     }));
@@ -188,53 +154,4 @@ fn create() -> Future<IoGroups> {
             })
         })
     })
-}
-
-/// The engine's exit hook, on [`CREATOR_SHARD`] after the engine drained its background work
-/// and before its other shards stop: the shards forget the groups, then each group is destroyed
-/// on every shard (its task queue goes after the tasks already in it ran) and its id goes back.
-fn destroy_at_exit() -> Future<()> {
-    let making = CREATION.with(|c| {
-        let mut c = c.borrow_mut();
-        // A creation under way: wait for it (its callers still get the groups), then destroy.
-        if let Creation::Making(p) = &*c {
-            return Some(p.get_shared_future());
-        }
-        match std::mem::replace(&mut *c, Creation::Gone) {
-            Creation::Made(g) => Some(make_ready_future(g)),
-            Creation::Absent | Creation::Gone | Creation::Making(_) => None,
-        }
-    });
-    let Some(groups) = making else { return make_ready_future(()) };
-    groups.then_wrapped(|done: Future<IoGroups>| {
-        CREATION.with(|c| *c.borrow_mut() = Creation::Gone);
-        match done.get() {
-            Ok(g) => destroy_now(g),
-            // Nothing was made: nothing to destroy.
-            Err(_) => make_ready_future(()),
-        }
-    })
-}
-
-/// Forgets `g` on every shard and destroys its groups. A failure is logged: the engine's exit goes
-/// on (an exit hook that failed would leave the other shards running).
-fn destroy_now(g: IoGroups) -> Future<()> {
-    make_coroutine(async move {
-        if let Err(e) = Smp::invoke_on_all(|| KNOWN.set(None)).await {
-            log_failure(&e);
-        }
-        for sg in g.all() {
-            if let Err(e) = destroy_scheduling_group(sg).await {
-                log_failure(&e);
-            }
-        }
-        Ok::<(), ExceptionPtr>(())
-    })
-}
-
-fn log_failure(e: &ExceptionPtr) {
-    engine_logger().error(
-        FormatInfo::new("the disk groups were not destroyed at the engine's exit: {}"),
-        format_args!("the disk groups were not destroyed at the engine's exit: {e}"),
-    );
 }

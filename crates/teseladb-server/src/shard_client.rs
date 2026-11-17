@@ -110,12 +110,15 @@ pub fn exchange(target: Target, request: Vec<u8>) -> Future<Response> {
 }
 
 /// The memory of a command-line process's engine, in bytes.
+#[cfg_attr(test, allow(dead_code))]
 const CLIENT_MEMORY: &str = "268435456";
 
 /// The engine of a command-line process, once started.
+#[cfg_attr(test, allow(dead_code))]
 static CLIENT_ENGINE: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Starts an engine of one shard on a thread of its own, which runs until the process ends.
+#[cfg_attr(test, allow(dead_code))]
 fn start_client_engine() -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
     let spawned = std::thread::Builder::new().name("engine".into()).spawn(move || {
@@ -169,6 +172,12 @@ pub fn block_on<T: Send + 'static>(
         return Err(io::Error::other("a shard cannot wait for an exchange"));
     }
     if alien::internal::default_instance().is_null() {
+        // A unit test runs its exchanges on an engine of its own (`test_engine::scoped`): a
+        // client engine, which never stops, would stay for the tests that need no engine or
+        // start a node's.
+        #[cfg(test)]
+        return Err(io::Error::other("a unit test runs its exchanges on test_engine::scoped"));
+        #[cfg(not(test))]
         CLIENT_ENGINE.get_or_init(start_client_engine).clone().map_err(io::Error::other)?;
     }
     #[allow(deprecated, reason = "the process has one engine (D4): its default instance")]

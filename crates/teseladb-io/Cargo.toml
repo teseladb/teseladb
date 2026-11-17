@@ -50,6 +50,15 @@ harness = false
 name = "device_log"
 harness = false
 
+# Engines started and stopped one after the other in one process.
+[[test]]
+name = "engine_late_lookup"
+harness = false
+
+[[test]]
+name = "engine_restart"
+harness = false
+
 [[test]]
 name = "engine_probe"
 harness = false

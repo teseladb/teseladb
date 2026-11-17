@@ -124,6 +124,29 @@ name = "defect_forwarded_connection_no_listener"
 path = "tests/entry/defect_forwarded_connection_no_listener.rs"
 harness = false
 
+# System call failures injected by a seccomp filter (tests/common/syscall_faults.rs), one
+# engine per case, each in a process of its own.
+[[test]]
+name = "cov4_err_disk_test"
+path = "tests/entry/cov4_err_disk_test.rs"
+harness = false
+
+[[test]]
+name = "cov4_err_net_test"
+path = "tests/entry/cov4_err_net_test.rs"
+harness = false
+
+[[test]]
+name = "cov4_err_dns_test"
+path = "tests/entry/cov4_err_dns_test.rs"
+harness = false
+
+# The application template's options and failed starts, one engine per case.
+[[test]]
+name = "cov4_rest_app_test"
+path = "tests/entry/cov4_rest_app_test.rs"
+harness = false
+
 # The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints
 # its results table.
 [[bench]]

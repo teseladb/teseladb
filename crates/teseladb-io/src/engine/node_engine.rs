@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,6 @@ use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::thread::async_ as in_thread;
 
 use super::core_loop::{CoreLogic, CoreSender};
-use super::disk::IoGroups;
 use super::disk_port::{CoreDisk, DiskWaker};
 use super::driver::Driver;
 use super::options::EngineConfig;
@@ -57,24 +56,38 @@ thread_local! {
     static EXIT: RefCell<Option<Rc<Wake>>> = const { RefCell::new(None) };
 }
 
-/// Whether an engine of [`NodeEngine::start`] runs, or is starting, in the process (D4).
-static ENGINE_CLAIMED: AtomicBool = AtomicBool::new(false);
+/// How long a start waits for the node engine running in the process to stop.
+const TURN_WAIT: Duration = Duration::from_secs(600);
 
-/// The process's claim on its one engine, released when dropped.
-struct EngineClaim;
+/// Whether a node engine runs in the process (D4: one at a time).
+static RUNNING: Mutex<bool> = Mutex::new(false);
+/// Signalled when the node engine of the process stops.
+static STOPPED: Condvar = Condvar::new();
 
-impl EngineClaim {
-    fn take() -> io::Result<EngineClaim> {
-        ENGINE_CLAIMED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| EngineClaim)
-            .map_err(|_| io::Error::other("an engine already runs in this process"))
+/// The process's turn to run a node engine, from its start until its thread ended. Starts in
+/// threads of their own (the tests of one binary) take turns instead of racing for the
+/// process's single `alien` instance.
+struct Turn;
+
+impl Turn {
+    /// Waits up to [`TURN_WAIT`] for the node engine running in the process to stop.
+    fn take() -> io::Result<Turn> {
+        let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut running, _) = STOPPED
+            .wait_timeout_while(running, TURN_WAIT, |r| *r)
+            .unwrap_or_else(PoisonError::into_inner);
+        if *running {
+            return Err(io::Error::other("an engine already runs in this process"));
+        }
+        *running = true;
+        Ok(Turn)
     }
 }
 
-impl Drop for EngineClaim {
+impl Drop for Turn {
     fn drop(&mut self) {
-        ENGINE_CLAIMED.store(false, Ordering::Release);
+        *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        STOPPED.notify_one();
     }
 }
 
@@ -83,6 +96,8 @@ pub struct NodeEngine {
     thread: Option<JoinHandle<i32>>,
     gate: Arc<Gate>,
     shards: u16,
+    /// Released once the engine's thread ended.
+    turn: Option<Turn>,
 }
 
 impl std::fmt::Debug for NodeEngine {
@@ -135,17 +150,13 @@ impl NodeEngine {
     /// When another engine runs in the process, or the engine cannot start (its options, its
     /// memory or its CPUs).
     pub fn start(cfg: &EngineConfig) -> io::Result<NodeEngine> {
-        // Claimed before anything starts: the engine registers its instance only once its shards
-        // run, and two starts that both looked before that ran two engines at once.
-        let claim = EngineClaim::take()?;
+        let turn = Turn::take()?;
         if !alien::internal::default_instance().is_null() {
             return Err(io::Error::other("an engine already runs in this process"));
         }
         let args = cfg.args();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<()>>(1);
         let thread = thread::Builder::new().name("engine".into()).spawn(move || {
-            // Released when the engine's thread ends, after its instance is gone.
-            let _claim = claim;
             let config = Config {
                 name: "teseladb".into(),
                 auto_handle_sigint_sigterm: false,
@@ -155,9 +166,6 @@ impl NodeEngine {
             let code = app.run(args, move || {
                 let wake = Rc::new(Wake::default());
                 EXIT.with(|e| *e.borrow_mut() = Some(wake.clone()));
-                // The disk classes' groups are this engine's: destroyed when it exits, so that
-                // the next engine of the process makes its own (023 FR-012).
-                IoGroups::tie_to_engine();
                 // SIGINT and SIGTERM through shard 0's reactor (023 FR-031).
                 let _ = ready_tx.send(super::signals::install_here());
                 make_coroutine(async move {
@@ -175,6 +183,7 @@ impl NodeEngine {
                 thread: Some(thread),
                 gate: Arc::default(),
                 shards: cfg.shards.max(1),
+                turn: Some(turn),
             }),
             Ok(Err(e)) => {
                 // The engine runs: it is stopped like any other before the error goes back.
@@ -182,6 +191,7 @@ impl NodeEngine {
                     thread: Some(thread),
                     gate: Arc::default(),
                     shards: cfg.shards.max(1),
+                    turn: Some(turn),
                 };
                 failed.stop();
                 Err(e)
@@ -354,17 +364,18 @@ impl NodeEngine {
             gate: self.gate.clone(),
             shard: u32::from(shard),
         };
-        // Shard 0 owns the listening socket.
+        // Shard 0 owns the listening socket; the others listen on the concrete address it took,
+        // by which it hands their connections over.
         let c = ctx(0);
         let bound = self
-            .run_on(0, move || peers::listen_here(at, true, cores, c))??
+            .run_on(0, move || peers::listen_here(at, None, cores, c))??
             .ok_or_else(|| io::Error::other("the listening socket has no address"))?;
         for shard in base..base + cores {
             if shard == 0 {
                 continue;
             }
             let c = ctx(shard);
-            self.run_on(shard, move || peers::listen_here(at, false, cores, c))??;
+            self.run_on(shard, move || peers::listen_here(at, Some(bound), cores, c))??;
         }
         Ok(bound)
     }
@@ -396,6 +407,8 @@ impl NodeEngine {
             }
         });
         let _ = thread.join();
+        // The thread ended and took its `alien` instance away: the next engine may start.
+        self.turn.take();
     }
 }
 
