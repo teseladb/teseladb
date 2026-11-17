@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
+use teseladb::engine::core::future::{ExceptionPtr, Future, SystemError, make_ready_future};
 use teseladb::engine::core::iostream::{DataSource, DataSourceImpl, InputStream};
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
@@ -17,6 +17,13 @@ use teseladb::engine::core::thread::async_;
 use teseladb::engine::http::internal::content_source::internal::{
     ChunkTargets, ChunkedSourceImpl, ContentLengthSourceImpl,
 };
+
+/// `EPROTO` (`std::errc::protocol_error`).
+const EPROTO: i32 = 71;
+
+fn system_error_code(e: &ExceptionPtr) -> Option<i32> {
+    e.downcast_ref::<SystemError>().map(|err| err.code())
+}
 
 fn tb(s: &str) -> TemporaryBuffer<u8> {
     TemporaryBuffer::copy_of(s)
@@ -83,9 +90,9 @@ teseladb::engine_test_case!(test_incomplete_content, {
 
         let mut content1 = content_strm.read().get()?;
         assert!(tb("asdfghjkl;") == content1);
-        let mut content2 = content_strm.read().get()?;
-        assert!(TemporaryBuffer::<u8>::default() == content2);
-        assert!(content_strm.eof());
+        // The body ends before its declared length: a protocol error, not a clean end.
+        let r = content_strm.read().get();
+        assert_eq!(r.as_ref().err().and_then(system_error_code), Some(EPROTO), "{:?}", r.as_ref().err());
         assert!(inp.eof());
 
         inp = buf_input("4\r\n132");
@@ -95,9 +102,9 @@ teseladb::engine_test_case!(test_incomplete_content, {
 
         content1 = content_strm.read().get()?;
         assert!(tb("132") == content1);
-        content2 = content_strm.read().get()?;
-        assert!(TemporaryBuffer::<u8>::default() == content2);
-        assert!(content_strm.eof());
+        // The stream ends before the last chunk: a protocol error, not a clean end.
+        let r = content_strm.read().get();
+        assert_eq!(r.as_ref().err().and_then(system_error_code), Some(EPROTO), "{:?}", r.as_ref().err());
         Ok(())
     })
 });

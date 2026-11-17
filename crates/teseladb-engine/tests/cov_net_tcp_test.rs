@@ -887,3 +887,24 @@ fn option_block_must_have_the_reserved_size() {
     let mut out = [0u8; 2];
     o.fill(&mut out, &syn);
 }
+
+// The congestion window bounds the bytes in flight, not the size of each segment (RFC 5681):
+// with nothing acknowledged, the stack sends at most its initial congestion window (4 * 536
+// bytes with the default MSS) although the peer's window would take all of it.
+engine_thread_test_case!(congestion_window_bounds_the_bytes_in_flight, {
+    let mut s = Session::passive(&[]);
+    wait(s.conn.send(Packet::from_data(&pattern(10000)))).expect("send");
+    let in_flight: usize = s
+        .st
+        .wire
+        .quiet_for(Duration::from_millis(300))
+        .iter()
+        .filter(|f| f.is_ipv4() && f.ip().proto == PROTO_TCP)
+        .map(|f| f.tcp().payload.len())
+        .sum();
+    assert!(in_flight > 0, "nothing was sent");
+    // One byte more may go as a probe of the persist timer, which runs while nothing can be
+    // sent.
+    assert!(in_flight <= 4 * 536 + 1, "{in_flight} bytes in flight with nothing acknowledged");
+    s.peer_ack(s.sseq + in_flight as u32);
+});

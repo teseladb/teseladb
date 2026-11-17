@@ -174,9 +174,17 @@ pub mod experimental {
             });
             let c = conn(&p);
             let me = p.clone();
+            // A pooled connection outlives the request that opened it, so the wait for its
+            // shutdown must not bind to the caller's scheduling group, which may be destroyed
+            // meanwhile: it is set up in the default group.
+            let prev = crate::engine::core::scheduling::current_scheduling_group();
+            crate::engine::core::scheduling::internal::set_current_scheduling_group(
+                crate::engine::core::scheduling::default_scheduling_group(),
+            );
             // SAFETY: `p` was just made and keeps the connection alive; `me` keeps it alive
             // until the input is shut down.
             unsafe { (*c)._closed = (*c)._fd.wait_input_shutdown().finally(move || drop(me)) };
+            crate::engine::core::scheduling::internal::set_current_scheduling_group(prev);
             p
         }
 
@@ -520,6 +528,57 @@ pub mod experimental {
     pub struct RetryRequestsTag;
     /// Whether the client retries a request on a connection error.
     pub type RetryRequests = BoolClass<RetryRequestsTag>;
+
+    /// The body of a reply that has none: nothing is read from the connection, and the
+    /// whole declared length counts as consumed.
+    struct SkipBodySource;
+
+    impl SkipBodySource {
+        fn new(rep: &mut Reply) -> Self {
+            // nothing to consume here
+            rep.consumed_content = rep.content_length;
+            log_trace!(HTTP_LOG, "Skipping bodyless reply");
+            SkipBodySource
+        }
+    }
+
+    impl crate::engine::core::iostream::DataSourceImpl for SkipBodySource {
+        fn get(&mut self) -> Future<TemporaryBuffer<u8>> {
+            make_ready_future(TemporaryBuffer::default())
+        }
+
+        fn skip(&mut self, _n: u64) -> Future<TemporaryBuffer<u8>> {
+            make_ready_future(TemporaryBuffer::default())
+        }
+    }
+
+    /// The body stream of `rep`, the reply to a request whose method is HEAD when
+    /// `method_is_head`. RFC 9110 6.4.1 and 15.4.5: a 1xx, a 204 and a 304 carry no body
+    /// whatever Content-Length says, and neither does the answer to a HEAD; reading one would
+    /// take the bytes of the next reply on the connection for this one's body.
+    ///
+    /// # Safety
+    /// As [`Connection::in_`].
+    unsafe fn make_body_stream(
+        con: &mut Connection,
+        method_is_head: bool,
+        rep: *mut Reply,
+    ) -> InputStream<u8> {
+        // SAFETY: the contract above; the reference to the reply ends with the statement.
+        let status = unsafe { (*rep)._status };
+        if method_is_head
+            || Reply::classify_status(status) == crate::engine::http::reply::StatusClass::Informational
+            || status == StatusType::NO_CONTENT
+            || status == StatusType::NOT_MODIFIED
+        {
+            // SAFETY: as above.
+            return InputStream::new(DataSource::new(Box::new(SkipBodySource::new(unsafe {
+                &mut *rep
+            }))));
+        }
+        // SAFETY: as above.
+        unsafe { con.in_(rep) }
+    }
 
     /// An HTTP client: makes requests to one server and handles the replies.
     ///
@@ -985,6 +1044,7 @@ pub mod experimental {
             let this: *mut Client = self;
             let conp: *mut Connection = con;
             let handlep: *mut ReplyHandler = handle;
+            let req_method_is_head = req._method.as_str() == "HEAD";
             // The connection is held by with_connection() and the handler by the caller until
             // the request ends; the client outlives it.
             // SAFETY: the connection outlives the subscription, which is dropped in the last
@@ -1011,7 +1071,7 @@ pub mod experimental {
                         let rp: *mut Reply = reply.as_ptr();
                         // SAFETY: the reply is owned through its address by `reply`, which the
                         // last continuation keeps; the connection is held until the request ends.
-                        let in_ = unsafe { con.in_(rp) };
+                        let in_ = unsafe { make_body_stream(con, req_method_is_head, rp) };
                         return do_with(in_, move |in_: &mut InputStream<u8>| {
                             // SAFETY: do_with keeps the stream alive and in place until the read
                             // resolves, and nothing else uses it meanwhile.
@@ -1028,7 +1088,7 @@ pub mod experimental {
                     let reply = RawBox::new(reply);
                     let rp: *mut Reply = reply.as_ptr();
                     // SAFETY: as above; the handler gets the reply only for the call.
-                    let in_ = unsafe { con.in_(rp) };
+                    let in_ = unsafe { make_body_stream(con, req_method_is_head, rp) };
                     // SAFETY: the caller keeps the handler alive until the request ends, and
                     // `reply`, moved into the continuation, keeps the reply alive past the call.
                     unsafe { (*handlep).call(&*rp, in_) }.then(move |()| {

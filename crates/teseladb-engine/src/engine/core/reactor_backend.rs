@@ -346,6 +346,9 @@ pub struct AioStorageContext {
     pub(crate) _aio_retries: PendingAioRetryT,
     /// The retry in progress (ready when none is).
     pub(crate) _pending_aio_retry_fut: Future<()>,
+    /// Set by stop(): no retry loop starts any more, and requests rejected with EAGAIN
+    /// complete at once instead of waiting for a retry.
+    pub(crate) _stopping: bool,
     /// Buffer for reaped completion events.
     pub(crate) _ev_buffer: [IoEvent; AIO_STORAGE_MAX_AIO],
 }
@@ -897,6 +900,7 @@ impl AioStorageContext {
             _pending_aio_retry: Vec::with_capacity(AIO_STORAGE_MAX_AIO),
             _aio_retries: Vec::with_capacity(AIO_STORAGE_MAX_AIO),
             _pending_aio_retry_fut: make_ready_future(()),
+            _stopping: false,
             // SAFETY: `IoEvent` is a plain C struct for which all-zero bytes is a valid value.
             _ev_buffer: unsafe { std::mem::zeroed() },
         };
@@ -926,11 +930,24 @@ impl AioStorageContext {
     /// # Safety
     /// As [`AioStorageContext::init`]; the continuations keep `this`.
     pub unsafe fn stop(this: *mut Self) -> Future<()> {
-        // SAFETY: the contract above; one field access.
-        let fut = std::mem::replace(
-            unsafe { &mut (*this)._pending_aio_retry_fut },
-            make_ready_future(()),
-        );
+        // SAFETY: the contract above; short accesses to the live context.
+        let fut = unsafe {
+            // Set _stopping first so that any reap_completions() and schedule_retry() calls
+            // that race with the drain below see the right state: a second retry loop
+            // started now would race with this drain on the same control blocks.
+            (*this)._stopping = true;
+            // Fail the requests still in the I/O sink (they have no control block yet).
+            let sink = std::ptr::addr_of_mut!((*(*this).r())._io_sink);
+            (*sink).drain(|_req: &IoRequest, desc: *mut IoCompletion| -> bool {
+                // The completion lives until it is completed (inside the unsafe block above).
+                KernelCompletion::complete_with(
+                    IoCompletion::as_kernel_completion(desc),
+                    -(ECANCELED as isize),
+                );
+                true
+            });
+            std::mem::replace(&mut (*this)._pending_aio_retry_fut, make_ready_future(()))
+        };
         fut.finally(move || {
             // SAFETY: the storage context outlives the exit tasks of the reactor.
             do_until(
@@ -938,12 +955,39 @@ impl AioStorageContext {
                 move || {
                     // SAFETY: as above, `this` is the live context, which outlives the exit
                     // tasks; this shard's thread is the only user, and no reference to the
-                    // context is held across this call.
-                    unsafe { (*this).reap_completions(false) };
+                    // context is held across these calls.
+                    unsafe {
+                        (*this).reap_completions(false);
+                        (*this).reap_pending_retries();
+                    }
                     make_ready_future(())
                 },
             )
         })
+    }
+
+    /// Completes the control blocks waiting for a retry with `-ECANCELED` and returns them
+    /// to the pool. Called while stopping, once no retry loop runs.
+    fn reap_pending_retries(&mut self) {
+        let pending = std::mem::take(&mut self._pending_aio_retry);
+        // _aio_retries is empty in the normal call path: this runs after the retry loop's
+        // future has resolved, and that loop only ends when both lists are empty. The drain
+        // is defensive, so that no control block leaks.
+        let retries = std::mem::take(&mut self._aio_retries);
+        for iocb in pending.iter().chain(retries.iter()).copied() {
+            // SAFETY: `iocb` is one of ours, taken from the pool and prepared with a
+            // completion as user data; it is in no other list.
+            let desc = unsafe { get_user_data_iocb(&*iocb) };
+            // SAFETY: as above.
+            unsafe { self._iocb_pool.put_one(iocb) };
+            // SAFETY: the completion lives until it is completed.
+            unsafe { KernelCompletion::complete_with(desc, -(ECANCELED as isize)) };
+        }
+        // Keep the lists' storage (allocated once, with room for every control block).
+        self._pending_aio_retry = pending;
+        self._pending_aio_retry.clear();
+        self._aio_retries = retries;
+        self._aio_retries.clear();
     }
 
     // Returns: number of iocbs consumed (0 or 1)
@@ -1071,7 +1115,7 @@ impl AioStorageContext {
             iocbs += nr_consumed;
         }
 
-        if self.need_to_retry() && !self.retry_in_progress() {
+        if self.need_to_retry() {
             self.schedule_retry();
         }
 
@@ -1081,6 +1125,12 @@ impl AioStorageContext {
     /// Starts (if not running) the loop that resubmits the requests rejected with `EAGAIN`, on
     /// the syscall thread, until no retry is pending.
     pub fn schedule_retry(&mut self) {
+        // Don't start a new retry loop if either one is already in flight, or the context is
+        // stopping: stop() drains the lists itself, and a second loop would race with its
+        // drain on the same control blocks.
+        if self.retry_in_progress() || self._stopping {
+            return;
+        }
         // The loop outlives this call: it keeps the root pointer.
         let this = self._this;
         // loop until both _pending_aio_retry and _aio_retries are empty.
@@ -1171,7 +1221,12 @@ impl AioStorageContext {
 
     /// Reaps finished disk requests without blocking and completes them; when `allow_retry`,
     /// also starts the retry loop if retries are pending. Returns `true` if any completed.
-    pub fn reap_completions(&mut self, allow_retry: bool) -> bool {
+    pub fn reap_completions(&mut self, mut allow_retry: bool) -> bool {
+        // While stopping, complete EAGAIN control blocks at once instead of queueing them for a
+        // retry: no retry loop starts any more.
+        if self._stopping {
+            allow_retry = false;
+        }
         let timeout = Timespec { tv_sec: 0, tv_nsec: 0 };
         // SAFETY: `_io_context` is the context set up in `new` and destroyed only on drop;
         // `_ev_buffer` holds AIO_STORAGE_MAX_AIO events and `timeout` is a live timespec.
@@ -2354,8 +2409,7 @@ impl ReactorBackendEpoll {
                 evt.events = pfd.events_requested as u32;
             }
             let events = (evt.events & (EPOLLIN | EPOLLOUT | EPOLLRDHUP)) as i32;
-            let events_to_remove =
-                if has_error { pfd.events_requested } else { events & !pfd.events_requested };
+            let events_to_remove = events & !pfd.events_requested;
             self.complete_epoll_event(pfd, events, EPOLLRDHUP as i32);
             if pfd.events_rw {
                 // accept() signals normal completions via EPOLLIN, but errors (due to shutdown())
@@ -2374,6 +2428,15 @@ impl ReactorBackendEpoll {
                 let op = if evt.events != 0 { EPOLL_CTL_MOD } else { EPOLL_CTL_DEL };
                 // SAFETY: plain epoll_ctl on a registered descriptor.
                 unsafe { epoll_ctl(self._epollfd.get(), op, pfd.fd.get(), evt) };
+            } else if has_error {
+                // In the error case, all requested events are cleared (as we handle all
+                // requested events on error), so unconditionally delete the fd from epoll,
+                // which avoids edge conditions where we otherwise might get stuck spinning.
+                pfd.events_epoll = 0;
+                // SAFETY: plain epoll_ctl on a registered descriptor; DEL takes no event.
+                unsafe {
+                    epoll_ctl(self._epollfd.get(), EPOLL_CTL_DEL, pfd.fd.get(), std::ptr::null_mut())
+                };
             }
         }
         nr != 0

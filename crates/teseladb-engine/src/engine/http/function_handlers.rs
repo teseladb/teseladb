@@ -72,10 +72,14 @@ impl FunctionHandler {
     /// From a function of the request that returns content to append.
     pub fn from_request_function(handle: RequestFunction, type_: &Sstring) -> Self {
         Self::from_future_handler_function(
-            Rc::new(move |req: Box<Request>, rep: Box<Reply>| {
-                // The string converts to a JsonReturnType, which formats it as json.
-                match handle(&req).and_then(|s| JsonReturnType::new(&s)) {
-                    Ok(res) => Self::append_result(rep, res),
+            Rc::new(move |req: Box<Request>, mut rep: Box<Reply>| {
+                // The content is appended as it is: a plain text reply is not formatted as
+                // json (which would quote it).
+                match handle(&req) {
+                    Ok(s) => {
+                        rep._content.append_bytes(s.as_bytes());
+                        make_ready_future(rep)
+                    }
                     Err(e) => make_exception_future(e),
                 }
             }),

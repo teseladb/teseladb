@@ -217,6 +217,8 @@ impl<F: SubscriptionCallback> Subscription<F> {
 pub struct AbortSource {
     subscriptions: List<SubscriptionAdapter>,
     ex: ExceptionPtr,
+    /// Whether the abort carried an error of its own (not the default one).
+    ex_is_custom: bool,
     /// Produces the error of an abort requested without one.
     default_exception: fn() -> ExceptionPtr,
 }
@@ -239,7 +241,12 @@ impl AbortSource {
     /// one, is produced by `f`.
     #[inline]
     pub fn with_default_exception(f: fn() -> ExceptionPtr) -> Self {
-        Self { subscriptions: List::new(), ex: ExceptionPtr::null(), default_exception: f }
+        Self {
+            subscriptions: List::new(),
+            ex: ExceptionPtr::null(),
+            ex_is_custom: false,
+            default_exception: f,
+        }
     }
 
     fn abort_requested_default() -> ExceptionPtr {
@@ -264,6 +271,7 @@ impl AbortSource {
                 return;
             }
             let def = (*me).get_default_exception();
+            (*me).ex_is_custom = ex.is_some();
             (*me).ex = ex.clone().unwrap_or(def);
             assert!(!(*me).ex.is_null());
         }
@@ -355,6 +363,13 @@ impl AbortSource {
     #[inline]
     pub fn abort_requested_exception_ptr(&self) -> &ExceptionPtr {
         &self.ex
+    }
+
+    /// The error the abort was requested with, or `None` when no abort was requested or it
+    /// was requested without one (and so carries the default error).
+    #[inline]
+    pub fn abort_requested_custom_exception(&self) -> Option<&ExceptionPtr> {
+        self.ex_is_custom.then_some(&self.ex)
     }
 
     /// Returns the default error of this abort source: [`AbortRequestedException`] unless the

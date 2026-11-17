@@ -129,6 +129,13 @@ impl Request {
         }
     }
 
+    /// Whether the request has the header `name` (compared case-insensitively), whatever its
+    /// value.
+    #[inline]
+    pub fn has_header(&self, name: &str) -> bool {
+        self._headers.contains_key(CaseInsensitiveStr::new(name))
+    }
+
     /// Returns the value of the query parameter `key`, or an empty string if there is no
     /// such parameter. When the query repeats the key, the last value wins.
     #[inline]

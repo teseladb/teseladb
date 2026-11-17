@@ -81,8 +81,8 @@ impl FileInteractionHandler {
     }
 
     /// Returns the extension of the file path `file`, in lowercase: what follows the last
-    /// dot when that dot comes after the last `/`. Returns an empty string when there is
-    /// no such dot, or when the path has no `/` at all.
+    /// dot when that dot is in the last path component (after the last `/`, or anywhere in a
+    /// path without one). Returns an empty string when there is no such dot.
     pub fn get_extension(file: &Sstring) -> Sstring {
         get_extension(file)
     }
@@ -114,11 +114,19 @@ impl FileInteractionHandler {
 
 /// See [`FileInteractionHandler::redirect_if_needed`].
 fn redirect_if_needed(req: &Request, rep: &mut Reply) -> bool {
-    if req._url.as_bytes().last() != Some(&b'/') {
+    // The slash goes at the end of the path, before the query if there is one: a slash in the
+    // query neither counts nor is the place for it.
+    let location = req.get_url();
+    let b = location.as_bytes();
+    let insert_pos = b.iter().position(|&c| c == b'?').unwrap_or(b.len());
+    if insert_pos == 0 || b[insert_pos - 1] != b'/' {
+        let mut redirected = Vec::with_capacity(b.len() + 1);
+        redirected.extend_from_slice(&b[..insert_pos]);
+        redirected.push(b'/');
+        redirected.extend_from_slice(&b[insert_pos..]);
         rep.set_status(StatusType::MOVED_PERMANENTLY, Sstring::new());
-        let mut location = req.get_url();
-        location.append_bytes(b"/");
-        rep._headers.insert(CaseInsensitiveKey(Sstring::from("Location")), location);
+        rep._headers
+            .insert(CaseInsensitiveKey(Sstring::from("Location")), Sstring::from_bytes(&redirected));
         rep.done();
         return true;
     }
@@ -131,9 +139,10 @@ fn get_extension(file: &Sstring) -> Sstring {
     let last_slash_pos = b.iter().rposition(|&c| c == b'/');
     let last_dot_pos = b.iter().rposition(|&c| c == b'.');
     let mut extension = Sstring::new();
-    // A path without a slash has no extension: the dot must follow a slash.
+    // The dot must be in the last path component: after the last slash, or anywhere in a bare
+    // file name (a relative path without a slash).
     if let Some(dot) = last_dot_pos
-        && last_slash_pos.is_some_and(|slash| dot > slash)
+        && last_slash_pos.is_none_or(|slash| dot > slash)
     {
         extension = Sstring::from_bytes(&b[dot + 1..]);
     }
@@ -223,6 +232,14 @@ impl DirectoryHandler {
     }
 }
 
+/// Whether a decoded path could escape the document root: any `..` segment, or a leading
+/// `/` (`get_decoded_param()` strips the matcher's own `/`, so one here means a doubled
+/// slash like `//etc`). The value is already percent-decoded, so an encoded traversal such as
+/// `%2e%2e%2f` is a plain `../` here and is caught too.
+fn is_unsafe_path(path: &[u8]) -> bool {
+    path.first() == Some(&b'/') || path.split(|&c| c == b'/').any(|segment| segment == b"..")
+}
+
 impl HandlerBase for DirectoryHandler {
     fn base(&self) -> &HandlerBaseData {
         &self.file.base
@@ -238,8 +255,15 @@ impl HandlerBase for DirectoryHandler {
         req: Box<Request>,
         rep: Box<Reply>,
     ) -> Future<Box<Reply>> {
+        let decoded_path = req.param.get_decoded_param(&Sstring::from("path"));
+        // Refuse a path that could escape the document root before touching the filesystem.
+        if is_unsafe_path(decoded_path.as_bytes()) {
+            let mut rep = rep;
+            rep.set_status(StatusType::NOT_FOUND, Sstring::new());
+            return make_ready_future(rep);
+        }
         let mut full_path = self.doc_root.clone();
-        full_path.append_bytes(req.param.get_decoded_param(&Sstring::from("path")).as_bytes());
+        full_path.append_bytes(decoded_path.as_bytes());
         // The continuation holds the transformer, not the handler, which may go first.
         let transformer = self.file.transformer.clone();
         // SAFETY: on this shard's reactor thread; the reactor is reached for this call only (see `engine()`).

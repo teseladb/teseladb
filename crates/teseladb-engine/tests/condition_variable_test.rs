@@ -39,13 +39,23 @@ fn available_count(waiters: &[Future<()>]) -> usize {
 fn expect_cv_timed_out(r: Result<(), ExceptionPtr>) {
     match r {
         Ok(()) => panic!("should not reach"),
-        Err(e) if e.is::<TimedOutError>() => panic!("should not reach"),
+        // The specific type first: a condition variable's timeout is a timed_out_error too.
         Err(e) if e.is::<ConditionVariableTimedOut>() => {
             // ok
         }
+        Err(e) if e.is::<TimedOutError>() => panic!("should not reach"),
         Err(_) => panic!("should not reach"),
     }
 }
+
+engine_test_case!(test_condition_variable_timeout_is_timed_out_error, {
+    thread_async(move || -> Result<(), teseladb::engine::core::future::ExceptionPtr> {
+        let cv = pin!(ConditionVariable::new());
+        let r = cv.as_ref().wait_for(ms(1)).get();
+        assert!(matches!(r, Err(ref e) if e.is::<TimedOutError>()), "{r:?}");
+        Ok(())
+    })
+});
 
 engine_test_case!(test_condition_variable_signal_consume, {
     thread_async(move || -> Result<(), teseladb::engine::core::future::ExceptionPtr> {

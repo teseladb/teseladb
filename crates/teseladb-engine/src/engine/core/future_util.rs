@@ -231,10 +231,10 @@ impl<C: TimerClock> SubscriptionCallback for SleeperAbort<C> {
 
 /// Returns a future which completes after `dur` has elapsed on clock `C`, or fails when `as_`
 /// requests an abort first: with the abort's error, or [`SleepAborted`] if it carries none.
-/// If an abort was already requested, the future fails at once with [`SleepAborted`].
+/// If an abort was already requested, the future fails at once, with the same error.
 pub fn sleep_abortable_with<C: TimerClock>(
     dur: Duration,
-    as_: Pin<&mut AbortSource>,
+    mut as_: Pin<&mut AbortSource>,
 ) -> Future<()> {
     // The one allocation: the promise node, the timer and the subscription are embedded in it.
     let s = HostBox::new(Sleeper::<C> {
@@ -252,10 +252,16 @@ pub fn sleep_abortable_with<C: TimerClock>(
         let mut tmr = Pin::new_unchecked(&mut *ptr::addr_of_mut!((*me).tmr));
         tmr.as_mut().set_callback(move || HostedPromise::set_value(done, ()));
         let sc = Pin::new_unchecked(&mut *ptr::addr_of_mut!((*me).sc));
-        if as_.subscribe(sc, SleeperAbort { me }) {
+        if as_.as_mut().subscribe(sc, SleeperAbort { me }) {
             tmr.arm_in(dur);
         } else {
-            HostedPromise::set_exception(done, make_exception_ptr(SleepAborted));
+            // Already aborted: fail as an abort during the sleep would, with the abort's own
+            // error if it carried one.
+            let ex = as_
+                .abort_requested_custom_exception()
+                .cloned()
+                .unwrap_or_else(|| make_exception_ptr(SleepAborted));
+            HostedPromise::set_exception(done, ex);
         }
         HostedPromise::get_future(done)
     };

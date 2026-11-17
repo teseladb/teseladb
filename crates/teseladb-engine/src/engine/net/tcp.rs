@@ -1031,14 +1031,23 @@ impl<T: TcpInetTraits> Tcb<T> {
         // Can not send more than advertised window allows or unsent data size
         let mut x = std::cmp::min(self._snd.window - window_used, self._snd.unsent_len);
 
-        // Can not send more than congestion window allows
-        x = std::cmp::min(self._snd.cwnd, x);
+        // Can not send more than congestion window allows: the window bounds the bytes in
+        // flight, not the size of each send (RFC 5681). During Limited Transmit (dupacks 1-2),
+        // RFC 5681 / RFC 3042 permit sending up to cwnd + 2 * SMSS, so the effective
+        // congestion window is widened for those states.
+        let mut congestion_window = self._snd.cwnd;
+        if self._snd.dupacks == 1 || self._snd.dupacks == 2 {
+            congestion_window += 2 * self._snd.mss as u32;
+        }
+        if window_used > congestion_window {
+            return 0;
+        }
+        x = std::cmp::min(congestion_window - window_used, x);
         if self._snd.dupacks == 1 || self._snd.dupacks == 2 {
             // RFC5681 Step 3.1
             // Send cwnd + 2 * smss per RFC3042
-            let flight = self.flight_size();
-            let max = self._snd.cwnd + 2 * self._snd.mss as u32;
-            x = if flight <= max { std::cmp::min(x, max - flight) } else { 0 };
+            // The flight_size() cap is already applied above (flight_size() and window_used
+            // both measure the bytes in flight).
             self._snd.limited_transfer += x;
         } else if self._snd.dupacks >= 3 {
             // RFC5681 Step 3.5

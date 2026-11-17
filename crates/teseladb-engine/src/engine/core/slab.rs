@@ -709,11 +709,11 @@ impl<Item: SlabItem + 'static> SlabAllocator<Item> {
     }
 
     /// Whether a new page may be allocated: always before the reclaimer has run, otherwise while
-    /// the limit leaves pages, or when the class has no page at all.
+    /// the limit leaves pages (also for a class that has no page yet: the limit holds for all
+    /// classes together).
     #[inline]
-    fn can_allocate_page(&self, sc_has_no_slab_pages: bool) -> bool {
-        (self._reclaimer.is_some() && !self._reclaimed)
-            || (self._available_slab_pages > 0 || sc_has_no_slab_pages)
+    fn can_allocate_page(&self) -> bool {
+        (self._reclaimer.is_some() && !self._reclaimed) || self._available_slab_pages > 0
     }
 
     /// Creates a slab of at most `limit` bytes (0: unlimited and reclaimable) with pages of
@@ -780,7 +780,7 @@ impl<Item: SlabItem + 'static> SlabAllocator<Item> {
         if !sc.empty() {
             item = sc.create(args);
             self._stats.allocs += 1;
-        } else if self.can_allocate_page(sc.has_no_slab_pages()) {
+        } else if self.can_allocate_page() {
             let index_to_insert = self._slab_pages_vector.len() as u32;
             let max = self._max_object_size;
             let has_reclaimer = self._reclaimer.is_some();

@@ -100,14 +100,15 @@ pub mod http {
             fn put_buffer(&mut self, buf: TemporaryBuffer<u8>) -> Future<()> {
                 // SAFETY: the contract of make_http_content_length_output_stream.
                 let written = unsafe { *self._bytes_written };
-                if buf.size() == 0 || written == self._limit {
+                let size = buf.size();
+                if size == 0 {
                     return make_ready_future(());
                 }
-                let size = buf.size();
+                // Any byte past the limit is an overflow, also once the body is full.
                 if written + size > self._limit {
                     return make_exception_future(ExceptionPtr::new(
                         crate::engine::core::future::RuntimeError(format!(
-                            "body conent length overflow: want {} limit {}",
+                            "body content length overflow: want {} limit {}",
                             written + buf.size(),
                             self._limit
                         )),

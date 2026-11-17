@@ -29,7 +29,6 @@ use crate::engine::core::temporary_buffer::TemporaryBuffer;
 use crate::engine::net::socket_defs::SocketAddress;
 use crate::engine::rpc::rpc::Server;
 use crate::engine::util::noncopyable_function::NoncopyableFunction;
-use crate::engine_assert;
 
 /// The clock of RPC timeouts: the low-resolution reactor clock.
 pub type RpcClockType = LowresClock;
@@ -152,19 +151,36 @@ impl ClientInfo {
         self.user_data.entry(key.clone()).or_insert_with(|| Box::new(object));
     }
 
-    /// The object attached under `key`, which must exist.
+    /// The object attached under `key`.
     ///
     /// # Errors
-    /// Fails with a "bad_any_cast" error when the object is not a `T`.
+    /// When nothing is attached under `key`, aborts the connection and fails with
+    /// [`missing_auxiliary_error`]; fails with a "bad_any_cast" error when the object is not
+    /// a `T`.
     pub fn retrieve_auxiliary<T: 'static>(
         &mut self,
         key: &Sstring,
     ) -> Result<&mut T, ExceptionPtr> {
+        if !self.user_data.contains_key(key) {
+            return Err(self.report_missing_auxiliary(key));
+        }
         let it = self.user_data.get_mut(key);
-        engine_assert!(it.is_some());
         it.and_then(|b| b.downcast_mut::<T>()).ok_or_else(|| {
             ExceptionPtr::new(crate::engine::core::future::RuntimeError("bad_any_cast".to_string()))
         })
+    }
+
+    /// Aborts the connection and returns the error of a handler that asked for auxiliary data
+    /// that was never attached under `key` (for example because the verb that should have
+    /// attached it failed first). A missing key is an outcome of the peer's behaviour, not a
+    /// programming error, so it must not abort the process.
+    fn report_missing_auxiliary(&self, key: &Sstring) -> ExceptionPtr {
+        let msg = format!("missing auxiliary data '{}' on connection {}", key, self.conn_id);
+        if !self.server.is_null() {
+            // SAFETY: the server outlives its connections and their handlers.
+            unsafe { (*self.server).abort_connection(self.conn_id) };
+        }
+        ExceptionPtr::new(missing_auxiliary_error(msg))
     }
 
     /// The object attached under `key`, if any.
@@ -199,6 +215,9 @@ pub enum ErrorKind {
     StreamClosed,
     /// The remote handler failed with a message ([`remote_verb_error`]).
     RemoteVerb,
+    /// No auxiliary object is attached under the key a handler asked for
+    /// ([`missing_auxiliary_error`]).
+    MissingAuxiliary,
 }
 
 /// An rpc error: a message and its [`ErrorKind`].
@@ -271,6 +290,12 @@ pub fn stream_closed() -> Error {
 /// The error of a remote handler that failed with `msg`.
 pub fn remote_verb_error(msg: impl Into<String>) -> Error {
     Error { _msg: msg.into(), _kind: ErrorKind::RemoteVerb }
+}
+
+/// The error of [`ClientInfo::retrieve_auxiliary`] when nothing is attached under the key; the
+/// connection is aborted before it is returned.
+pub fn missing_auxiliary_error(msg: impl Into<String>) -> Error {
+    Error { _msg: msg.into(), _kind: ErrorKind::MissingAuxiliary }
 }
 
 /// The type of `NO_WAIT`.

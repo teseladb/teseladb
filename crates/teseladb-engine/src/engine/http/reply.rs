@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::engine::core::future::Future;
+use crate::engine::core::future::{Future, make_ready_future};
 use crate::engine::core::iostream::OutputStream;
 use crate::engine::core::loop_::do_for_each;
 use crate::engine::core::sstring::Sstring;
@@ -62,6 +62,8 @@ impl StatusType {
     pub const USE_PROXY: StatusType = StatusType(305);
     /// temporary_redirect
     pub const TEMPORARY_REDIRECT: StatusType = StatusType(307);
+    /// permanent_redirect
+    pub const PERMANENT_REDIRECT: StatusType = StatusType(308);
     /// bad_request
     pub const BAD_REQUEST: StatusType = StatusType(400);
     /// unauthorized
@@ -177,6 +179,8 @@ pub struct Reply {
     /// The chunk extensions of a chunked body.
     pub chunk_extensions: HashMap<Sstring, Sstring>,
     pub(crate) _body_writer: BodyWriter,
+    /// The reply answers a HEAD: everything but the body is written (RFC 7231 4.3.2).
+    pub _skip_body: bool,
 }
 
 impl Default for Reply {
@@ -216,7 +220,15 @@ impl Reply {
             trailing_headers: HashMap::new(),
             chunk_extensions: HashMap::new(),
             _body_writer: BodyWriter::empty(),
+            _skip_body: false,
         }
+    }
+
+    /// For the answer to a HEAD (RFC 7231 4.3.2): the handler's reply is collected as for a
+    /// GET, headers included, but its body is not written.
+    #[inline]
+    pub fn skip_body(&mut self) {
+        self._skip_body = true;
     }
 
     /// Sets header `h` to `value`.
@@ -297,7 +309,17 @@ impl Reply {
     /// The line is built in one allocation of its exact size (none when it fits inline),
     /// with the parts copied straight into it.
     pub fn response_line(&self) -> Sstring {
-        let status = status_strings::to_string_view(self._status).as_bytes();
+        // A status with no known reason phrase is sent with its own code and an empty
+        // phrase: the space after the code stays (RFC 9112 4: `HTTP-version SP status-code SP
+        // [ reason-phrase ]`).
+        let unknown;
+        let status = match status_strings::find(self._status) {
+            Some(s) => s.as_bytes(),
+            None => {
+                unknown = format!("{} ", self._status.0);
+                unknown.as_bytes()
+            }
+        };
         let version = self._version.as_bytes();
         let parts: [&[u8]; 5] = [b"HTTP/", version, b" ", status, b"\r\n"];
         let mut line =
@@ -365,6 +387,9 @@ impl Reply {
             .then(move |()| unsafe { (*conp).out() }.write(b"\r\n"))
             // SAFETY: as above; the previous writes have finished with the connection.
             .then(move |()| unsafe {
+                if (*this)._skip_body {
+                    return make_ready_future(());
+                }
                 (*this)._body_writer.call(make_http_chunked_output_stream((*conp).out()))
             })
     }
@@ -416,7 +441,7 @@ mod status_strings {
     use super::StatusType;
 
     #[inline]
-    fn find(status: StatusType) -> Option<&'static str> {
+    pub(super) fn find(status: StatusType) -> Option<&'static str> {
         Some(match status {
             StatusType::CONTINUE => "100 Continue",
             StatusType::SWITCHING_PROTOCOLS => "101 Switching Protocols",
@@ -434,6 +459,7 @@ mod status_strings {
             StatusType::NOT_MODIFIED => "304 Not Modified",
             StatusType::USE_PROXY => "305 Use Proxy",
             StatusType::TEMPORARY_REDIRECT => "307 Temporary Redirect",
+            StatusType::PERMANENT_REDIRECT => "308 Permanent Redirect",
             StatusType::BAD_REQUEST => "400 Bad Request",
             StatusType::UNAUTHORIZED => "401 Unauthorized",
             StatusType::PAYMENT_REQUIRED => "402 Payment Required",
@@ -468,19 +494,15 @@ mod status_strings {
         })
     }
 
-    /// The status line text of `status`; an unknown code reads as internal_server_error.
-    #[inline]
-    pub(super) fn to_string_view(status: StatusType) -> &'static str {
-        match find(status) {
-            Some(s) => s,
-            None => "500 Internal Server Error",
-        }
-    }
 }
-/// Writes the status code and its reason phrase (for example `200 OK`).
+/// Writes the status code and its reason phrase (for example `200 OK`); an unknown code is
+/// written as the number alone.
 impl fmt::Display for StatusType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(status_strings::to_string_view(*self))
+        match status_strings::find(*self) {
+            Some(s) => f.write_str(s),
+            None => write!(f, "{}", self.0),
+        }
     }
 }
 

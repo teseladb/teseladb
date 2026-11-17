@@ -648,8 +648,11 @@ impl JsonStreamBuilder {
     }
 
     fn done(&mut self) -> Future<()> {
+        // The opening brace is written with the first set member: an object with none is
+        // written whole here, as the eager builder writes it, instead of as a bare `}`.
+        let tail = if self.open { CLOSE.to_string() } else { format!("{OPEN}{CLOSE}") };
         // SAFETY: `_s` keeps the stream's state alive; the members are all written and
         // nothing else uses the stream.
-        unsafe { &mut *self._s.ptr() }.write_str(CLOSE)
+        unsafe { &mut *self._s.ptr() }.write_str(&tail)
     }
 }

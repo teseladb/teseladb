@@ -198,8 +198,9 @@ impl Default for IoQueueConfig {
     fn default() -> Self {
         IoQueueConfig {
             id: 0,
-            req_count_rate: i32::MAX as u64,
-            blocks_count_rate: i32::MAX as u64,
+            // Unbounded: an unconfigured queue does not throttle (requests cost nothing).
+            req_count_rate: u64::MAX,
+            blocks_count_rate: u64::MAX,
             disk_req_write_to_read_multiplier: IoQueue::READ_REQUEST_BASE_COUNT,
             disk_blocks_write_to_read_multiplier: IoQueue::READ_REQUEST_BASE_COUNT,
             disk_read_saturation_length: u64::MAX,
@@ -1851,6 +1852,20 @@ pub struct IoGroup {
     pub(crate) _allocated_on: ShardId,
 }
 
+impl IoGroup {
+    /// The cut-off of the search for the maximum request length: the largest power of 2
+    /// whose capacity is within the maximum capacity is looked for up to this length, which is
+    /// the maximum request length when the search gets past it.
+    pub const REQUEST_LENGTH_LIMIT: usize = 16 << 20; // 16 MiB
+
+    /// The maximum length of a request of direction `dnl_idx` (0: write, 1: read); longer
+    /// requests are split.
+    #[inline]
+    pub fn max_request_length(&self, dnl_idx: usize) -> usize {
+        self._max_request_length[dnl_idx].get()
+    }
+}
+
 // SAFETY: an io_group is shared by the shards of a NUMA node; its mutable state is the
 // priority class table, guarded by the lock, and the token buckets, which are atomic.
 // `_max_request_length` is written only while the group is constructed.
@@ -1907,7 +1922,10 @@ impl IoGroup {
         }
         let this = IoGroup {
             _config: io_cfg,
-            _max_request_length: [Cell::new(0), Cell::new(0)],
+            _max_request_length: [
+                Cell::new(Self::REQUEST_LENGTH_LIMIT), // write
+                Cell::new(Self::REQUEST_LENGTH_LIMIT), // read
+            ],
             _fgs: fgs,
             _priority_classes: std::sync::Mutex::new(Vec::new()),
             _allocated_on: crate::engine::core::shard_id::this_shard_id(),
@@ -1941,21 +1959,47 @@ impl IoGroup {
             let g_idx = if this._config.duplex { idx as usize } else { 0 };
             let fg = &this._fgs[g_idx];
             let max_cap = fg.maximum_capacity();
+            let capacity_of = |len: usize| {
+                FairGroup::tokens_capacity(internal::request_tokens(
+                    IoDirectionAndLength::new(idx, len),
+                    &this._config,
+                ))
+            };
             let mut shift: u32 = 0;
             loop {
-                let tokens = internal::request_tokens(
-                    IoDirectionAndLength::new(idx, 1usize << (shift + IoQueue::BLOCK_SIZE_SHIFT)),
-                    &this._config,
-                );
-                let cap = FairGroup::tokens_capacity(tokens);
+                let req_length = 1usize << (shift + IoQueue::BLOCK_SIZE_SHIFT);
+                let cap = capacity_of(req_length);
                 if cap > max_cap {
                     if shift == 0 {
                         return Err(ExceptionPtr::new(RuntimeError::new(
                             "IO-group limits are too low".to_string(),
                         )));
                     }
-                    this._max_request_length[idx as usize]
-                        .set(1usize << ((shift - 1) + IoQueue::BLOCK_SIZE_SHIFT));
+                    // The current shift gives the biggest power of 2 request length whose
+                    // capacity is still within max_cap, but REQUEST_LENGTH_LIMIT may be a better
+                    // fit if its capacity is closer to max_cap.
+                    let fitting_req_length = 1usize << (shift - 1 + IoQueue::BLOCK_SIZE_SHIFT);
+                    let fitting_cap = capacity_of(fitting_req_length);
+                    let cap_limit = capacity_of(Self::REQUEST_LENGTH_LIMIT);
+                    let length = if fitting_cap < cap_limit && cap_limit < max_cap {
+                        Self::REQUEST_LENGTH_LIMIT
+                    } else {
+                        fitting_req_length
+                    };
+                    this._max_request_length[idx as usize].set(length);
+                    break;
+                }
+                // Stop once the request length passes the limit: with huge configured rates
+                // the capacity may stay 0 for every length, and the search would never end.
+                // The maximum request length keeps its default, REQUEST_LENGTH_LIMIT.
+                if req_length > Self::REQUEST_LENGTH_LIMIT {
+                    engine_logger().info(
+                        FormatInfo::new("IO queue was unable to find a suitable maximum request length, the search was cut-off early at: {}MB"),
+                        format_args!(
+                            "IO queue was unable to find a suitable maximum request length, the search was cut-off early at: {}MB",
+                            Self::REQUEST_LENGTH_LIMIT >> 20
+                        ),
+                    );
                     break;
                 }
                 shift += 1;

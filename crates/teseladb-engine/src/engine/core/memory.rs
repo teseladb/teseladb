@@ -3171,23 +3171,31 @@ mod engine_allocator {
     /// up.
     #[inline(always)]
     pub fn allocate_large(size: usize, should_sample: bool) -> *mut c_void {
-        abort_on_underflow(size);
-        let size_in_pages = (size.wrapping_add(PAGE_SIZE - 1) >> PAGE_BITS) as u32;
-        if ((size_in_pages as usize) << PAGE_BITS) < size {
-            return std::ptr::null_mut(); // (size + page_size - 1) caused an overflow
-        }
+        let Some(size_in_pages) = size_to_page_count(size) else {
+            return std::ptr::null_mut();
+        };
         // SAFETY: the thread's cpu_pages is initialized on the allocation paths that get here.
         unsafe { CpuPages::allocate_large(cpu_mem_ptr(), size_in_pages, should_sample) }
+    }
+
+    /// The number of pages that hold `size` bytes, or `None` when it does not fit the page
+    /// count of a span (`u32`). Aborts the process if `size` is above `isize::MAX` (see
+    /// [`abort_on_underflow`]), so rounding it up cannot overflow.
+    #[inline(always)]
+    fn size_to_page_count(size: usize) -> Option<u32> {
+        abort_on_underflow(size);
+        u32::try_from((size + PAGE_SIZE - 1) >> PAGE_BITS).ok()
     }
 
     /// Like [`allocate_large`]; `align` is passed down but not used: the span is aligned to its
     /// own power-of-two size, so the result is aligned to `align` only when that size is at
     /// least `align` (a `size` smaller than an `align` above one page gets a smaller
-    /// alignment; [`allocate_aligned`] raises `size` to `align` before calling it). Unlike [`allocate_large`] it does not check `size + PAGE_SIZE - 1` for
-    /// overflow.
+    /// alignment; [`allocate_aligned`] raises `size` to `align` before calling it). Returns null
+    /// when the page count of `size` does not fit a span, as [`allocate_large`] does.
     pub fn allocate_large_aligned(align: usize, size: usize, should_sample: bool) -> *mut c_void {
-        abort_on_underflow(size);
-        let size_in_pages = ((size + PAGE_SIZE - 1) >> PAGE_BITS) as u32;
+        let Some(size_in_pages) = size_to_page_count(size) else {
+            return std::ptr::null_mut();
+        };
         let align_in_pages = (align.max(PAGE_SIZE) >> PAGE_BITS) as u32;
         // SAFETY: as in allocate_large.
         unsafe {
@@ -4093,17 +4101,17 @@ mod engine_allocator {
         let mut i: usize = 0;
         // If there is no remainder we go below precision because we don't loose any.
         while (remainder == 0 && result >= step) || result >= precision {
+            // The last suffix is the largest unit: stop before dividing past it.
+            if i + 1 == suffixes.len() {
+                break;
+            }
             remainder = result % step;
             result /= step;
-            if i == suffixes.len() {
-                break;
-            } else {
-                i += 1;
-            }
+            i += 1;
         }
         HumanReadableValue {
             value: (if remainder < (step / 2) { result } else { result + 1 }) as u16,
-            suffix: suffixes[i.min(suffixes.len() - 1)],
+            suffix: suffixes[i],
         }
     }
 
@@ -4440,17 +4448,17 @@ mod engine_allocator {
     }
 
     /// The C `calloc`: [`malloc`]`(nmemb * size)`, zeroed; null when the failure injector fires
-    /// or the allocation fails. An overflowing `nmemb * size` fails an assertion, which aborts
-    /// the process (a panic cannot leave this `extern "C"` function) instead of returning
-    /// null. The block is always zeroed, even when fresh pages already are.
+    /// or the allocation fails, and when `nmemb * size` overflows. The block is always zeroed,
+    /// even when fresh pages already are.
     #[unsafe(no_mangle)]
     pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
         if try_trigger_error_injector() {
             return std::ptr::null_mut();
         }
-        let s1 = nmemb as u128 * size as u128;
-        assert!(s1 == s1 as usize as u128);
-        let s = s1 as usize;
+        // A product that overflows is an allocation that cannot be made: null, not an abort.
+        let Some(s) = nmemb.checked_mul(size) else {
+            return std::ptr::null_mut();
+        };
         let p = malloc(s);
         if !p.is_null() {
             // SAFETY: `p` points to `s` writable bytes.
@@ -4537,8 +4545,8 @@ mod engine_allocator {
     }
 
     /// The C `posix_memalign`, exported under its C name: stores
-    /// [`allocate_aligned`]`(align, size)` in `*ptr` (null on failure) and returns 0, or
-    /// `ENOMEM` when it is null or the failure injector fires (then `*ptr` is not written).
+    /// [`allocate_aligned`]`(align, size)` in `*ptr` and returns 0, or `ENOMEM` when it is
+    /// null or the failure injector fires (then `*ptr` is not written).
     /// `align` is not validated, so it never returns `EINVAL`; the block is aligned to `align`
     /// whatever `size` (see [`allocate_aligned`]).
     ///
@@ -4554,11 +4562,12 @@ mod engine_allocator {
             return ENOMEM;
         }
         let p = allocate_aligned(align, size);
-        // SAFETY: `ptr` is non-null (nonnull(1)) and writable (by the caller).
-        unsafe { *ptr = p };
+        // POSIX leaves `*ptr` unchanged when the allocation fails.
         if p.is_null() {
             return ENOMEM;
         }
+        // SAFETY: `ptr` is non-null (nonnull(1)) and writable (by the caller).
+        unsafe { *ptr = p };
         0
     }
 
@@ -5019,6 +5028,29 @@ mod engine_allocator {
                 }
                 nptr
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn hr(value: u64, step: u64, precision: u64, suffixes: &[u8; 5]) -> (u16, u8) {
+            let v = to_human_readable_value(value, step, precision, suffixes);
+            (v.value, v.suffix)
+        }
+
+        // Values past the largest unit stay in that unit instead of being divided once or
+        // twice more and shown with its suffix.
+        #[test]
+        fn human_readable_value_stops_at_the_largest_suffix() {
+            const T: u64 = 1 << 40;
+            assert_eq!(hr(8 * T, 1024, 8192, b"BKMGT"), (8, b'T'));
+            assert_eq!(hr(8191 * T, 1024, 8192, b"BKMGT"), (8191, b'T'));
+            assert_eq!(hr(9000 * T, 1024, 8192, b"BKMGT"), (9000, b'T'));
+            assert_eq!(hr(9000 * 1024 * T, 1024, 8192, b"BKMGT").1, b'T');
+            assert_eq!(hr(5 * 1024, 1024, 8192, b"BKMGT"), (5, b'K'));
+            assert_eq!(hr(9 * 1024, 1024, 8192, b"BKMGT"), (9, b'K'));
         }
     }
 }

@@ -629,6 +629,12 @@ pub struct Reactor {
     pub(crate) _last_mono_steal: SchedDuration,
     /// Total idle time.
     pub(crate) _total_idle: SchedDuration,
+    /// While the reactor is idle, the start of the part of the idle period not yet added to
+    /// `_total_idle`.
+    pub(crate) _idle_start: Option<SchedTimePoint>,
+    /// The last time the reactor was seen to be idle. When work turns up, the idle period
+    /// ends here.
+    pub(crate) _idle_end: SchedTimePoint,
     /// Total sleep time.
     pub(crate) _total_sleep: SchedDuration,
     /// When the reactor started.
@@ -3007,6 +3013,8 @@ impl Reactor {
                     _last_true_steal: SchedDuration::default(),
                     _last_mono_steal: SchedDuration::default(),
                     _total_idle: SchedDuration::default(),
+                    _idle_start: None,
+                    _idle_end: SchedTimePoint::default(),
                     _total_sleep: SchedDuration::default(),
                     _start_time: Reactor::now(),
                     _flush_batching: BatchFlushListT::new(),
@@ -4612,7 +4620,10 @@ impl Reactor {
                 })
                 .await?;
 
-            if sr.result != 0 {
+            // A group that does not exist may give 0 or ENOENT, depending on the configuration
+            // of the system (with sssd, for one): both mean "not found".
+            const ENOENT: i32 = 2;
+            if sr.result != 0 && sr.result != ENOENT {
                 return Err(ExceptionPtr::from(SystemError::from_errno(sr.ec())));
             }
 
@@ -6168,6 +6179,11 @@ impl Reactor {
             if !(*this).have_more_tasks() {
                 return Ok(());
             }
+            // do_run() ends the idle period when a poll reports work, but tasks can become
+            // runnable without one: the events handled when waking from sleep, or work a
+            // poller picks up in its last check before sleeping. End it here too, so time
+            // spent running tasks is never counted as idle.
+            (*this).end_idle();
             Self::reset_preemption_monitor(this);
             LowresClock::update();
 
@@ -6396,25 +6412,16 @@ impl Reactor {
         let _sig_poller = Poller::new(unsafe { SignalPollfn::new(this) });
 
         let mut load_timer = std::pin::pin!(Timer::<LowresClock>::new());
-        // SAFETY: as above.
-        let last_idle = Cell::new(unsafe { (*this)._total_idle });
-        let idle_start = Cell::new(Self::now());
-        let idle_end = Cell::new(idle_start.get());
-        let last_idle_p = &last_idle as *const Cell<SchedDuration>;
-        let idle_start_p = &idle_start as *const Cell<SchedTimePoint>;
-        let idle_end_p = &idle_end as *const Cell<SchedTimePoint>;
+        let mut last_idle = SchedDuration::default();
         load_timer.as_mut().set_callback(move || {
-            // SAFETY: the locals outlive the timer, which is cancelled before do_run()
-            // returns; the timer callback runs from the lowres poller, with no reference to
-            // the reactor live.
-            let (me, last_idle, idle_start, idle_end) =
-                unsafe { (&mut *this, &*last_idle_p, &*idle_start_p, &*idle_end_p) };
-            me._total_idle += idle_end.get() - idle_start.get();
-            let mut load = (me._total_idle - last_idle.get()).count() as f64
+            // SAFETY: the timer is cancelled before do_run() returns; its callback runs from
+            // the lowres poller, with no reference to the reactor live.
+            let me = unsafe { &mut *this };
+            me.update_idle();
+            let mut load = (me._total_idle - last_idle).count() as f64
                 / SchedDuration::from_std(Duration::from_secs(1)).count() as f64;
-            last_idle.set(me._total_idle);
+            last_idle = me._total_idle;
             load = load.min(1.0);
-            idle_start.set(idle_end.get());
             me._loads.push_front(load);
             if me._loads.size() > 5 {
                 let drop = *me._loads.back();
@@ -6446,7 +6453,11 @@ impl Reactor {
         };
         engine_assert!(r == 0);
 
-        let mut idle = false;
+        // While the reactor is in a run of empty polls, when the run began, which decides when
+        // to sleep. Tasks end the idle period but not the run, so when the tasks a wakeup made
+        // runnable leave nothing else to do, the reactor sleeps again after one empty poll
+        // rather than polling for max_poll_time first.
+        let mut idle_poll_start: Option<SchedTimePoint> = None;
 
         let check_for_work = move || -> bool {
             // SAFETY: called from this loop, with no reference to the reactor live; the pollers
@@ -6484,17 +6495,12 @@ impl Reactor {
 
                 LowresClock::update(); // Don't delay expiring lowres timers
                 if check_for_work() {
-                    if idle {
-                        (*this)._total_idle += idle_end.get() - idle_start.get();
-                        idle_start.set(idle_end.get());
-                        idle = false;
-                    }
+                    (*this).end_idle();
+                    idle_poll_start = None;
                 } else {
-                    idle_end.set(Self::now());
-                    if !idle {
-                        idle_start.set(idle_end.get());
-                        idle = true;
-                    }
+                    let t = Self::now();
+                    (*this).mark_idle(t);
+                    let poll_start = *idle_poll_start.get_or_insert(t);
                     // we can't run check_for_work(), because that can run tasks in the context
                     // of the idle handler which change its state, without the idle handler expecting
                     // it.  So run pure_check_for_work() instead.
@@ -6504,19 +6510,26 @@ impl Reactor {
                     let go_to_sleep = handler_result == IdleCpuHandlerResult::NoMoreWork;
                     if go_to_sleep {
                         crate::engine::util::spinlock::internal::cpu_relax();
-                        if idle_end.get() - idle_start.get() > (*this)._cfg.max_poll_time {
+                        // Only when every poller agrees to sleep are the task quota timer and the
+                        // stall detector's timer touched: a refused sleep costs no system call.
+                        if t - poll_start > (*this)._cfg.max_poll_time
+                            && Self::pollers_enter_interrupt_mode(this)
+                        {
                             // Turn off the task quota timer to avoid spurious wakeups
                             let zero_itimerspec = crate::engine::core::posix::Itimerspec::default();
                             (*this)._task_quota_timer.timerfd_settime(0, &zero_itimerspec)?;
                             if let Some(d) = (*this)._cpu_stall_detector.as_mut() {
                                 d.start_sleep()?;
                             }
-                            Self::try_sleep(this);
+
+                            Self::wait_and_process_events(this);
+                            Self::pollers_exit_interrupt_mode(this);
+
                             if let Some(d) = (*this)._cpu_stall_detector.as_mut() {
                                 d.end_sleep();
                             }
-                            // We may have slept for a while, so freshen idle_end
-                            idle_end.set(Self::now());
+                            // We may have slept for a while, so freshen _idle_end
+                            (*this).mark_idle(Self::now());
                             (*this)._task_quota_timer.timerfd_settime(0, &task_quote_itimerspec)?;
                         }
                     } else {
@@ -6542,6 +6555,22 @@ impl Reactor {
     /// As `Reactor::run_some_tasks`: entering and leaving interrupt mode, and processing
     /// the events, re-enter the reactor.
     pub unsafe fn try_sleep(this: *mut Self) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if !Self::pollers_enter_interrupt_mode(this) {
+                return;
+            }
+            Self::wait_and_process_events(this);
+            Self::pollers_exit_interrupt_mode(this);
+        }
+    }
+
+    /// Puts every poller in interrupt mode and returns `true`, or, when one refuses, takes
+    /// the ones before it out again and returns `false`.
+    ///
+    /// # Safety
+    /// As [`Reactor::try_sleep`].
+    unsafe fn pollers_enter_interrupt_mode(this: *mut Self) -> bool {
         // SAFETY: guaranteed by the caller. Registered pollers are live (they unregister
         // through a task, which cannot run here), and the vector is not changed meanwhile.
         unsafe {
@@ -6555,18 +6584,38 @@ impl Reactor {
                         let p: *mut dyn Pollfn = (&*pollers)[j];
                         (*p).exit_interrupt_mode();
                     }
-                    return;
+                    return false;
                 }
             }
+            true
+        }
+    }
 
-            let mask = (*this)._active_sigmask;
-            let (b, e) = Self::backend_entries(this);
-            (e.wait_and_process_events)(b, Some(&mask));
-
+    /// Takes every poller out of interrupt mode, in reverse order.
+    ///
+    /// # Safety
+    /// As [`Reactor::try_sleep`], after [`Reactor::pollers_enter_interrupt_mode`] succeeded.
+    unsafe fn pollers_exit_interrupt_mode(this: *mut Self) {
+        // SAFETY: as in pollers_enter_interrupt_mode.
+        unsafe {
+            let pollers = std::ptr::addr_of!((*this)._pollers);
             for i in (0..(&*pollers).len()).rev() {
                 let p: *mut dyn Pollfn = (&*pollers)[i];
                 (*p).exit_interrupt_mode();
             }
+        }
+    }
+
+    /// Waits in the backend for events and processes them.
+    ///
+    /// # Safety
+    /// As [`Reactor::try_sleep`].
+    unsafe fn wait_and_process_events(this: *mut Self) {
+        // SAFETY: as in try_sleep; processing the events re-enters the reactor.
+        unsafe {
+            let mask = (*this)._active_sigmask;
+            let (b, e) = Self::backend_entries(this);
+            (e.wait_and_process_events)(b, Some(&mask));
         }
     }
 
@@ -7348,7 +7397,7 @@ fn wakeup_granularity() -> (std::path::PathBuf, u64) {
     // This will in practice almost always fail because debug fs requires root
     // perms to read so we are out of luck
     let debug_fs_path = "/sys/kernel/debug/sched/wakeup_granularity_ns";
-    let val = try_read(legacy_path);
+    let val = try_read(debug_fs_path);
     if val != 0 {
         return (std::path::PathBuf::from(debug_fs_path), val);
     }
@@ -7932,6 +7981,8 @@ const SI_USER: i32 = 0;
 #[cfg(not(engine_asan_enabled))]
 const SEGV_MAPERR: i32 = 1;
 #[cfg(not(engine_asan_enabled))]
+const SEGV_ACCERR: i32 = 2;
+#[cfg(not(engine_asan_enabled))]
 const SEGV_BNDERR: i32 = 3;
 #[cfg(target_arch = "x86_64")]
 #[cfg(not(engine_asan_enabled))]
@@ -7940,9 +7991,6 @@ const UC_RIP_OFFSET: usize = 40 + 16 * 8; // offsetof(ucontext_t, uc_mcontext.gr
 #[cfg(not(engine_asan_enabled))]
 const UC_PC_OFFSET: usize = 176 + 8 * 32 + 8; // offsetof(ucontext_t, uc_mcontext.pc)
 
-// The condition below tests `SEGV_MAPERR` twice (`SEGV_ACCERR` was probably meant); it is
-// kept as is.
-#[allow(clippy::eq_op)]
 #[cfg(not(engine_asan_enabled))]
 fn sigsegv_action(info: *mut SiginfoT, uc: *mut std::ffi::c_void) {
     use crate::engine::util::print_safe::{
@@ -7958,7 +8006,7 @@ fn sigsegv_action(info: *mut SiginfoT, uc: *mut std::ffi::c_void) {
         print_safe(b", si_pid: ");
         // print the pid in the case the signal was sent by someone else
         print_decimal_safe(fi.si_addr_or_pid as u32 as u64);
-    } else if code == SEGV_MAPERR || code == SEGV_MAPERR || code == SEGV_BNDERR {
+    } else if code == SEGV_MAPERR || code == SEGV_ACCERR || code == SEGV_BNDERR {
         // print the address of the data access
         print_safe(b", si_addr: ");
         print_zero_padded_hex_safe(fi.si_addr_or_pid);
@@ -9456,7 +9504,36 @@ impl Reactor {
 
     /// Total time the reactor was busy.
     pub fn total_busy_time(&self) -> SchedDuration {
-        Self::now() - self._start_time - self._total_idle
+        // Busy time is exported as a counter, so it must never decrease. While the reactor
+        // is idle it holds at its value from the start of the idle period. Ending the period
+        // adds at most the time elapsed since then to `_total_idle`, so the value can only go
+        // up from there.
+        let end = self._idle_start.unwrap_or_else(Self::now);
+        end - self._start_time - self._total_idle
+    }
+
+    /// Records that the reactor was idle at `t`, starting an idle period if none is open.
+    fn mark_idle(&mut self, t: SchedTimePoint) {
+        self._idle_end = t;
+        if self._idle_start.is_none() {
+            self._idle_start = Some(t);
+        }
+    }
+
+    /// Adds the open idle period up to `_idle_end` to `_total_idle`, leaving it open from
+    /// there. Does nothing when not idle.
+    fn update_idle(&mut self) {
+        if let Some(start) = self._idle_start {
+            self._total_idle += self._idle_end - start;
+            self._idle_start = Some(self._idle_end);
+        }
+    }
+
+    /// Adds the open idle period up to `_idle_end` to `_total_idle` and closes it. Does
+    /// nothing when not idle.
+    fn end_idle(&mut self) {
+        self.update_idle();
+        self._idle_start = None;
     }
 
     /// Total time the reactor thread was awake.
@@ -9923,6 +10000,12 @@ pub fn rename_scheduling_group_with_shortname(
                 (*tq).rename(new_name.clone(), new_shortname.clone())
             });
         }
+        // The stages of the group are named after it: they follow the rename.
+        // SAFETY: the manager of this thread is live; the reference ends with the call.
+        unsafe {
+            (*crate::engine::core::execution_stage::internal::ExecutionStageManager::get())
+                .update_scheduling_group_name(sg)
+        };
         // SAFETY: on this shard's reactor thread; the reactor is reached for this call only (see `engine()`).
         unsafe {
             (*engine()).rename_queues(

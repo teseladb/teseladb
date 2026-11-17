@@ -33,6 +33,20 @@ pub mod internal {
         _inp: *mut InputStream<u8>,
         _remaining_bytes: usize,
         _consumed_bytes: *mut usize,
+        /// The declared length of the body.
+        _length: usize,
+    }
+
+    /// `EPROTO`, the error of a body that ends before it should (`std::errc::protocol_error`).
+    const EPROTO: i32 = 71;
+
+    /// The error of a body cut short: a protocol error.
+    pub(crate) fn truncated_body_error(what: &str) -> ExceptionPtr {
+        ExceptionPtr::new(crate::engine::core::future::SystemError::with_category(
+            EPROTO,
+            crate::engine::core::future::ErrorCategory::Generic,
+            what,
+        ))
     }
 
     impl ContentLengthSourceImpl {
@@ -53,6 +67,7 @@ pub mod internal {
                 _inp: inp,
                 _remaining_bytes: length,
                 _consumed_bytes: consumed_bytes,
+                _length: length,
             }
         }
 
@@ -79,6 +94,15 @@ pub mod internal {
                     // SAFETY: the source lives boxed in its DataSource, which does not move it, and
                     // the stream does not drop it while a read is pending.
                     let s = unsafe { &mut *this };
+                    if tmp_buf.empty() {
+                        // read_up_to() asked for a non-zero amount, so an empty buffer is the
+                        // end of the stream and the body is not over yet. Answering it as a
+                        // clean end of stream hands the reader a silently short body.
+                        return make_exception_future(truncated_body_error(&format!(
+                            "Body ended with {} of its {} bytes undelivered",
+                            s._remaining_bytes, s._length
+                        )));
+                    }
                     s._remaining_bytes -= tmp_buf.size();
                     if !s._consumed_bytes.is_null() {
                         // SAFETY: the counter outlives the source (the constructor's contract).
@@ -293,10 +317,17 @@ pub mod internal {
         }
 
         fn call(&mut self, mut data: TemporaryBuffer<u8>) -> Future<ConsumptionResultType> {
-            if self._buf.size() != 0 || self._end_of_request || data.empty() {
-                // return if we have already read some content (_buf.size()), we have already reached the end of the chunked request (_end_of_request),
-                // or the underlying stream reached eof (data.empty())
+            if self._buf.size() != 0 || self._end_of_request {
+                // return if we have already read some content (_buf.size()), or we have
+                // already reached the end of the chunked request (_end_of_request)
                 return make_ready_future(stop_consuming(data));
+            }
+            if data.empty() {
+                // consume() only hands over an empty buffer at the end of the stream, and the
+                // terminating chunk has not been seen, so the body was cut short.
+                return make_exception_future(truncated_body_error(
+                    "Chunked body ended before its last chunk",
+                ));
             }
             let this: *mut ChunkParser = self;
             match self._ps {

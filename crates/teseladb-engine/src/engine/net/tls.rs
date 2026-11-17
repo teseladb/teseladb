@@ -1035,10 +1035,8 @@ impl DhParams {
     /// parameters.
     pub fn from_file(filename: &Sstring, fmt: X509CrtFormat) -> Future<DhParams> {
         read_fully(filename, &Sstring::from("dh parameters")).then(move |r: FileResult| {
-            // The file's bytes up to the first null, as for a C string.
-            let bytes = r.buf.as_slice();
-            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            match DhParams::from_blob(&bytes[..end], fmt) {
+            // All the bytes of the file: a DER file holds null bytes, which must not end it.
+            match DhParams::from_blob(r.buf.as_slice(), fmt) {
                 Ok(d) => make_ready_future::<DhParams>(d),
                 Err(e) => make_exception_future(e),
             }

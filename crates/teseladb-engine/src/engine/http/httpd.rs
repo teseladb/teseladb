@@ -356,6 +356,18 @@ pub mod httpd {
                     return make_ready_future(());
                 }
 
+                // RFC 9112 6.1 and 6.3: a message with both headers is a possible request
+                // smuggling attempt; it is rejected and the connection closed. Otherwise the
+                // chunked body would be read while content_length kept the declared length.
+                if req.has_header("Transfer-Encoding") && req.has_header("Content-Length") {
+                    c.generate_error_reply_and_close(
+                        req,
+                        StatusType::BAD_REQUEST,
+                        &Sstring::from("Conflicting Transfer-Encoding and Content-Length headers"),
+                    );
+                    return make_ready_future(());
+                }
+
                 let content_length_limit = c.server().get_content_length_limit();
                 let length_header = req.get_header("Content-Length");
                 req.content_length = strtol10(length_header.as_bytes());
@@ -449,11 +461,21 @@ pub mod httpd {
                                             // need to close it (via "_done = true"). But we can't
                                             // just check content_stream.eof(): It may only become
                                             // true after read().
+                                            //
+                                            // That read can also fail rather than answer: a body
+                                            // that ended early raises. The reply is already
+                                            // generated and the peer that would receive an error
+                                            // is the one that went away, so only the connection
+                                            // is left to decide, and it is done.
                                             // SAFETY: the content stream lives in the do_with
                                             // state, alive and in place until the chain resolves,
                                             // and the handler has finished with it.
-                                            unsafe { &mut *content_stream }.read().then(move |buf: TemporaryBuffer<u8>| {
-                                                if !buf.empty() {
+                                            unsafe { &mut *content_stream }.read().then_wrapped(move |f: Future<TemporaryBuffer<u8>>| {
+                                                let done = match f.get() {
+                                                    Ok(buf) => !buf.empty(),
+                                                    Err(_) => true,
+                                                };
+                                                if done {
                                                     // SAFETY: the connection outlives process().
                                                     unsafe { (*this)._done = true };
                                                 }
@@ -568,6 +590,11 @@ pub mod httpd {
                             f.ignore_ready_future();
                             return make_ready_future(());
                         }
+                        // The reply to a HEAD has no body, not even its last chunk.
+                        // SAFETY: the reply stays boxed in `_resp` until the last step.
+                        if unsafe { (*resp)._skip_body } {
+                            return make_ready_future(());
+                        }
                         c._write_buf.write(b"0\r\n\r\n")
                     })
                     .then_wrapped(move |mut f: Future<()>| {
@@ -611,8 +638,14 @@ pub mod httpd {
                 .then(move |()| unsafe { (*resp).write_reply_headers(&mut *this) })
                 // SAFETY: the connection outlives process(); the previous step is done.
                 .then(move |()| unsafe { &mut (*this)._write_buf }.write(b"\r\n"))
-                // SAFETY: the connection outlives process(); the previous step is done.
-                .then(move |()| unsafe { (*this).write_body() })
+                // SAFETY: the connection outlives process(); the previous step is done. The
+                // reply stays boxed in `_resp` until the last step.
+                .then(move |()| unsafe {
+                    if (*resp)._skip_body {
+                        return make_ready_future(());
+                    }
+                    (*this).write_body()
+                })
                 // SAFETY: the connection outlives process(); the previous step is done.
                 .then(move |()| unsafe { &mut (*this)._write_buf }.flush())
                 // SAFETY: the connection outlives process(); nothing borrows the reply now.
@@ -630,15 +663,13 @@ pub mod httpd {
             resp.set_version(&req._version);
             self.set_headers(&mut resp);
             let keep_alive = req.should_keep_alive();
-            if keep_alive && req._version.as_bytes() == b"1.0" {
-                resp._headers.insert(
-                    CaseInsensitiveKey(Sstring::from("Connection")),
-                    Sstring::from("Keep-Alive"),
-                );
-            }
+            set_header_connection(&mut resp, keep_alive);
 
             let url = req.parse_query_param();
             let version = req._version.clone();
+            if req._method.as_bytes() == b"HEAD" {
+                resp.skip_body();
+            }
             let this: *mut Connection = self;
             self.server()._routes.handle(&url, req, resp).then(
                 // Caller guarantees enough room
@@ -663,6 +694,7 @@ pub mod httpd {
             // TODO: Handle HTTP/2.0 when it releases
             resp.set_version(&req._version);
             resp.set_status(status, msg.clone());
+            set_header_connection(&mut resp, false);
             resp.done();
             self._done = true;
             // A full queue drops the reply (push returns false).
@@ -713,6 +745,16 @@ pub mod httpd {
         (if neg { n.wrapping_neg() } else { n }) as usize
     }
 
+    /// Sets the Connection header of a reply: `Keep-Alive` for a kept connection of HTTP/1.0,
+    /// and `close` when the server closes the connection after this reply on HTTP/1.1, which
+    /// RFC 9112 9.6 asks the server to say in its final response.
+    fn set_header_connection(resp: &mut Reply, keep_alive: bool) {
+        let (version, value) = if keep_alive { (b"1.0", "Keep-Alive") } else { (b"1.1", "close") };
+        if resp._version.as_bytes() == version {
+            resp._headers.insert(CaseInsensitiveKey(Sstring::from("Connection")), Sstring::from(value));
+        }
+    }
+
     /// The state of the content of a request: the content stream, the version, the request
     /// until it is handed to the routes, and where the chunked source saves its extensions
     /// and trailers.
@@ -728,6 +770,7 @@ pub mod httpd {
     ) -> InputStream<u8> {
         // Create an input stream based on the requests body encoding or lack thereof
         if CaseInsensitiveCmp.call(req.get_header("Transfer-Encoding").as_bytes(), b"chunked") {
+            req.content_length = 0;
             // SAFETY: the caller's contract.
             unsafe {
                 targets.set(&mut req.chunk_extensions, &mut req.trailing_headers);

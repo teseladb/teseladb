@@ -206,7 +206,7 @@ struct Entry<C: TimerClock> {
 /// The back pointer is set by the semaphore each time it queues a waiter (the semaphore is
 /// only at its final address once it is in use).
 struct ExpiryHandler<F: SemaphoreExceptionFactory + 'static, C: TimerClock> {
-    sem: *const BasicSemaphore<F, C>,
+    sem: *mut BasicSemaphore<F, C>,
 }
 
 impl<F: SemaphoreExceptionFactory + 'static, C: TimerClock> Aborter<Entry<C>>
@@ -224,6 +224,18 @@ impl<F: SemaphoreExceptionFactory + 'static, C: TimerClock> Aborter<Entry<C>>
             e.pr.set_exception(sem.ex.clone());
         } else {
             e.pr.set_exception(sem.get_aborted_exception());
+        }
+    }
+
+    // After a waiter left the wait list because it timed out or was aborted, the waiters
+    // that were behind it may now be served.
+    unsafe fn after_abort(this: *mut Self) {
+        // SAFETY: `this` is the live handler (guaranteed by the caller); its back pointer
+        // was set when the waiter was queued and the semaphore does not move while it has
+        // waiters. The handler is only read here, before the semaphore is borrowed.
+        unsafe {
+            let sem = (*this).sem;
+            (*sem).wake_waiters();
         }
     }
 }
@@ -315,7 +327,7 @@ impl<F: SemaphoreExceptionFactory + 'static, C: TimerClock> BasicSemaphore<F, C>
             factory,
             count: count as isize,
             ex: ExceptionPtr::null(),
-            wait_list: AbortableFifo::new(ExpiryHandler { sem: std::ptr::null() }),
+            wait_list: AbortableFifo::new(ExpiryHandler { sem: std::ptr::null_mut() }),
             used: UsedFlag::default(),
         }
     }
@@ -323,8 +335,19 @@ impl<F: SemaphoreExceptionFactory + 'static, C: TimerClock> BasicSemaphore<F, C>
     /// Points the expiry handler at this semaphore.
     #[inline]
     fn bind(&mut self) {
-        let me: *const Self = self;
+        let me: *mut Self = self;
         self.wait_list.on_abort_mut().sem = me;
+    }
+
+    /// Serves the waiters at the front of the wait list, in order, while the available
+    /// units are enough for them.
+    fn wake_waiters(&mut self) {
+        while !self.wait_list.empty() && self.has_available_units(self.wait_list.front_ref().nr) {
+            let x = self.wait_list.front();
+            self.count -= x.nr as isize;
+            x.pr.set_value(());
+            self.wait_list.pop_front();
+        }
     }
 
     /// Waits until at least a specific number of units are available in the
@@ -463,12 +486,7 @@ impl<F: SemaphoreExceptionFactory + 'static, C: TimerClock> BasicSemaphore<F, C>
             return;
         }
         self.count += nr as isize;
-        while !self.wait_list.empty() && self.has_available_units(self.wait_list.front_ref().nr) {
-            let x = self.wait_list.front();
-            self.count -= x.nr as isize;
-            x.pr.set_value(());
-            self.wait_list.pop_front();
-        }
+        self.wake_waiters();
     }
 
     /// Consumes `nr` units without blocking.

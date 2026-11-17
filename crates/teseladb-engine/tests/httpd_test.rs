@@ -3299,3 +3299,386 @@ teseladb::engine_test_case!(test_client_close_connection, {
         Ok(())
     })
 });
+
+/// Makes one request with method `method` to a server that answers `reply_head` and then
+/// keeps the connection open, sending nothing more, until the client closes it; checks that
+/// the reply handler reads an empty body at once, the reply's Content-Length notwithstanding.
+/// A client reading the declared body would wait for it forever.
+fn check_bodyless_reply(method: &'static str, reply_head: &'static str, expected: StatusType) -> Result<(), ExceptionPtr> {
+    let mut lcf = LoopbackConnectionFactory::new(1);
+    let mut ss_ = lcf.get_server_socket();
+    let server = ss_.accept().then(move |ar: AcceptResult| {
+        serve_connection(ar, move |sk| {
+            let mut in_ = sk.input(Default::default());
+            read_simple_http_request(&mut in_)?;
+            let mut out = sk.output(8192);
+            out.write_str(reply_head).get()?;
+            out.flush().get()?;
+            while !in_.read().get()?.empty() {}
+            out.close().get()?;
+            Ok(())
+        })
+    });
+
+    let lcfp: *mut LoopbackConnectionFactory = &mut lcf;
+    let client = async_(move || -> Result<(), ExceptionPtr> {
+        let mut cln = default_loopback_client(lcfp);
+        let req = Request::make(ss(method), ss("test"), ss("/test"));
+        let handled = Rc::new(Cell::new(false));
+        let h = handled.clone();
+        cln.as_mut()
+            .make_request(
+                req,
+                reply_handler(move |rep: &Reply, mut in_: InputStream<u8>| {
+                    let content_length = rep.content_length;
+                    let h = h.clone();
+                    async_(move || -> Result<(), ExceptionPtr> {
+                        assert!(content_length > 0);
+                        let buf = in_.read().get()?;
+                        assert!(buf.empty(), "the handler read {} bytes of a bodyless reply", buf.size());
+                        in_.close().get()?;
+                        h.set(true);
+                        Ok(())
+                    })
+                }),
+                Some(expected),
+            )
+            .get()?;
+        cln.as_mut().close().get()?;
+        assert!(handled.get());
+        Ok(())
+    });
+
+    // Both results are checked: a failure of either must fail the test, not be discarded.
+    let (c, s) = when_all((client, server)).get()?;
+    c.get()?;
+    s.get()?;
+    Ok(())
+}
+
+// The answer to a HEAD has no body, whatever its Content-Length says.
+teseladb::engine_test_case!(test_client_head_empty_body, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        check_bodyless_reply(
+            "HEAD",
+            "HTTP/1.1 200 OK\r\nHost: localhost\r\nContent-Length: 128\r\n\r\n",
+            StatusType::OK,
+        )
+    })
+});
+
+// A 304 may report the length a 200 would have carried and still carry no body of its own;
+// a 204 and a 1xx carry none either.
+teseladb::engine_test_case!(test_client_bodyless_reply_with_content_length, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        check_bodyless_reply(
+            "GET",
+            "HTTP/1.1 304 Not Modified\r\nHost: localhost\r\nContent-Length: 1234\r\n\r\n",
+            StatusType::NOT_MODIFIED,
+        )?;
+        check_bodyless_reply(
+            "GET",
+            "HTTP/1.1 204 No Content\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n",
+            StatusType::NO_CONTENT,
+        )
+    })
+});
+
+/// A HEAD request gets the headers the handler set, as a GET would, but no body (RFC 7231
+/// 4.3.2): the reply ends at the end of its header section.
+fn head_handler_no_body(chunked: bool) -> Result<(), ExceptionPtr> {
+    let mut lcf = LoopbackConnectionFactory::new(1);
+    let mut server = TestServer::new(&ss("test"));
+    let mut lsi = LoopbackSocketImpl::new(&mut lcf, None);
+    HttpServerTester::listeners(server.get()).push(lcf.get_server_socket());
+
+    let lsip: *mut LoopbackSocketImpl = &mut lsi;
+    let client = async_(move || -> Result<(), ExceptionPtr> {
+        // SAFETY: the socket outlives the client thread, joined below.
+        let mut c_socket = unsafe { (*lsip).connect(any_addr(), any_addr(), Transport::TCP) }.get()?;
+        let mut input = c_socket.input(Default::default());
+        let mut output = c_socket.output(8192);
+
+        // "Connection: close": the server closes the connection after the reply, so all of
+        // it, and nothing more, is read up to the end of the stream.
+        output
+            .write_sstring(&ss(
+                "HEAD /test HTTP/1.1\r\nHost: test\r\nConnection: close\r\nContent-Length: 1\r\n\r\nA",
+            ))
+            .get()?;
+        output.flush().get()?;
+        let mut resp_s = String::new();
+        loop {
+            let resp = input.read().get()?;
+            if resp.empty() {
+                break;
+            }
+            resp_s.push_str(&String::from_utf8_lossy(resp.as_slice()));
+        }
+        assert!(resp_s.contains("200 OK"), "{resp_s}");
+        // The header fields of a GET are kept ...
+        if chunked {
+            assert!(resp_s.contains("Transfer-Encoding: chunked\r\n"), "{resp_s}");
+        } else {
+            assert!(resp_s.contains("Content-Length: 1\r\n"), "{resp_s}");
+        }
+        // ... but not the body itself.
+        assert_eq!(resp_s.find("\r\n\r\n"), Some(resp_s.len() - 4), "{resp_s}");
+
+        input.close().get()?;
+        output.close().get()?;
+        Ok(())
+    });
+
+    server.get()._routes.put(OperationType::Head, "/test", raw_handler(EchoStringHandler::new(chunked)))?;
+    server.pin().do_accepts(0).get()?;
+
+    client.get()?;
+    server.get().stop().get()?;
+    Ok(())
+}
+
+teseladb::engine_test_case!(head_handler_no_body_content_length, {
+    async_(|| head_handler_no_body(false))
+});
+
+teseladb::engine_test_case!(head_handler_no_body_chunked, {
+    async_(|| head_handler_no_body(true))
+});
+
+/// `EPROTO` (`std::errc::protocol_error`): the error of a body cut short.
+const EPROTO_CODE: i32 = 71;
+
+/// Makes a GET to a server that answers `reply` and hangs up, and checks that reading the
+/// whole body fails with a protocol error.
+fn check_body_ends_early(reply: String) -> Result<(), ExceptionPtr> {
+    let mut lcf = LoopbackConnectionFactory::new(1);
+    let mut ss_ = lcf.get_server_socket();
+    let server = ss_
+        .accept()
+        .then(move |ar: AcceptResult| serve_connection(ar, move |sk| write_and_close(sk, &reply)));
+
+    let lcfp: *mut LoopbackConnectionFactory = &mut lcf;
+    let client = async_(move || -> Result<(), ExceptionPtr> {
+        let mut cln = loopback_client(lcfp, 1, RetryRequests::NO);
+        let r = cln
+            .as_mut()
+            .make_request(
+                get_request("/test"),
+                reply_handler(|_rep: &Reply, mut in_: InputStream<u8>| {
+                    async_(move || -> Result<(), ExceptionPtr> {
+                        // SAFETY: `in_` lives in the thread's frame while the read is waited for.
+                        let r = unsafe { util::read_entire_stream_contiguous(&mut in_) }.get();
+                        in_.close().get()?;
+                        r.map(drop)
+                    })
+                }),
+                Some(StatusType::OK),
+            )
+            .get();
+        cln.as_mut().close().get()?;
+        assert_eq!(r.as_ref().err().and_then(system_error_code), Some(EPROTO_CODE), "{r:?}");
+        Ok(())
+    });
+
+    // Both results are checked: a failure of either must fail the test, not be discarded.
+    let (c, s) = when_all((client, server)).get()?;
+    c.get()?;
+    s.get()?;
+    Ok(())
+}
+
+// Half of a 128-byte body, then the connection goes away.
+teseladb::engine_test_case!(test_client_response_body_ends_early, {
+    async_(|| {
+        check_body_ends_early(format!(
+            "HTTP/1.1 200 OK\r\nHost: localhost\r\nContent-Length: 128\r\n\r\n{}",
+            "a".repeat(64)
+        ))
+    })
+});
+
+// One whole chunk, then a second one that never arrives in full, and no terminating chunk.
+teseladb::engine_test_case!(test_client_chunked_body_ends_early, {
+    async_(|| {
+        check_body_ends_early(
+            "HTTP/1.1 200 OK\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n4\r\nab"
+                .to_string(),
+        )
+    })
+});
+
+// The handler leaves the body unread, and the peer that would have received an error reply is
+// the one that went away, so the only thing a truncated request body decides is that the
+// connection cannot be reused: no read error is counted.
+teseladb::engine_test_case!(test_request_body_ends_early, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        let mut lcf = LoopbackConnectionFactory::new(1);
+        let mut server = TestServer::new(&ss("test"));
+        server.get().set_content_streaming(true);
+        let mut lsi = LoopbackSocketImpl::new(&mut lcf, None);
+        HttpServerTester::listeners(server.get()).push(lcf.get_server_socket());
+
+        let lsip: *mut LoopbackSocketImpl = &mut lsi;
+        let client = async_(move || -> Result<(), ExceptionPtr> {
+            // SAFETY: the socket outlives the client thread, joined below.
+            let mut c_socket =
+                unsafe { (*lsip).connect(any_addr(), any_addr(), Transport::TCP) }.get()?;
+            let mut input = c_socket.input(Default::default());
+            let mut output = c_socket.output(8192);
+            // None of the declared body arrives, so the server's probe reads straight to the
+            // end of the stream with all 32 bytes still owed.
+            output
+                .write_sstring(&ss("GET /test HTTP/1.1\r\nHost: test\r\nContent-Length: 32\r\n\r\n"))
+                .get()?;
+            output.flush().get()?;
+            output.close().get()?;
+            input.close().get()?;
+            Ok(())
+        });
+
+        server.get()._routes.put(OperationType::Get, "/test", hello_handler())?;
+        server.pin().do_accepts(0).get()?;
+
+        client.get()?;
+        // Without the guard the probe's read fails with a system error, which is not a
+        // BaseException, so it escapes the error-reply path and is counted here.
+        assert_eq!(server.get().read_errors(), 0);
+        server.get().stop().get()?;
+        Ok(())
+    })
+});
+
+// A request with both Transfer-Encoding and Content-Length is a possible request smuggling
+// attempt (RFC 9112 6.1 and 6.3): it is rejected and the connection closed, with or without
+// content streaming, whatever the case of the header names.
+teseladb::engine_test_case!(test_conflicting_transfer_encoding_and_content_length, {
+    let expected: Vec<&'static [u8]> = vec![
+        b"400 Bad Request",
+        b"Connection: close",
+        b"Conflicting Transfer-Encoding and Content-Length headers",
+    ];
+    let e2 = expected.clone();
+    let e3 = expected.clone();
+    check_http_reply(
+        vec![
+            b"POST /test HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
+            b"5\r\nhello\r\n",
+            b"0\r\n\r\n",
+        ],
+        expected,
+        false,
+        raw_handler(EchoStringHandler::new(false)),
+    )
+    .then(move |()| {
+        check_http_reply(
+            vec![
+                b"POST /test HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n",
+                b"5\r\nhello\r\n",
+                b"0\r\n\r\n",
+            ],
+            e2,
+            true,
+            raw_handler(EchoStreamHandler::new(false)),
+        )
+    })
+    .then(move |()| {
+        check_http_reply(
+            vec![
+                b"POST /test HTTP/1.1\r\nHost: test\r\ntransfer-encoding: chunked\r\ncontent-length: 1\r\n\r\n",
+                b"5\r\nhello\r\n",
+                b"0\r\n\r\n",
+            ],
+            e3,
+            false,
+            raw_handler(EchoStringHandler::new(false)),
+        )
+    })
+});
+
+// A function handler of a text route returns its string as the body, not formatted as json.
+teseladb::engine_test_case!(test_text_route, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        let mut route = Routes::new();
+        route.add(
+            OperationType::Get,
+            &Url::new(&ss("/hello")),
+            Box::new(FunctionHandler::from_request_function(
+                Box::new(|_req: &Request| Ok(ss("hello, you"))),
+                &ss("txt"),
+            )),
+        );
+        let reply = route.handle(&ss("/hello"), Box::new(Request::default()), Box::new(Reply::new())).get()?;
+        assert_eq!(reply._status, StatusType::OK);
+        assert_eq!(reply.get_header("Content-Type"), ss("text/plain"));
+        assert_eq!(reply._content, ss("hello, you"));
+        Ok(())
+    })
+});
+
+// A connection a request leaves in the client's pool outlives the request's scheduling
+// group: destroying the group and then closing the connection must not schedule work into
+// the destroyed group.
+teseladb::engine_test_case!(test_client_pooled_connection_outlives_scheduling_group, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        let mut lcf = LoopbackConnectionFactory::new(1);
+        let mut ss_ = lcf.get_server_socket();
+        let server = ss_.accept().then(|ar: AcceptResult| {
+            serve_connection(ar, |sk| {
+                let mut in_ = sk.input(Default::default());
+                read_simple_http_request(&mut in_)?;
+                let mut out = sk.output(8192);
+                out.write_str("HTTP/1.1 200 OK\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n").get()?;
+                out.flush().get()?;
+                while !in_.read().get()?.empty() {}
+                out.close().get()?;
+                Ok(())
+            })
+        });
+
+        let sg = teseladb::engine::core::reactor::create_scheduling_group_with_shares(
+            "http_client_sg".into(),
+            100.0,
+        )
+        .get()?;
+        let lcfp: *mut LoopbackConnectionFactory = &mut lcf;
+        let mut cln = default_loopback_client(lcfp);
+        let clnp: *mut Pin<Box<Client>> = &mut cln;
+        teseladb::engine::core::with_scheduling_group::with_scheduling_group(sg, move || {
+            // SAFETY: the client outlives the request, waited for right here.
+            unsafe { &mut *clnp }.as_mut().make_request(
+                get_request("/test"),
+                reply_handler(|rep: &Reply, _in: InputStream<u8>| {
+                    assert_eq!(rep._status, StatusType::OK);
+                    make_ready_future(())
+                }),
+                None,
+            )
+        })
+        .get()?;
+        teseladb::engine::core::reactor::destroy_scheduling_group(sg).get()?;
+
+        cln.as_mut().close().get()?;
+        server.get()?;
+        Ok(())
+    })
+});
+
+// The final reply on a connection the server closes says so (RFC 9112 9.6): both the reply to a
+// request with "Connection: close" and an error reply after which the server closes.
+teseladb::engine_test_case!(test_close_response, {
+    check_http_reply(
+        vec![b"GET /test HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"],
+        vec![b"200 OK", b"Connection: close"],
+        true,
+        raw_handler(EchoStreamHandler::new(false)),
+    )
+    .then(|()| {
+        check_http_reply(
+            vec![b"/test\r\n\r\n"],
+            vec![b"400 Bad Request", b"Connection: close", b"Can't parse the request"],
+            false,
+            raw_handler(EchoStringHandler::new(false)),
+        )
+    })
+});

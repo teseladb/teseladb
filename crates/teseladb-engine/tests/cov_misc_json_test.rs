@@ -211,3 +211,12 @@ engine_thread_test_case!(objects_and_empty_values_stream_to_the_output, {
     assert!(r.is_ok());
     assert_eq!(text, "");
 });
+
+// An object with no set member streams as {}, as to_json() writes it, not as a bare }.
+engine_thread_test_case!(test_stream_empty_object, {
+    let o = Obj::new();
+    assert_eq!(o.base_to_json().expect("to_json"), "{}");
+    let (r, text) = with_stream(|out| o.clone().base_write(out).get(), true);
+    assert!(r.is_ok());
+    assert_eq!(text, "{}");
+});

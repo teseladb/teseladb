@@ -564,6 +564,9 @@ pub struct Connection {
     // the future holds if sink is already closed
     // if it is not ready it means the sink is been closed
     pub(crate) _sink_closed_future: Future<bool>,
+    /// Set by stream_close() before it closes the write buffer: from then on send() refuses
+    /// new frames (see stream_close()).
+    pub(crate) _stream_closing: bool,
 }
 
 impl Connection {
@@ -625,6 +628,7 @@ impl Connection {
             _source_closed: true,
             _stream_eos_received: false,
             _sink_closed_future: make_ready_future(false),
+            _stream_closing: false,
         }
     }
 
@@ -1921,17 +1925,26 @@ impl Connection {
         // `futurize_invoke`: a failure of compress() becomes the failed future.
         // SAFETY: the caller keeps the entry alive until the returned future resolves.
         let d = unsafe { &mut *d };
+        // left_ms is 0 when no timer is set (the server takes 0 as "no timeout"). When a
+        // timer is set, an entry whose deadline already passed is dropped without being sent
+        // (as the timer would have withdrawn it if it were not at the front of the queue);
+        // otherwise the remaining time goes with it so that the server honours the deadline
+        // too. Sending the negative remainder wrapped to a timeout ~2^63 ms away.
+        let expire = d.t.get_timeout();
+        let mut left_ms: u64 = 0;
+        if expire != RpcTimePoint::from_nanos(0) {
+            let ns = expire.nanos_since_epoch() - RpcClockType::now().nanos_since_epoch();
+            let ms = ns / 1_000_000;
+            if ms <= 0 {
+                return make_ready_future(());
+            }
+            left_ms = ms as u64;
+        }
         if d.buf.size != 0 && self._propagate_timeout {
             const _: () = assert!(SndBuf::CHUNK_SIZE >= 8, "send buffer chunk size is too small");
             if self._timeout_negotiated {
-                let expire = d.t.get_timeout();
-                let mut left: u64 = 0;
-                if expire != RpcTimePoint::from_nanos(0) {
-                    let ns = expire.nanos_since_epoch() - RpcClockType::now().nanos_since_epoch();
-                    left = (ns / 1_000_000) as u64;
-                }
                 // SAFETY: the request frame has room for the timeout in its first chunk.
-                unsafe { write_le::<u64>(d.buf.front().get_write(), left) };
+                unsafe { write_le::<u64>(d.buf.front().get_write(), left_ms) };
             } else {
                 d.buf.front().trim_front(8);
                 d.buf.size -= 8;
@@ -2112,7 +2125,7 @@ impl Connection {
         // SAFETY: the pointer is stored only in the entry's pcancel, which the cancellable
         // reaches through send_back_pointer (set below).
         let cancel = cancel.map_or(std::ptr::null_mut(), |c| unsafe { c.as_registered() });
-        if !self._error {
+        if !self._error && !self._stream_closing {
             if let Some(t) = timeout
                 && t <= RpcClockType::now()
             {
@@ -2572,16 +2585,35 @@ impl Connection {
     /// Closes a stream connection whose two sides are closed.
     pub(crate) fn stream_close(&mut self) -> Future<()> {
         let mut f = make_ready_future(());
+        let this: *mut Connection = self;
         if !self.error() {
+            // Nothing may be sent on this connection from here on. The write buffer is
+            // closed below while _error is still false, and _error is only set by the stop()
+            // that follows; a frame accepted meanwhile (a compressor may send an empty frame
+            // at any time) would be written into the closed stream.
+            self._stream_closing = true;
             let mut p = Promise::<bool>::new();
             self._sink_closed_future = p.get_future();
+            // Entries that send() accepted before the flag was set may still be queued: wait
+            // for them to be written before closing the write buffer. Nothing else waits for
+            // _outgoing_queue_ready from here on: send() is refused, and stop_send_loop()
+            // waits for _sink_closed_future.
+            let queue_drained =
+                std::mem::replace(&mut self._outgoing_queue_ready, make_ready_future(()));
             // stop_send_loop(), which also calls _write_buf.close(), and this code can run in parallel.
             // Use _sink_closed_future to serialize them and skip second call to close()
-            f = self._write_buf.close().finally(move || {
-                p.set_value(true);
-            });
+            f = queue_drained
+                .then_wrapped(move |mut fut: Future<()>| {
+                    // _outgoing_queue_ready is exceptional if an entry failed; the write
+                    // buffer still has to be closed.
+                    fut.ignore_ready_future();
+                    // SAFETY: the connection outlives its streams.
+                    unsafe { (*this)._write_buf.close() }
+                })
+                .finally(move || {
+                    p.set_value(true);
+                });
         }
-        let this: *mut Connection = self;
         // SAFETY: the connection outlives its streams.
         f.finally(move || unsafe { (*this).stop() })
     }

@@ -134,3 +134,27 @@ fn test_ip_missing_if_thrown() {
     .expect_err("config_exception");
     assert!(e.is::<ConfigException>());
 }
+
+// eth0 is valid, but eth1 has dhcp off and is missing netmask: each device must be validated.
+#[test]
+fn test_mixed_dhcp_off_incomplete_if_thrown() {
+    let e = parse(
+        "{eth0: {pci-address: 0000:06:00.0, ip: 192.168.100.10, gateway: 192.168.100.1, netmask: \
+         255.255.255.0 } , eth1: {pci-address: 0000:06:00.1, ip: 192.168.100.11, gateway: \
+         192.168.100.1 } }",
+    )
+    .expect_err("config_exception");
+    assert!(e.is::<ConfigException>());
+}
+
+// eth0 is valid, but eth1 uses dhcp together with a static ip: each device must be validated.
+#[test]
+fn test_mixed_dhcp_and_ip_if_thrown() {
+    let e = parse(
+        "{eth0: {pci-address: 0000:06:00.0, ip: 192.168.100.10, gateway: 192.168.100.1, netmask: \
+         255.255.255.0 } , eth1: {pci-address: 0000:06:00.1, dhcp: true, ip: 192.168.100.11, \
+         gateway: 192.168.100.1, netmask: 255.255.255.0 } }",
+    )
+    .expect_err("config_exception");
+    assert!(e.is::<ConfigException>());
+}

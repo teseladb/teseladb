@@ -31,6 +31,7 @@ use crate::engine::core::future::{
     make_ready_future,
 };
 use crate::engine::core::loop_::{StopCondition, do_until};
+use crate::engine::core::timed_out_error::TimedOutError;
 use crate::engine::core::timer::{Clock, SteadyClockType, Timer, TimerClock};
 
 /// Error delivered to waiters of a condition variable broken by [`ConditionVariable::broken`].
@@ -53,7 +54,8 @@ impl fmt::Display for BrokenConditionVariable {
 impl std::error::Error for BrokenConditionVariable {}
 
 /// Error delivered when a timed wait ([`ConditionVariable::wait_until`] and friends) times
-/// out.
+/// out. Like [`SemaphoreTimedOut`](crate::engine::core::semaphore::SemaphoreTimedOut), it is
+/// a kind of [`TimedOutError`], so a handler of any timeout also handles it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ConditionVariableTimedOut;
 
@@ -71,6 +73,14 @@ impl fmt::Display for ConditionVariableTimedOut {
 }
 
 impl std::error::Error for ConditionVariableTimedOut {}
+
+impl crate::engine::core::future::DerivedException for ConditionVariableTimedOut {
+    type Base = TimedOutError;
+    #[inline]
+    fn base(&self) -> &TimedOutError {
+        &TimedOutError
+    }
+}
 
 // The header of every waiter in the wait list: promise-based waiters and awaiters both
 // start with it, and the vtable dispatches to the concrete kind.
@@ -103,7 +113,7 @@ impl Waiter {
         // SAFETY: guaranteed by the caller.
         unsafe {
             (*w).hook.unlink();
-            ((*w).vt.set_exception)(w, make_exception_ptr(ConditionVariableTimedOut));
+            ((*w).vt.set_exception)(w, ExceptionPtr::new_derived(ConditionVariableTimedOut));
         }
     }
 

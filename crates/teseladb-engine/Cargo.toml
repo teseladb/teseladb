@@ -106,6 +106,24 @@ name = "cov3_core_startup_options_test"
 path = "tests/entry/cov3_core_startup_options_test.rs"
 harness = false
 
+# Runs with the epoll reactor backend, which its main adds to the reactor options.
+[[test]]
+name = "defect_epoll_error_spin"
+path = "tests/entry/defect_epoll_error_spin.rs"
+harness = false
+
+# Runs on one shard with the epoll backend, which its main adds to the reactor options.
+[[test]]
+name = "defect_refused_sleep_no_syscalls"
+path = "tests/entry/defect_refused_sleep_no_syscalls.rs"
+harness = false
+
+# Runs on two shards, which its main adds to the reactor options.
+[[test]]
+name = "defect_forwarded_connection_no_listener"
+path = "tests/entry/defect_forwarded_connection_no_listener.rs"
+harness = false
+
 # The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints
 # its results table.
 [[bench]]

@@ -313,6 +313,8 @@ pub const SOL_IP: c_int = 0;
 pub const IP_PKTINFO: c_int = 8;
 /// Receive [`in6_pktinfo`] control messages.
 pub const IPV6_PKTINFO: c_int = 50;
+/// `IPV6_RECVPKTINFO` (`<netinet/in.h>`): attach `IPV6_PKTINFO` to received datagrams.
+pub const IPV6_RECVPKTINFO: c_int = 49;
 /// Datagram socket type.
 pub const SOCK_DGRAM: c_int = 2;
 /// Raw socket type.
@@ -1066,11 +1068,13 @@ pub trait PosixConnectedSocketOperations: Sync {
             Err(e) => terminate_in_noexcept("getsockname", &e),
         }
     }
-    /// The peer's address (`getpeername`); a failure aborts the process, as for
-    /// [`PosixConnectedSocketOperations::local_address`].
+    /// The peer's address (`getpeername`). A socket the kernel no longer has connected (the
+    /// peer reset it, say) has no peer: its address is the unspecified one. Any other failure
+    /// aborts the process, as for [`PosixConnectedSocketOperations::local_address`].
     fn remote_address(&self, _fd: &FileDesc) -> SocketAddress {
         match get_remote_address(_fd) {
             Ok(a) => a,
+            Err(e) if system_error_code(&e) == Some(ENOTCONN) => SocketAddress::default(),
             Err(e) => terminate_in_noexcept("getpeername", &e),
         }
     }
@@ -1867,7 +1871,12 @@ impl PosixApServerSocketImpl {
 
 impl Drop for PosixApServerSocketImpl {
     fn drop(&mut self) {
-        PORTS.with(|p| p.borrow_mut().remove(&ProtocolAndSocketAddress(self._protocol, self._sa)));
+        let t_sa = ProtocolAndSocketAddress(self._protocol, self._sa);
+        // Connections forwarded to this listener after its last accept would never be taken:
+        // drop (and close) them with it.
+        let queued = CONN_Q.with(|q| q.borrow_mut().remove(&t_sa));
+        drop(queued);
+        PORTS.with(|p| p.borrow_mut().remove(&t_sa));
     }
 }
 
@@ -1966,10 +1975,14 @@ impl PosixApServerSocketImpl {
                 connection: ConnectedSocket::from_impl(csi),
                 remote_address: addr,
             });
-        } else {
+        } else if PORTS.with(|p| p.borrow().contains(&t_sa)) {
             CONN_Q.with(|q| {
                 q.borrow_mut().entry(t_sa).or_default().push(Connection::new(fd, addr, cth));
             });
+        } else {
+            // No one listens on this address on this shard any more: close the connection
+            // instead of queueing it where it would never be taken.
+            drop(fd);
         }
     }
 }
@@ -2390,6 +2403,11 @@ impl RecvCtx {
         self._buffer = Box::into_raw(buf) as *mut u8;
         self._iov.iov_base = self._buffer as *mut c_void;
         self._iov.iov_len = MAX_DATAGRAM_SIZE;
+        // recvmsg() overwrites these with the lengths it used: give it the whole buffers
+        // again for every datagram.
+        self._hdr.msg_namelen = std::mem::size_of::<sockaddr_storage>() as socklen_t;
+        self._hdr.msg_controllen =
+            if self.use_pktinfo { std::mem::size_of::<CmsgWithPktinfo>() } else { 0 };
     }
 }
 
@@ -2484,7 +2502,14 @@ impl PosixDatagramChannel {
         let fd = FileDesc::socket(family as i32, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)?;
 
         if Self::is_inet(family) {
-            fd.setsockopt::<c_int>(SOL_IP, IP_PKTINFO, 1)?;
+            // The kernel attaches IP_PKTINFO to IPv4 datagrams only: an IPv6 socket asks for
+            // IPV6_PKTINFO, which also covers the IPv4 datagrams of a dual-stack socket
+            // (reported as v4-mapped addresses, like their source).
+            if family == AF_INET6 {
+                fd.setsockopt::<c_int>(IPPROTO_IPV6, IPV6_RECVPKTINFO, 1)?;
+            } else {
+                fd.setsockopt::<c_int>(SOL_IP, IP_PKTINFO, 1)?;
+            }
             // SAFETY: engine() is this shard's running reactor; the reference lives for this expression only.
             if unsafe { (*engine()).posix_reuseport_available() } {
                 fd.setsockopt::<c_int>(SOL_SOCKET, SO_REUSEPORT, 1)?;
@@ -2570,13 +2595,33 @@ impl DatagramChannelImpl for PosixDatagramChannel {
                 // done, with short accesses only: the control buffer is read through the header's
                 // `msg_control`, which `init` projected from that pointer.
                 let hdr: *const msghdr = unsafe { std::ptr::addr_of!((*c)._recv._hdr) };
+                // The source address has the length the kernel returned. An unbound AF_UNIX
+                // sender has no name and recvmsg() leaves the name untouched: report it as an
+                // unnamed AF_UNIX address, not as the previous sender.
+                // SAFETY: short accesses through the root pointer (see above).
+                unsafe {
+                    let namelen = (*hdr).msg_namelen;
+                    let src = &mut *std::ptr::addr_of_mut!((*c)._recv._src_addr);
+                    if (namelen as usize) < std::mem::size_of::<sa_family_t>() {
+                        *src = SocketAddress::zeroed();
+                        src.as_posix_sockaddr_mut().sa_family = address.family();
+                        src.addr_length = std::mem::size_of::<sa_family_t>() as socklen_t;
+                    } else {
+                        src.addr_length = namelen;
+                    }
+                }
                 let mut dst: Option<SocketAddress> = None;
                 // SAFETY: the control buffer was filled by recvmsg.
                 let mut cmsg = unsafe { cmsg_firsthdr(hdr) };
                 while !cmsg.is_null() {
                     // SAFETY: cmsg points into the control buffer.
-                    let (level, ty) = unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type) };
-                    if level == IPPROTO_IP && ty == IP_PKTINFO {
+                    let (level, ty, len) =
+                        unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
+                    // A truncated message keeps its header but not all its data.
+                    let covers = |payload: usize| {
+                        len >= cmsg_align(std::mem::size_of::<cmsghdr>()) + payload
+                    };
+                    if level == IPPROTO_IP && ty == IP_PKTINFO && covers(std::mem::size_of::<in_pktinfo>()) {
                         // SAFETY: an IP_PKTINFO message carries an in_pktinfo.
                         let pi: in_pktinfo = copy_reinterpret_cast(unsafe { cmsg_data(cmsg) });
                         dst = Some(SocketAddress::from_ipv4_addr(Ipv4Addr::from_in_addr(
@@ -2584,7 +2629,10 @@ impl DatagramChannelImpl for PosixDatagramChannel {
                             address.port(),
                         )));
                         break;
-                    } else if level == IPPROTO_IPV6 && ty == IPV6_PKTINFO {
+                    } else if level == IPPROTO_IPV6
+                        && ty == IPV6_PKTINFO
+                        && covers(std::mem::size_of::<in6_pktinfo>())
+                    {
                         // SAFETY: an IPV6_PKTINFO message carries an in6_pktinfo.
                         let pi: in6_pktinfo = copy_reinterpret_cast(unsafe { cmsg_data(cmsg) });
                         dst = Some(SocketAddress::from_ipv6_addr(&Ipv6Addr::from_in6_addr(

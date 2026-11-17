@@ -24,6 +24,24 @@ pub mod internal {
         /// source had already been aborted before the element was pushed. It must not touch
         /// the container.
         fn on_abort(&mut self, item: &mut T, ex: Option<&ExceptionPtr>);
+
+        /// Called after an aborted element has left the container (it is no longer counted,
+        /// nor reachable through `front()`); unlike [`Aborter::on_abort`] it may modify the
+        /// container, for example to serve the elements that were behind the aborted one.
+        /// Does nothing by default.
+        ///
+        /// It takes a raw pointer because the aborter lives inside the container (and often
+        /// inside the owner of the container) that it may modify.
+        ///
+        /// # Safety
+        /// `this` must point to the live aborter of a container that does not move.
+        #[inline]
+        unsafe fn after_abort(this: *mut Self)
+        where
+            Self: Sized,
+        {
+            let _ = this;
+        }
     }
 
     /// The default aborter: does nothing.
@@ -112,8 +130,11 @@ pub mod internal {
             }
         }
 
-        /// Aborts entry `e`: calls the aborter on its payload, marks it expired and drops
-        /// expired entries from the front.
+        /// Aborts entry `e`: calls the aborter on its payload, marks it expired, drops
+        /// expired entries from the front and lets the aborter act on the container.
+        ///
+        /// Dropping the expired entries may drop `e`, and with it the abort callback that
+        /// called this function, so only the fifo is used after that.
         ///
         /// # Safety
         /// `e` and `ef` must be live and the fifo must not have moved since the entry
@@ -127,6 +148,7 @@ pub mod internal {
                 (*e).payload = None;
                 (*ef).size -= 1;
                 (*ef).drop_expired_front();
+                A::after_abort(&raw mut (*ef).on_abort);
             }
         }
 

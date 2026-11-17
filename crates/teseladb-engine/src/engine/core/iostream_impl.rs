@@ -41,7 +41,8 @@ pub(crate) fn data_source_impl_skip<S: DataSourceImpl + ?Sized>(
                     // SAFETY: do_with keeps `n` alive until the loop ends.
                     let n = unsafe { &mut *n };
                     if buffer.empty() {
-                        return make_ready_future(Some(buffer));
+                        // The source ended before `n` bytes: skip() consumes exactly `n`.
+                        return make_exception_future(premature_end_of_stream());
                     }
                     if buffer.size() as u64 >= *n {
                         // SAFETY: `*n <= size` (checked above).
@@ -54,6 +55,11 @@ pub(crate) fn data_source_impl_skip<S: DataSourceImpl + ?Sized>(
             )
         })
     })
+}
+
+/// The error of a skip that reaches the end of the stream first.
+fn premature_end_of_stream() -> ExceptionPtr {
+    ExceptionPtr::new(crate::engine::core::future::RuntimeError::new("premature end of stream"))
 }
 
 /// Writes a packet to a sink one buffer at a time, with `put_buffer`.
@@ -276,8 +282,12 @@ impl<CharType: ByteType> InputStreamState<CharType> {
             unsafe { self._buf.trim_front_unchecked(n) };
             make_ready_future(front)
         } else if self._buf.size() == 0 {
+            // The buffer is empty: at the end of the stream there is nothing more to read (the
+            // source must not be asked again); otherwise fetch one and retry.
+            if self._eof {
+                return make_ready_future(TemporaryBuffer::default());
+            }
             let this = self.hold();
-            // The buffer is empty: fetch one and retry.
             self._fd.get().then(move |buf: TemporaryBuffer<u8>| {
                 // SAFETY: `this` keeps the state live (see `StateRef`).
                 let me = unsafe { &mut *this.ptr() };
@@ -426,6 +436,10 @@ impl<CharType: ByteType> InputStreamState<CharType> {
         n -= skip_buf;
         if n == 0 {
             return make_ready_future(());
+        }
+        // The source already ended: the source must not be asked again.
+        if self._eof {
+            return make_exception_future(premature_end_of_stream());
         }
         let this = self.hold();
         self._fd.skip(n).then(move |buffer: TemporaryBuffer<u8>| {

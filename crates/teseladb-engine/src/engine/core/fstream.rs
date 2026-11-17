@@ -712,8 +712,16 @@ impl FileDataSinkImpl {
                 let me = unsafe { &mut *this };
                 // Handle short writes.
                 if size < buf_size {
-                    buf.trim_front(size);
-                    return me.do_put(pos + size as u64, buf).then(move |()| {
+                    // A write completes a multiple of the disk alignment only when it goes
+                    // through O_DIRECT; a buffered one (what the reactor does with the kernel
+                    // page cache enabled) can complete any amount. Resume from the last
+                    // aligned boundary, writing the partially completed block again:
+                    // dma_write() requires an aligned position, and padding an unaligned
+                    // tail as above would spill over the end of this request.
+                    let done =
+                        align_down(size as u64, me._file.disk_write_dma_alignment()) as usize;
+                    buf.trim_front(done);
+                    return me.do_put(pos + done as u64, buf).then(move |()| {
                         // SAFETY: as above.
                         let me = unsafe { &mut *this };
                         if truncate {

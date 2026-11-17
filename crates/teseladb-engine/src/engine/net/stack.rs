@@ -562,19 +562,25 @@ impl ServerSocket {
         impl_of(self._ssi.as_deref_mut()).accept()
     }
 
-    /// Stops any accept in progress: current and future accepts fail at once.
+    /// Stops any accept in progress: current and future accepts fail at once. Safe on a
+    /// listener with no implementation (built by [`ServerSocket::new`]).
     pub fn abort_accept(&mut self) {
-        impl_of(self._ssi.as_deref_mut()).abort_accept();
+        if let Some(ssi) = self._ssi.as_deref_mut() {
+            ssi.abort_accept();
+        }
         self._aborted = true;
     }
 
-    /// The bound local address.
+    /// The bound local address; an unspecified address for a listener with no implementation.
     ///
     /// # Errors
     ///
     /// The `getsockname` error of a POSIX listener.
     pub fn local_address(&self) -> Result<SocketAddress, ExceptionPtr> {
-        impl_of(self._ssi.as_deref()).local_address()
+        match self._ssi.as_deref() {
+            Some(ssi) => ssi.local_address(),
+            None => Ok(SocketAddress::default()),
+        }
     }
 }
 

@@ -155,27 +155,27 @@ pub fn create_native_net_device(opts: &'static NativeStackOptions) -> Result<(),
         let device_configs = parse_config(&mut net_config.as_bytes())?;
 
         if device_configs.len() > 1 {
-            // The error is built and dropped: the extra interfaces are ignored.
-            let _ = RuntimeError("only one network interface is supported".to_string());
+            return Err(ExceptionPtr::from(RuntimeError(
+                "only one network interface is supported".to_string(),
+            )));
         }
 
+        #[cfg(feature = "dpdk")]
         for device_config in device_configs.values() {
             let hw_config = &device_config.hw_cfg;
-            #[cfg(feature = "dpdk")]
-            {
-                if hw_config.port_index.is_some() || !hw_config.pci_address.is_empty() {
-                    dev = Some(create_dpdk_net_device_from_config(hw_config)?);
-                } else {
-                    // The error is built and dropped: the configuration is ignored.
-                    let _ = RuntimeError("only DPDK supports new configuration format".to_string());
-                }
+            if hw_config.port_index.is_some() || !hw_config.pci_address.is_empty() {
+                dev = Some(create_dpdk_net_device_from_config(hw_config)?);
+            } else {
+                return Err(ExceptionPtr::from(RuntimeError(
+                    "only DPDK supports new configuration format".to_string(),
+                )));
             }
-            #[cfg(not(feature = "dpdk"))]
-            {
-                let _ = hw_config;
-                // The error is built and dropped: the configuration is ignored.
-                let _ = RuntimeError("only DPDK supports new configuration format".to_string());
-            }
+        }
+        #[cfg(not(feature = "dpdk"))]
+        if !device_configs.is_empty() {
+            return Err(ExceptionPtr::from(RuntimeError(
+                "only DPDK supports new configuration format".to_string(),
+            )));
         }
     }
 

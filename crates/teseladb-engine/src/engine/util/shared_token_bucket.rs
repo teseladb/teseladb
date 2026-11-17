@@ -342,10 +342,10 @@ pub mod internal {
             if extra >= self._replenish_threshold {
                 if self
                     ._replenished
-                    .compare_exchange_weak(ts, ts + delta, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(ts, ts + delta, Ordering::SeqCst, Ordering::SeqCst)
                     .is_err()
                 {
-                    return; // next time or another shard
+                    return; // another shard replenished
                 }
                 fetch_add(
                     self._rovers.head(),

@@ -123,8 +123,13 @@ fn every_status_has_its_reason_phrase() {
         rep.set_version(&ss("1.1")).set_status(st, Sstring::new());
         assert_eq!(rep.response_line(), format!("HTTP/1.1 {text}\r\n").as_str());
     }
-    // An unknown code is reported as an internal error.
-    assert_eq!(StatusType(299).to_string(), "500 Internal Server Error");
+    // An unknown code is written as its number, and sent with an empty reason phrase (the
+    // space after the code stays), not as an internal error.
+    assert_eq!(StatusType(299).to_string(), "299");
+    let mut rep = Reply::new();
+    rep.set_version(&ss("1.1")).set_status(StatusType(299), Sstring::new());
+    assert_eq!(rep.response_line(), "HTTP/1.1 299 \r\n");
+    assert_eq!(StatusType::PERMANENT_REDIRECT.to_string(), "308 Permanent Redirect");
 
     assert_eq!(Reply::classify_status(StatusType(99)), StatusClass::Unclassified);
     assert_eq!(Reply::classify_status(StatusType(600)), StatusClass::Unclassified);
@@ -418,7 +423,8 @@ engine_thread_test_case!(function_handlers_of_every_form_fill_the_reply, {
     assert!(content(&rep).contains("bad value"), "{}", content(&rep));
 
     let rep = route(&mut routes, "GET", "/request?q=hi");
-    assert_eq!(content(&rep), "\"hi\"");
+    // The content is appended as it is, not formatted as json.
+    assert_eq!(content(&rep), "hi");
     assert_eq!(rep.get_header("Content-Type"), "application/json");
 
     let rep = route(&mut routes, "GET", "/request_err");
@@ -798,7 +804,20 @@ engine_thread_test_case!(file_handlers_choose_the_file_and_the_reply_kind, {
     assert_eq!(route(&mut routes, "GET", "/forced/")._status, StatusType::OK);
 
     assert_eq!(FileInteractionHandler::get_extension(&ss("/a/b.TXT")), "txt");
-    assert_eq!(FileInteractionHandler::get_extension(&ss("noslash.txt")), "");
+    // A bare file name is a relative path: its extension counts.
+    assert_eq!(FileInteractionHandler::get_extension(&ss("noslash.txt")), "txt");
+    for (path, extension) in [
+        ("index.html", "html"),
+        ("./index.html", "html"),
+        ("dir/index.HTML", "html"),
+        ("dir.name/index", ""),
+        ("index", ""),
+        (".html", "html"),
+        ("./.html", "html"),
+        ("archive.tar.gz", "gz"),
+    ] {
+        assert_eq!(FileInteractionHandler::get_extension(&ss(path)), extension, "{path}");
+    }
     assert_eq!(FileInteractionHandler::get_extension(&ss("/dir.d/file")), "");
     assert_eq!(FileInteractionHandler::get_extension(&ss("/a/b.")), "");
 

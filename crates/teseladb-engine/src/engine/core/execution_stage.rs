@@ -124,6 +124,27 @@ pub mod internal {
             }
         }
 
+        /// Renames the stages of the scheduling group `sg` after the group was renamed: each
+        /// per-group stage of an inheriting stage takes the new group name, and its metrics
+        /// and its entry in the registry follow.
+        pub fn update_scheduling_group_name(&mut self, sg: SchedulingGroup) {
+            for &stage in &self.execution_stages {
+                // SAFETY: registered stages are live; the references end with the statements.
+                unsafe {
+                    if (*stage).get_scheduling_group() != sg {
+                        continue;
+                    }
+                    let old_name = (*stage).name().as_str().to_owned();
+                    // A metric registration failure leaves the stage without metrics, as
+                    // the C++ original (which cannot fail here) never would; the stage
+                    // keeps working.
+                    let _ = ExecutionStage::update_name_and_metric_group(stage);
+                    self.stages_by_name.remove(&old_name);
+                    self.stages_by_name.insert((*stage).name().as_str().to_owned(), stage);
+                }
+            }
+        }
+
         /// Returns the stage registered as `name`, or null.
         pub fn get_stage(&mut self, name: &str) -> *mut ExecutionStage {
             *self.stages_by_name.entry(name.to_owned()).or_insert(std::ptr::null_mut())
@@ -177,6 +198,10 @@ pub struct ExecutionStage {
     sg: SchedulingGroup,
     stats: Stats,
     name: Sstring,
+    /// The name of the inheriting stage a per-group stage belongs to: its own name is
+    /// `<base>.<group name>`, which follows the renames of its group. `None` for a plain
+    /// stage, whose name is fixed.
+    base_name: Option<Sstring>,
     metric_group: metrics::MetricGroup,
     /// Runs the queued calls of the concrete stage.
     do_flush: unsafe fn(*mut ExecutionStage),
@@ -195,6 +220,19 @@ impl ExecutionStage {
     unsafe fn init(this: *mut ExecutionStage) -> Result<(), ExceptionPtr> {
         // SAFETY: the manager of this thread is live; the reference ends with the call.
         unsafe { (*internal::ExecutionStageManager::get()).register_execution_stage(this)? };
+        // SAFETY: guaranteed by the caller.
+        unsafe { Self::update_metric_group(this) }
+    }
+
+    /// Registers the stage's metrics under its current name, replacing the previous ones.
+    ///
+    /// # Safety
+    /// `this` must point to a live stage.
+    unsafe fn update_metric_group(this: *mut ExecutionStage) -> Result<(), ExceptionPtr> {
+        // The old metrics go first: the new ones have the same names when the stage keeps
+        // its own.
+        // SAFETY: guaranteed by the caller.
+        unsafe { (*this).metric_group = metrics::MetricGroup::default() };
         // SAFETY: guaranteed by the caller.
         let name = unsafe { (*this).name.as_str().to_owned() };
         let counter = |metric: &'static str, desc: &'static str, read: fn(&Stats) -> u64| {
@@ -245,6 +283,27 @@ impl ExecutionStage {
     #[inline]
     pub fn name(&self) -> &Sstring {
         &self.name
+    }
+
+    /// Returns execution stage scheduling group
+    #[inline]
+    pub fn get_scheduling_group(&self) -> SchedulingGroup {
+        self.sg
+    }
+
+    /// Updates the name of a per-group stage of an inheriting stage after its scheduling
+    /// group was renamed, and its metrics; a plain stage keeps its name.
+    ///
+    /// # Safety
+    /// `this` must point to a live, registered stage.
+    unsafe fn update_name_and_metric_group(this: *mut ExecutionStage) -> Result<(), ExceptionPtr> {
+        // SAFETY: guaranteed by the caller; the references end with the statements.
+        unsafe {
+            if let Some(base) = &(*this).base_name {
+                (*this).name = per_group_stage_name(base, (*this).sg);
+            }
+            Self::update_metric_group(this)
+        }
     }
 
     /// Returns execution stage usage statistics
@@ -379,6 +438,17 @@ impl<A: 'static, R: Futurize> ConcreteExecutionStage<A, R> {
         sg: SchedulingGroup,
         f: F,
     ) -> Result<Self, ExceptionPtr> {
+        Self::with_base_name(name, None, sg, f)
+    }
+
+    /// As [`ConcreteExecutionStage::new`]; `base_name` is the name of the inheriting stage
+    /// a per-group stage belongs to.
+    fn with_base_name<F: FnMut(A) -> R + 'static>(
+        name: &Sstring,
+        base_name: Option<Sstring>,
+        sg: SchedulingGroup,
+        f: F,
+    ) -> Result<Self, ExceptionPtr> {
         let inner = Box::into_raw(Box::new(ConcreteInner {
             base: ExecutionStage {
                 empty: true,
@@ -386,6 +456,7 @@ impl<A: 'static, R: Futurize> ConcreteExecutionStage<A, R> {
                 sg,
                 stats: Stats::default(),
                 name: name.clone(),
+                base_name,
                 metric_group: metrics::MetricGroup::default(),
                 do_flush: ConcreteInner::<A, R>::do_flush,
                 free: ConcreteInner::<A, R>::free,
@@ -521,6 +592,11 @@ pub mod inheriting_execution_stage {
     pub type InheritingStats = Vec<PerSchedulingGroupStats>;
 }
 
+/// The name of the stage of scheduling group `sg` of the inheriting stage `base`.
+fn per_group_stage_name(base: &Sstring, sg: SchedulingGroup) -> Sstring {
+    Sstring::from(format!("{}.{}", base.as_str(), sg.name().as_str()).as_str())
+}
+
 /// An execution stage that inherits the caller's scheduling group.
 ///
 /// A variation of [`ConcreteExecutionStage`] that runs each call under the scheduling group
@@ -542,8 +618,8 @@ impl<A: 'static, R: Futurize> InheritingConcreteExecutionStage<A, R> {
         // SAFETY: the function is boxed and lives as long as the inheriting stage, which
         // owns the per-group stages.
         let wrapped_function = move |args: A| unsafe { (*function)(args) };
-        let name = Sstring::from(format!("{}.{}", self.name.as_str(), sg.name().as_str()).as_str());
-        ConcreteExecutionStage::new(&name, sg, wrapped_function)
+        let name = per_group_stage_name(&self.name, sg);
+        ConcreteExecutionStage::with_base_name(&name, Some(self.name.clone()), sg, wrapped_function)
     }
 
     /// Constructs an inheriting execution stage.
