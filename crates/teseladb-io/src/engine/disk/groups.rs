@@ -5,20 +5,23 @@
 //! with the least, so the log does not wait behind the data nor a client's read behind a
 //! compaction. The groups also account the CPU time of the operations' continuations.
 //!
-//! The groups belong to the engine that runs: a scheduling group exists on the shards of the
-//! engine that created it. They are made once per engine and forgotten when it stops
-//! ([`IoGroups::release`], which the node's engine does), so that the next engine of the process
-//! makes its own. They are not destroyed: tasks of a stopping node (an engine thread parked on a
-//! timer) may still run in them, and a destroyed group's tasks have no queue. Their numbers stay
-//! taken, as in a process of the reference, which runs one engine; a process that starts more
-//! engines than the engine has groups for runs the disk classes of the later ones in the default
-//! group.
+//! The groups belong to the engine that made them: a scheduling group has a task queue only on
+//! the reactors of the engine that created it, and an engine stopped and started again in one
+//! process (a node restarted in place, the tests) has new reactors with no queue for the groups
+//! of the previous one. So what an engine knows of its groups lives in the thread-locals of its
+//! own shards, and goes with them: the next engine makes its own, and a late caller of a
+//! stopping engine can never hand its groups to the next one.
+//!
+//! The groups are not destroyed when their engine stops: tasks of a stopping node (an engine
+//! thread parked on a timer) may still be scheduled in them until the last shard stops, and a
+//! destroyed group's tasks have no queue. Their numbers stay taken, as in a process of the
+//! reference, which runs one engine; a process that starts more engines than the engine has
+//! groups for runs the disk classes of the later ones in the default group.
 
-use std::cell::RefCell;
-use std::sync::{Mutex, PoisonError};
+use std::cell::{Cell, RefCell};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
-use teseladb::engine::core::reactor::create_scheduling_group;
+use teseladb::engine::core::reactor::{create_scheduling_group, internal};
 use teseladb::engine::core::scheduling::{SchedulingGroup, default_scheduling_group};
 use teseladb::engine::core::shared_future::SharedPromise;
 use teseladb::engine::core::smp::Smp;
@@ -33,7 +36,7 @@ pub const DATA_SHARES: f32 = 400.0;
 /// Shares of the background's class.
 pub const BACKGROUND_SHARES: f32 = 150.0;
 
-/// The scheduling group of each disk class, the same on every shard.
+/// The scheduling group of each disk class, the same on every shard of one engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoGroups {
     log: SchedulingGroup,
@@ -41,44 +44,43 @@ pub struct IoGroups {
     background: SchedulingGroup,
 }
 
-/// The groups of the running engine, made once: the engine has a fixed number of scheduling
-/// groups.
-static GROUPS: Mutex<Option<IoGroups>> = Mutex::new(None);
-
 /// The shard that makes the groups, so that callers on several shards share one creation.
 const CREATOR_SHARD: u32 = 0;
 
+/// On [`CREATOR_SHARD`], where the groups of its engine are.
+enum Creation {
+    /// Not asked for yet.
+    Absent,
+    /// Being made: the callers that come meanwhile wait for it.
+    Making(SharedPromise<IoGroups>),
+    /// Made (or, with no group left, the default group for every class).
+    Made(IoGroups),
+}
+
 thread_local! {
-    /// On [`CREATOR_SHARD`], the creation under way: the callers that come meanwhile wait for it.
-    static CREATING: RefCell<Option<SharedPromise<IoGroups>>> = const { RefCell::new(None) };
-}
-
-fn current() -> Option<IoGroups> {
-    *GROUPS.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Keeps `g` as the groups of the running engine, unless some were kept first.
-fn keep(g: IoGroups) -> IoGroups {
-    *GROUPS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(g)
+    /// On [`CREATOR_SHARD`], the groups of the engine whose shard this thread is.
+    static CREATION: RefCell<Creation> = const { RefCell::new(Creation::Absent) };
+    /// On every shard, the groups this shard already got from [`CREATOR_SHARD`].
+    static KNOWN: Cell<Option<IoGroups>> = const { Cell::new(None) };
+    /// Whether this shard's reactor forgets its groups when it is destroyed.
+    static FORGET_HOOKED: Cell<bool> = const { Cell::new(false) };
 }
 
 impl IoGroups {
     /// The groups of the running engine, creating them on every shard the first time. Callers
     /// that come while they are being made, from any shard, wait for that one creation: a node's
-    /// start asks from several tasks at once (the clock's keeper, the device log's writer and
-    /// the cores' disks), and a second creation would make each group again under the same name,
+    /// start asks from several tasks at once (the clock's keeper, the device log's writer and the
+    /// cores' disks), and a second creation would make each group again under the same name,
     /// which the engine refuses when it registers the group's metrics a second time. When the
     /// engine has no scheduling groups left, every class runs in the default group.
     pub fn get_or_create() -> Future<IoGroups> {
-        if let Some(g) = current() {
+        if let Some(g) = KNOWN.get() {
             return make_ready_future(g);
         }
-        Smp::submit_to(CREATOR_SHARD, create_once)
-    }
-
-    /// Forgets the groups of the running engine, before it stops: the next engine makes its own.
-    pub fn release() {
-        GROUPS.lock().unwrap_or_else(PoisonError::into_inner).take();
+        Smp::submit_to(CREATOR_SHARD, create_once).then(|g: IoGroups| {
+            remember(g);
+            Ok::<_, ExceptionPtr>(g)
+        })
     }
 
     /// The scheduling group of `class`.
@@ -92,28 +94,49 @@ impl IoGroups {
     }
 }
 
+/// Keeps `g` on the calling shard until its reactor goes: an engine run again on the same thread
+/// (an application's run after another) starts from nothing.
+fn remember(g: IoGroups) {
+    KNOWN.set(Some(g));
+    hook_forget();
+}
+
+/// Registers, once per reactor, forgetting this shard's groups when the reactor is destroyed.
+fn hook_forget() {
+    if FORGET_HOOKED.replace(true) {
+        return;
+    }
+    internal::at_destroy(|| {
+        KNOWN.set(None);
+        CREATION.with(|c| *c.borrow_mut() = Creation::Absent);
+        FORGET_HOOKED.set(false);
+    });
+}
+
 /// On [`CREATOR_SHARD`]: the groups once made, the creation under way, or a new one that the
 /// callers until it ends share.
 fn create_once() -> Future<IoGroups> {
-    if let Some(g) = current() {
-        return make_ready_future(g);
+    let ready = CREATION.with(|c| match &*c.borrow() {
+        Creation::Absent => None,
+        Creation::Making(p) => Some(p.get_shared_future()),
+        Creation::Made(g) => Some(make_ready_future(*g)),
+    });
+    if let Some(f) = ready {
+        return f;
     }
-    if let Some(waiting) =
-        CREATING.with(|c| c.borrow().as_ref().map(SharedPromise::get_shared_future))
-    {
-        return waiting;
-    }
+    hook_forget();
     let promise = SharedPromise::new();
     let made = promise.get_shared_future();
-    CREATING.with(|c| *c.borrow_mut() = Some(promise));
+    CREATION.with(|c| *c.borrow_mut() = Creation::Making(promise));
     drop(create().then_wrapped(|done: Future<IoGroups>| {
-        let ended = CREATING.with(|c| c.borrow_mut().take());
-        let mut promise = ended.expect("the creation under way has its promise");
         let g = done.get().unwrap_or_else(|_| {
             let d = default_scheduling_group();
             IoGroups { log: d, data: d, background: d }
         });
-        promise.set_value(keep(g));
+        let ended = CREATION.with(|c| std::mem::replace(&mut *c.borrow_mut(), Creation::Made(g)));
+        if let Creation::Making(mut promise) = ended {
+            promise.set_value(g);
+        }
         make_ready_future(())
     }));
     made

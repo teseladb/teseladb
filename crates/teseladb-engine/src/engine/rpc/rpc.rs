@@ -1766,7 +1766,7 @@ impl SndBuf {
             }
             Bufs::Many(v)
         };
-        SndBuf { size: size as u32, bufs }
+        SndBuf { size: size as u32, bufs, su: None }
     }
 
     /// The first buffer.
@@ -1793,7 +1793,7 @@ pub trait ShardLocalBuffer: Sized + 'static {
 impl ShardLocalBuffer for SndBuf {
     #[inline]
     fn sized(size: u32) -> Self {
-        SndBuf { size, bufs: Bufs::default() }
+        SndBuf { size, bufs: Bufs::default(), su: None }
     }
     #[inline]
     fn size_of(&self) -> u32 {

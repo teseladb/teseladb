@@ -485,6 +485,9 @@ pub enum State {
     Eof,
     /// A request was parsed.
     Done,
+    /// The request line and headers exceed the size limit
+    /// ([`HttpRequestParser::set_size_limit`]).
+    TooLarge,
 }
 
 /// The parser of an http request head.
@@ -496,6 +499,14 @@ pub struct HttpRequestParser {
     pub _req: Option<Box<Request>>,
     /// The outcome of the last parse.
     pub _state: State,
+    /// The largest size of the request line and headers together.
+    _size_limit: usize,
+    /// The bytes of the request parsed so far.
+    _parsed_size: usize,
+    /// The size of the request line once it is parsed (0 before).
+    _request_line_size: usize,
+    /// The start of the block being parsed.
+    _parse_start: *const u8,
 }
 
 impl Default for HttpRequestParser {
@@ -506,6 +517,10 @@ impl Default for HttpRequestParser {
             _headers: HeaderFsm::default(),
             _req: None,
             _state: State::Eof,
+            _size_limit: usize::MAX,
+            _parsed_size: 0,
+            _request_line_size: 0,
+            _parse_start: std::ptr::null(),
         }
     }
 }
@@ -518,6 +533,31 @@ impl HttpRequestParser {
         self._state = State::Eof;
         self._cs = Cs::MethodStart;
         self._headers.init();
+        self._parsed_size = 0;
+        self._request_line_size = 0;
+    }
+
+    /// Bounds the request line and headers together to `limit` bytes: a request past it
+    /// fails ([`HttpRequestParser::size_limit_exceeded`]) and parsing stops, so that a
+    /// client cannot make the server buffer unbounded memory before the handler runs.
+    #[inline]
+    pub fn set_size_limit(&mut self, limit: usize) {
+        self._size_limit = limit;
+    }
+
+    /// Whether the last parse stopped because the request exceeds the size limit.
+    #[inline]
+    pub fn size_limit_exceeded(&self) -> bool {
+        self._state == State::TooLarge
+    }
+
+    /// Only meaningful when [`HttpRequestParser::size_limit_exceeded`]: whether the URI is
+    /// what overflowed the limit (the request line never finished, or it alone exceeds the
+    /// limit), rather than the header fields.
+    #[inline]
+    pub fn uri_too_large(&self) -> bool {
+        self._state == State::TooLarge
+            && (self._request_line_size == 0 || self._request_line_size > self._size_limit)
     }
 
     /// One transition of the start line on the byte `c` at `p`; false when there is none.
@@ -566,7 +606,14 @@ impl HttpRequestParser {
                 req._version = g.str(p);
                 Cs::StartLineLf
             }
-            Cs::StartLineLf if c == b'\n' => Cs::Headers,
+            Cs::StartLineLf if c == b'\n' => {
+                // Where the request line ends, so that an oversized request can be told to
+                // overflow in its URI (414) or in its header fields (431).
+                // SAFETY: `p` and the start of this parse are in the block being parsed.
+                self._request_line_size =
+                    self._parsed_size + unsafe { p.offset_from(self._parse_start) } as usize + 1;
+                Cs::Headers
+            }
             _ => return false,
         };
         true
@@ -584,10 +631,11 @@ impl HttpRequestParser {
         self._state == State::Eof
     }
 
-    /// Whether the input is not a request.
+    /// Whether the input is not a request, or a request too large (see
+    /// [`HttpRequestParser::size_limit_exceeded`] for which).
     #[inline]
     pub fn failed(&self) -> bool {
-        self._state == State::Error
+        self._state == State::Error || self._state == State::TooLarge
     }
 
     /// Feeds a buffer to the parser (see `fsm::call`).
@@ -603,6 +651,8 @@ impl HttpRequestParser {
 
 impl Parse for HttpRequestParser {
     unsafe fn parse(&mut self, mut p: *mut u8, pe: *mut u8, eof: *mut u8) -> *mut u8 {
+        let start = p;
+        self._parse_start = start;
         self._builder.begin(p);
         let mut done = false;
         if p != pe {
@@ -649,6 +699,19 @@ impl Parse for HttpRequestParser {
             }
         } else {
             self._state = State::Done;
+        }
+        // Bound the request line and headers so that a client cannot make the server buffer
+        // unbounded memory before the handler runs.
+        let end = if p.is_null() { pe } else { p };
+        // SAFETY: `end` is in [start, pe] of this block.
+        self._parsed_size += unsafe { end.offset_from(start) } as usize;
+        // An unfinished head (`p` null) leaves `_state` at Error: what tells a malformed
+        // request apart is the machine's state.
+        if self._cs != Cs::Error && self._parsed_size > self._size_limit {
+            self._state = State::TooLarge;
+            if p.is_null() {
+                p = pe;
+            }
         }
         p
     }

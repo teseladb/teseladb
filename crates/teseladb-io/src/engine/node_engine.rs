@@ -170,9 +170,6 @@ impl NodeEngine {
                 let _ = ready_tx.send(super::signals::install_here());
                 make_coroutine(async move {
                     wake.wait().await;
-                    // The disk classes are this engine's: the next engine of the process makes
-                    // its own.
-                    super::disk::IoGroups::release();
                     Ok(())
                 })
             });

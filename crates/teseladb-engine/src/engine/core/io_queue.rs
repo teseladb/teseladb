@@ -1683,10 +1683,10 @@ impl IoQueue {
     /// When the earliest stream expects its pending reservation to be fulfilled, in
     /// nanoseconds of `CLOCK_MONOTONIC` (the reactor's and the token bucket's clock);
     /// `i64::MAX` when none is pending.
-    pub fn next_pending_aio(&self) -> ClockTypeTimePoint {
+    pub fn next_pending_aio(&mut self) -> ClockTypeTimePoint {
         let mut next = ClockTypeTimePoint::MAX;
 
-        for s in self._streams.iter() {
+        for s in self._streams.iter_mut() {
             next = next.min(s.next_pending_aio());
         }
 
@@ -1755,6 +1755,27 @@ impl IoQueue {
             // which register_stats does not touch.
             let _ = unsafe { self.register_stats(&new_name, p) };
         }
+    }
+
+    /// Destroys the class of priority `pc`, whose scheduling group is being destroyed: it is
+    /// unregistered from every stream and dropped (with its metrics), so that a group created
+    /// later under the same index gets a class of its own (its name and shares) instead of
+    /// this one. The group's tasks are all done by then, so the class has no request queued
+    /// or executing.
+    pub fn destroy_priority_class(&mut self, pc: PriorityClass) {
+        let id = pc.id() as usize;
+        if id >= self._priority_classes.len() {
+            return;
+        }
+        let Some(pc_data) = self._priority_classes[id].take() else {
+            return;
+        };
+        // SAFETY: the class is live in its node; a short shared access.
+        let cid = unsafe { (*pc_data.as_ptr()).fq_class() };
+        for s in self._streams.iter_mut() {
+            s.unregister_priority_class(cid);
+        }
+        drop(pc_data);
     }
 
     /// Stops dispatching class `cid` in every stream (its bandwidth bucket ran short).

@@ -436,10 +436,15 @@ type OffloadJob = Box<dyn FnOnce() + Send>;
 static OFFLOAD: std::sync::OnceLock<io::Result<std::sync::mpsc::Sender<OffloadJob>>> =
     std::sync::OnceLock::new();
 
+/// The number of the next work on [`offload`]'s threads, unique in the process: the threads
+/// outlive an engine, and a work of a stopped engine that ends while a later one runs on the
+/// same shard number must not find a waiter of the later engine under its number.
+static NEXT_OFFLOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 thread_local! {
     /// The promises of this shard's work on [`offload`]'s threads, by number.
-    static OFFLOADED: RefCell<(u64, std::collections::HashMap<u64, Box<dyn std::any::Any>>)> =
-        RefCell::new((0, std::collections::HashMap::new()));
+    static OFFLOADED: RefCell<std::collections::HashMap<u64, Box<dyn std::any::Any>>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// Starts [`offload`]'s threads; they take jobs until the process ends.
@@ -464,7 +469,7 @@ fn offload_threads() -> io::Result<std::sync::mpsc::Sender<OffloadJob>> {
 
 /// The end of offloaded work `id` on its shard: its result goes to whoever waits.
 fn offload_done<T: 'static>(id: u64, result: std::thread::Result<T>) {
-    let Some(slot) = OFFLOADED.with(|o| o.borrow_mut().1.remove(&id)) else { return };
+    let Some(slot) = OFFLOADED.with(|o| o.borrow_mut().remove(&id)) else { return };
     let Ok(mut promise) = slot.downcast::<Promise<T>>() else { return };
     match result {
         Ok(v) => promise.set_value(v),
@@ -486,13 +491,8 @@ pub fn offload<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Fut
     };
     let mut promise = Promise::<T>::new();
     let fut = promise.get_future();
-    let id = OFFLOADED.with(|o| {
-        let mut o = o.borrow_mut();
-        o.0 += 1;
-        let id = o.0;
-        o.1.insert(id, Box::new(promise));
-        id
-    });
+    let id = NEXT_OFFLOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    OFFLOADED.with(|o| o.borrow_mut().insert(id, Box::new(promise)));
     let shard = this_shard_id();
     let job: OffloadJob = Box::new(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -500,7 +500,7 @@ pub fn offload<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Fut
         let _ = super::wait::post(shard, Box::new(move || offload_done(id, result)));
     });
     if queue.send(job).is_err() {
-        OFFLOADED.with(|o| o.borrow_mut().1.remove(&id));
+        OFFLOADED.with(|o| o.borrow_mut().remove(&id));
         return make_exception_future(ExceptionPtr::from(io::Error::other(
             "the offload threads are gone",
         )));

@@ -1450,7 +1450,7 @@ fn clone_bufs(bufs: &Bufs) -> Bufs {
 }
 
 fn clone_snd(buffer: &SndBuf) -> SndBuf {
-    SndBuf { size: buffer.size, bufs: clone_bufs(&buffer.bufs) }
+    SndBuf { size: buffer.size, bufs: clone_bufs(&buffer.bufs), ..Default::default() }
 }
 
 /// `snd_buf` of `buf`, whole or split.
@@ -1461,6 +1461,7 @@ fn make_snd(buf: TemporaryBuffer<u8>, s: usize, split: Option<usize>) -> SndBuf 
             Some(split) => Bufs::Many(split_buffer(buf.clone_buffer(), split)),
             None => Bufs::One(buf.clone_buffer()),
         },
+        ..Default::default()
     }
 }
 

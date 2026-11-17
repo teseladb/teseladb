@@ -9809,6 +9809,13 @@ impl Reactor {
             let me = unsafe { &mut *this };
             me.get_sg_data(&sg).queue_is_initialized = false;
             me._task_queues[sg.id as usize] = None;
+            // The group's I/O classes go with it.
+            for queue in me._io_queues.values_mut() {
+                // SAFETY: the queue is engaged and reached by this reference only during the call.
+                unsafe { queue.get_mut_unchecked() }.destroy_priority_class(
+                    crate::engine::core::io_queue::internal::PriorityClass::from(sg),
+                );
+            }
             make_ready_future(())
         })
     }
