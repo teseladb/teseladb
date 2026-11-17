@@ -283,9 +283,14 @@ impl NodeProc {
     }
 
     /// Whether the node serves within `timeout`: its `/healthz` answers 200 (its `ready` request
-    /// when its administration port takes no plain HTTP).
+    /// when its administration port takes no plain HTTP). No time is no wait: a zero `timeout`
+    /// gives `false` without asking, as the node, which writes its member line once it started,
+    /// may already serve.
     #[must_use]
     pub fn wait_ready(&self, timeout: Duration) -> bool {
+        if timeout.is_zero() {
+            return false;
+        }
         let end = Instant::now() + timeout;
         let Some(admin) = self.ports.admin.map(|a| a.to_string()) else {
             return self.ask_ready(timeout);

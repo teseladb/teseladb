@@ -422,16 +422,23 @@ pub(crate) mod tests {
     #[test]
     fn a_killed_leader_is_replaced_and_answers_nothing() {
         let tmp = scratch("kill");
-        let mut c = Cluster::open(&tmp, 1, false).unwrap();
-        let old = c.elect().unwrap();
-        let follower = (1..=3).map(NodeId).find(|&n| n != old).unwrap();
-        let id = c.write(follower, &doc(0));
-        assert!(c.wait(follower, id).unwrap_err().contains("NotLeader"));
-        c.kill(old);
-        let id = c.write(old, &doc(0));
-        assert!(c.wait(old, id).unwrap_err().contains("no answer"));
-        let new = c.elect().unwrap();
-        assert_ne!(new, old);
+        // The replicas' disks are the engine's: the cluster runs in an engine thread, as the
+        // scenario does.
+        let dir = tmp.clone();
+        super::super::on_engine::run(move || {
+            let mut c = Cluster::open(&dir, 1, false)?;
+            let old = c.elect()?;
+            let follower = (1..=3).map(NodeId).find(|&n| n != old).unwrap();
+            let id = c.write(follower, &doc(0));
+            assert!(c.wait(follower, id).unwrap_err().contains("NotLeader"));
+            c.kill(old);
+            let id = c.write(old, &doc(0));
+            assert!(c.wait(old, id).unwrap_err().contains("no answer"));
+            let new = c.elect()?;
+            assert_ne!(new, old);
+            Ok(())
+        })
+        .unwrap();
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

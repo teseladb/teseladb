@@ -179,6 +179,11 @@ pub mod testing {
         /// records `args`. The reactor thread itself is started lazily by the first
         /// [`run_sync`](Self::run_sync).
         pub fn start(&self, args: &[String]) -> bool {
+            // The flag and the arguments change under the same lock that `run_sync` reads them
+            // under: the harness calls `start` from several threads at once, and one that found
+            // the flag set must not reach `run_sync` before the first one recorded the
+            // arguments (it would hand its task to a reactor nobody started, and wait forever).
+            let mut inner = lock(&self._inner);
             if self
                 ._started
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -187,7 +192,7 @@ pub mod testing {
                 return true;
             }
             block_signals();
-            lock(&self._inner)._st_args = Some(StartThreadArgs { args: args.to_vec() });
+            inner._st_args = Some(StartThreadArgs { args: args.to_vec() });
             true
         }
 
@@ -377,5 +382,49 @@ pub mod testing {
     /// The runner of the tests of the process.
     pub fn global_test_runner() -> &'static TestRunner {
         &INSTANCE
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(coverage, coverage(off))]
+    mod tests {
+        use super::*;
+
+        fn fresh() -> TestRunner {
+            TestRunner {
+                _inner: Mutex::new(Inner { _thread: None, _done: false, _st_args: None }),
+                _started: AtomicBool::new(false),
+                _task: Arc::new(Exchanger::default()),
+                _exit_code: Arc::new(Mutex::new(0)),
+                _serial: Mutex::new(()),
+                _current: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Once `start` returned, from whichever of the threads that call it at once, the
+        /// arguments of the reactor are recorded: a caller that went on to `run_sync` before
+        /// that handed its task to a reactor nobody would start, and waited forever (seen with
+        /// the tests of one binary calling `start` together).
+        #[test]
+        fn every_start_returns_with_the_arguments_recorded() {
+            const THREADS: usize = 8;
+            for _ in 0..500 {
+                let r = Arc::new(fresh());
+                let gate = Arc::new(std::sync::Barrier::new(THREADS));
+                let seen: Vec<bool> = (0..THREADS)
+                    .map(|_| {
+                        let (r, gate) = (Arc::clone(&r), Arc::clone(&gate));
+                        std::thread::spawn(move || {
+                            gate.wait();
+                            assert!(r.start(&["test".to_owned()]));
+                            lock(&r._inner)._st_args.is_some()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|t| t.join().unwrap())
+                    .collect();
+                assert!(seen.iter().all(|s| *s), "{seen:?}");
+            }
+        }
     }
 }

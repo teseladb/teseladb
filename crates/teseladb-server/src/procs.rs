@@ -216,7 +216,13 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
         return 1;
     }
     let cfg = with_stderr_log(a.apply(recipe(&a)));
-    let stop = teseladb_io::engine::signals::stop_requested;
+    // The deferred warnings (a port that cannot open, a command's) go to the process's log
+    // while the node runs, as in `teseladb start`.
+    let log = crate::log::Logger::to_stderr(crate::log::Level::Info, crate::log::Format::Text);
+    let stop = || {
+        crate::log::drain(&log);
+        teseladb_io::engine::signals::stop_requested()
+    };
     let input = Box::new(BufReader::new(io::stdin()));
     let out = &mut io::stdout();
     let served = match &a.dir {
@@ -227,6 +233,7 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
             Node::start(cfg, DiskPlace::Memory, None).map(|node| serve(node, input, out, &stop))
         }
     };
+    crate::log::drain(&log);
     match served {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {

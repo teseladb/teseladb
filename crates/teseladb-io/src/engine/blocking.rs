@@ -447,8 +447,21 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
 }
 
-/// Starts [`offload`]'s threads; they take jobs until the process ends.
+/// Starts [`offload`]'s threads; they take jobs until the process ends. They are started from a
+/// shard, whose mask lets the stop signals in (shard 0 takes them, 023 FR-031): they start with
+/// those signals blocked, as the engine's own threads do, or the kernel could hand a `SIGTERM` to
+/// one of them, where nothing takes it, and the node would never stop.
 fn offload_threads() -> io::Result<std::sync::mpsc::Sender<OffloadJob>> {
+    let open = !teseladb_sys::process::blocks(teseladb_sys::process::Stop::Terminate);
+    teseladb_sys::process::block_stop_signals()?;
+    let started = start_offload_threads();
+    if open {
+        teseladb_sys::process::unblock_stop_signals()?;
+    }
+    started
+}
+
+fn start_offload_threads() -> io::Result<std::sync::mpsc::Sender<OffloadJob>> {
     let (tx, rx) = std::sync::mpsc::channel::<OffloadJob>();
     let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
     for n in 0..OFFLOAD_THREADS {
@@ -513,5 +526,32 @@ fn describe(e: &ExceptionPtr) -> String {
     match e.downcast_ref::<io::Error>() {
         Some(io) => io.to_string(),
         None => format!("{e:?}"),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use teseladb_sys::process::{Stop, blocks, unblock_stop_signals};
+
+    /// The offload threads block the stop signals even when started from a thread that lets
+    /// them in (a shard), and that thread's mask is left as it was: a `SIGTERM` handed to an
+    /// offload thread was lost, and the node did not stop.
+    #[test]
+    fn the_offload_threads_block_the_stop_signals() {
+        let starter = std::thread::spawn(|| {
+            unblock_stop_signals().unwrap();
+            let queue = super::offload_threads().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            for _ in 0..super::OFFLOAD_THREADS {
+                let tx = tx.clone();
+                queue.send(Box::new(move || drop(tx.send(blocks(Stop::Terminate))))).unwrap();
+            }
+            let blocked: Vec<bool> = rx.iter().take(super::OFFLOAD_THREADS).collect();
+            (blocked, blocks(Stop::Terminate))
+        });
+        let (blocked, starter_blocks) = starter.join().unwrap();
+        assert!(blocked.iter().all(|b| *b), "{blocked:?}");
+        assert!(!starter_blocks, "the starter's mask is as it was");
     }
 }

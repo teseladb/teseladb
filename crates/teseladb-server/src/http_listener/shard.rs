@@ -319,6 +319,9 @@ fn serve(link: Link, shared: Rc<Shared>) -> Future<()> {
                 start(&ctx, i);
             }
             ctx.kick();
+            // The bytes may move the deadline earlier (the header timeout of fields not whole
+            // yet starts at their first byte): the deadline task looks at it again.
+            ctx.deadline.signal();
         }
         ctx.end();
         let _ = writer.await;

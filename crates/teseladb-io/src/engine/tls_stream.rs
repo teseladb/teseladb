@@ -387,7 +387,9 @@ fn established(
     })
 }
 
-fn server_conn(config: Arc<ServerConfig>) -> Result<Connection, ExceptionPtr> {
+/// The server side of a TLS connection with `config`, before its handshake (the sans-I/O state
+/// machine, for a transport that is not a [`ConnectedSocket`]: the clients' port on AF_XDP).
+pub(crate) fn server_conn(config: Arc<ServerConfig>) -> Result<Connection, ExceptionPtr> {
     Ok(Connection::server(config, now_ms(), &entropy()?))
 }
 

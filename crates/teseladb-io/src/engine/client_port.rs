@@ -46,7 +46,7 @@ const OUTPUT_BUFFER: usize = 64 << 10;
 /// How long a connection has to send its first bytes and end its TLS handshake.
 pub const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
 /// The port's name in errors.
-const NAME: &str = "clients";
+const NAME: &str = "clients' port";
 
 /// What the port knows of a connection when it opens it.
 #[derive(Clone, Debug)]

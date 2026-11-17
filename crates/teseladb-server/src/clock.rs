@@ -137,8 +137,8 @@ impl ClockKeeper {
 
     /// Stops the keeper, which seals the clock and writes its exact bound: called once nothing
     /// asks the clock for marks any more, before the engine stops.
-    pub fn stop(self) {
-        if let Some(t) = self.task {
+    pub fn stop(&mut self) {
+        if let Some(t) = self.task.take() {
             let _ = t.stop();
         }
     }
