@@ -90,6 +90,9 @@ pub struct Ranges {
     pub meta2_groups: BTreeSet<GroupId>,
     /// The capped collections, each of which has a range of its own (007 FR-009).
     pub capped: BTreeSet<(u32, u32)>,
+    /// The first key of every partition but the first of each collection spread over partitions
+    /// (003 FR-012, D-186): each partition is cut into a range of its own from the start.
+    pub partition_edges: BTreeSet<Vec<u8>>,
     /// The split size of the collections that have their own (`configureCollectionBalancing`'s
     /// `chunkSize`, 018 FR-004), by tenant and collection.
     pub chunk_bytes: BTreeMap<(u32, u32), u64>,
@@ -159,6 +162,17 @@ impl Ranges {
             last_ids: BTreeMap::new(),
             meta2_groups: BTreeSet::new(),
             capped: sm.capped_collections(),
+            partition_edges: sm
+                .catalog
+                .collections
+                .values()
+                .filter_map(|c| c.partitions().ok().map(|p| (c.tenant, p)))
+                .flat_map(|(tenant, p)| {
+                    p.numbers().skip(1).map(move |n| {
+                        teseladb_keys::KeyBuilder::collection_start(tenant, n).as_bytes().to_vec()
+                    })
+                })
+                .collect(),
             chunk_bytes: sm
                 .catalog
                 .collections
@@ -208,6 +222,8 @@ pub struct Replicas {
     all: Vec<RangeDesc>,
     /// The capped collections, cut out into ranges of their own.
     capped: BTreeSet<(u32, u32)>,
+    /// The partitions' edges, each partition cut out into a range of its own (D-186).
+    partition_edges: BTreeSet<Vec<u8>>,
     /// The split sizes of `Ranges::chunk_bytes` and `Ranges::chunk_size`.
     chunks: (BTreeMap<(u32, u32), u64>, Option<u64>),
     /// The cores of the node, among which the new half of a split moves (FR-040).
@@ -235,6 +251,8 @@ pub enum SplitRule {
     Disk,
     /// The range served more than the load threshold for 10 s.
     Load,
+    /// The range holds the edge of a partition (D-186).
+    Partition,
 }
 
 impl SplitRule {
@@ -245,6 +263,7 @@ impl SplitRule {
             SplitRule::Live => "live",
             SplitRule::Disk => "disk",
             SplitRule::Load => "load",
+            SplitRule::Partition => "partition",
         }
     }
 
@@ -291,6 +310,7 @@ impl Replicas {
             hosting: (Hosting::default(), 0),
             all: Vec::new(),
             capped: BTreeSet::new(),
+            partition_edges: BTreeSet::new(),
             cores: 1,
             cuts: BTreeMap::new(),
             moving_to: BTreeMap::new(),
@@ -343,6 +363,7 @@ impl Replicas {
         self.splits = ranges.splits.clone();
         self.merges = ranges.merges.clone();
         self.capped.clone_from(&ranges.capped);
+        self.partition_edges.clone_from(&ranges.partition_edges);
         self.chunks = (ranges.chunk_bytes.clone(), ranges.chunk_size);
         let ids = ranges.descs.iter().map(|d| d.group).chain(ranges.meta2_groups.iter().copied());
         self.known = (ids.collect(), ranges.last_group, ranges.last_ids.clone());
@@ -679,6 +700,13 @@ impl Replicas {
             self.ask_split(g, at, SplitRule::Capped, l.live, out);
             return;
         }
+        // Each partition of a collection spread over partitions gets a range of its own on the
+        // least loaded core, without waiting for load or size (D-186, FR-040).
+        if let Some(at) = partition_cut(start, end, &self.partition_edges) {
+            self.cuts.insert(g, at.clone());
+            self.ask_split(g, at, SplitRule::Partition, l.live, out);
+            return;
+        }
         let split_bytes = split_size(start, &self.chunks, self.split_bytes);
         let disk_limit = split_bytes.saturating_mul(SPLIT_DISK_FACTOR);
         // By size (FR-005) at the files' middle key, or else by load (FR-006) at the median of the
@@ -847,6 +875,16 @@ fn size_cut(
 /// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
 /// `end`: no end), where the range is cut so that the collection has a range of its own
 /// (007 FR-009).
+/// The first partition edge strictly inside `[start, end)` (D-186).
+fn partition_cut(start: &[u8], end: &[u8], edges: &BTreeSet<Vec<u8>>) -> Option<Vec<u8>> {
+    use std::ops::Bound::{Excluded, Unbounded};
+    edges
+        .range::<[u8], _>((Excluded(start), Unbounded))
+        .next()
+        .filter(|k| end.is_empty() || k.as_slice() < end)
+        .cloned()
+}
+
 fn capped_cut(start: &[u8], end: &[u8], capped: &BTreeSet<(u32, u32)>) -> Option<Vec<u8>> {
     use teseladb_keys::KeyBuilder;
     let inside = |k: &[u8]| start < k && (end.is_empty() || k < end);
@@ -1026,6 +1064,47 @@ mod tests {
     }
 
     #[test]
+    fn a_leader_cuts_its_range_at_each_partition_edge_and_the_new_half_moves() {
+        // D-186: every partition of a collection spread over partitions gets a range of its own
+        // from the start, without load or size, and the new half goes to the least loaded core.
+        use teseladb_keys::KeyBuilder;
+        let edge = |n: u32| KeyBuilder::collection_start(0, n).as_bytes().to_vec();
+        let edges = BTreeSet::from([edge(11), edge(12), edge(13)]);
+        let mut o = One::new();
+        let descs = vec![desc(1, &[1], &[4])];
+        o.r.set(&Ranges { descs, partition_edges: edges.clone(), ..Ranges::default() });
+        let lsm = o.lsm.clone();
+        o.r.open(&mut o.core, &mut o.host, &lsm);
+        let mut asked = Vec::new();
+        for _ in 0..200 {
+            o.run(20);
+            asked = o.lead();
+            if !asked.is_empty() {
+                break;
+            }
+            o.lsm.borrow_mut().flush();
+        }
+        assert_eq!(asked, vec![Group0Command::SplitRange { group: G, at: edge(11) }]);
+        // The next edge inside each half, and none inside a partition's own range.
+        assert_eq!(partition_cut(&edge(11), &[4], &edges), Some(edge(12)));
+        assert_eq!(partition_cut(&edge(12), &edge(13), &edges), None);
+        assert_eq!(partition_cut(&edge(13), &[], &edges), None);
+        // Once Group 0 has the new half, it moves to the least loaded core.
+        o.r.set_cores(4);
+        let ranges = Ranges {
+            descs: vec![desc(1, &[1], &edge(11)), desc(2, &edge(11), &[4])],
+            partition_edges: edges,
+            ..Ranges::default()
+        };
+        o.r.set(&ranges);
+        let asked = o.lead();
+        assert!(
+            asked.contains(&Group0Command::RelocateRange { group: GroupId(2), core: 1 }),
+            "{asked:?}"
+        );
+    }
+
+    #[test]
     fn a_leader_cuts_its_range_at_the_edges_of_a_capped_collection() {
         // 007 FR-009: a capped collection gets a range of its own.
         use teseladb_keys::KeyBuilder;
@@ -1064,11 +1143,11 @@ mod tests {
         assert_eq!(SplitRule::of(false, true), SplitRule::Disk);
         assert_eq!(SplitRule::of(false, false), SplitRule::Load);
         let names: Vec<&str> =
-            [SplitRule::Capped, SplitRule::Live, SplitRule::Disk, SplitRule::Load]
+            [SplitRule::Capped, SplitRule::Live, SplitRule::Disk, SplitRule::Load, SplitRule::Partition]
                 .into_iter()
                 .map(SplitRule::name)
                 .collect();
-        assert_eq!(names, ["capped", "live", "disk", "load"]);
+        assert_eq!(names, ["capped", "live", "disk", "load", "partition"]);
     }
 
     #[test]
