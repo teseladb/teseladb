@@ -139,6 +139,12 @@ impl StartupLog {
         StartupLog(Some(Arc::new(f)))
     }
 
+    /// Whether the steps go somewhere.
+    #[must_use]
+    pub fn is_on(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// Logs step `msg` with `fields`.
     pub fn step(&self, msg: &str, fields: &[(&str, &dyn fmt::Display)]) {
         if let Some(f) = &self.0 {
