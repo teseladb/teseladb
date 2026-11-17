@@ -46,6 +46,11 @@ pub struct CollectionEntry {
 /// not a collection option: `listCollections` does not show it and `collMod` carries it over.
 pub const ORDERED_IDS: &str = "$orderedIds";
 
+/// The option of a collection's entry that spreads it over partitions (003 FR-012, D-186): their
+/// number, from 1 to [`teseladb_keys::partition::MAX_PARTITIONS`]. The catalog gives the
+/// collection that many consecutive collection numbers. Not a collection option either.
+pub const PARTITIONS: &str = "$partitions";
+
 /// How a collection without shard key, capping or clustering keys its documents (003 FR-012).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentLayout {
@@ -57,6 +62,26 @@ pub enum DocumentLayout {
 }
 
 impl CollectionEntry {
+    /// Its collection numbers (003 FR-012, D-186): those of the partitions it was created with,
+    /// or its one number.
+    pub fn partitions(
+        &self,
+    ) -> Result<teseladb_keys::partition::Partitions, crate::collection_types::KindError> {
+        use teseladb_keys::partition::{MAX_PARTITIONS, Partitions};
+        const BAD: crate::collection_types::KindError =
+            crate::collection_types::KindError("a partition count outside 1 to 64");
+        let options = teseladb_bson::RawDoc::from_bytes(&self.options)
+            .map_err(|_| crate::collection_types::KindError("options that are not BSON"))?;
+        let count = match options.get(PARTITIONS) {
+            None => return Ok(Partitions::single(self.id)),
+            Some(teseladb_bson::RawValue::Int32(n)) => i64::from(n),
+            Some(teseladb_bson::RawValue::Int64(n)) => n,
+            Some(_) => return Err(BAD),
+        };
+        let count = u8::try_from(count).ok().filter(|n| (1..=MAX_PARTITIONS).contains(n));
+        count.map(|n| Partitions::new(self.id, n)).ok_or(BAD)
+    }
+
     /// The layout of its documents, from [`ORDERED_IDS`] in its options; without it, the hash
     /// bucket the collection was created with.
     pub fn layout(&self) -> Result<DocumentLayout, crate::collection_types::KindError> {
@@ -355,14 +380,17 @@ impl Catalog {
                 if self.differs_in_case(&ns.db) {
                     return Err(CatalogError::DatabaseDifferCase);
                 }
-                self.last_collection += 1;
-                let c = CollectionEntry {
-                    id: self.last_collection,
+                let mut c = CollectionEntry {
+                    id: self.last_collection + 1,
                     uuid: *uuid,
                     options: options.clone(),
                     created_index: index,
                     tenant: crate::tenants::split_db(&ns.db).0,
                 };
+                // A collection spread over partitions takes one number for each (D-186).
+                let count = c.partitions().map_or(1, |p| u32::from(p.count()));
+                self.last_collection += count;
+                c.id = self.last_collection + 1 - count;
                 self.collections.insert(ns.clone(), c.clone());
                 self.add_db(&ns.db, (index, mark));
                 Ok(Some(c))
@@ -424,6 +452,14 @@ impl Catalog {
                 Ok(None)
             }
         }
+    }
+
+    /// The collection that collection number `number` belongs to: its own, or one of its
+    /// partitions' (D-186).
+    pub fn by_number(&self, number: u32) -> Option<(&Namespace, &CollectionEntry)> {
+        self.collections.iter().find(|(_, c)| {
+            c.id == number || (c.id < number && c.partitions().is_ok_and(|p| p.contains(number)))
+        })
     }
 
     /// The dictionary of field names of collection `id` (003 FR-022).
