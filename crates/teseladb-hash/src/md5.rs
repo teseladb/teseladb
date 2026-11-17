@@ -107,13 +107,18 @@ fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
 #[must_use]
 pub fn md5(data: &[u8]) -> [u8; 16] {
     let mut state: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
+    // The whole blocks straight from `data`, and the padded tail in one or two blocks on the
+    // stack: a copy of the input was allocated (and grown) for every digest.
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
+        compress(&mut state, block);
     }
-    padded.extend_from_slice(&(data.len() as u64).wrapping_mul(8).to_le_bytes());
-    for block in padded.as_chunks::<64>().0 {
+    let mut tail = [0u8; 128];
+    tail[..rest.len()].copy_from_slice(rest);
+    tail[rest.len()] = 0x80;
+    let used = if rest.len() < 56 { 64 } else { 128 };
+    tail[used - 8..used].copy_from_slice(&(data.len() as u64).wrapping_mul(8).to_le_bytes());
+    for block in tail[..used].as_chunks::<64>().0 {
         compress(&mut state, block);
     }
     let mut out = [0u8; 16];

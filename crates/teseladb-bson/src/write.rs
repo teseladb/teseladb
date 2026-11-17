@@ -140,6 +140,24 @@ impl<'a> Fragments<'a> {
         Fragments { own: Vec::new(), splices: Vec::new(), borrowed: 0, min: min_borrowed.max(1) }
     }
 
+    /// As [`Fragments::new`], with room for `own` bytes of its own: a message whose own bytes
+    /// are known up front ([`Document::fragments_own_len`]) is written without growing its buffer.
+    #[must_use]
+    pub fn with_capacity(min_borrowed: usize, own: usize) -> Fragments<'a> {
+        Fragments {
+            own: Vec::with_capacity(own),
+            splices: Vec::new(),
+            borrowed: 0,
+            min: min_borrowed.max(1),
+        }
+    }
+
+    /// The smallest document that goes by reference.
+    #[must_use]
+    pub fn min_borrowed(&self) -> usize {
+        self.min
+    }
+
     /// All the bytes, own and borrowed.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -180,18 +198,25 @@ impl<'a> Fragments<'a> {
     #[must_use]
     pub fn slices(&self) -> Vec<&[u8]> {
         let mut out = Vec::with_capacity(2 * self.splices.len() + 1);
+        self.for_each_piece(|p| out.push(p));
+        out
+    }
+
+    /// Calls `f` with each piece in order, as [`Fragments::slices`] lists them, without a list.
+    pub fn for_each_piece<'s>(&'s self, mut f: impl FnMut(&'s [u8])) {
         let mut from = 0;
+        let mut any = false;
         for &(at, piece) in &self.splices {
             if at > from {
-                out.push(&self.own[from..at]);
+                f(&self.own[from..at]);
             }
-            out.push(piece);
+            f(piece);
+            any = true;
             from = at;
         }
-        if from < self.own.len() || out.is_empty() {
-            out.push(&self.own[from..]);
+        if from < self.own.len() || !any {
+            f(&self.own[from..]);
         }
-        out
     }
 
     /// All the bytes in one buffer.
@@ -247,6 +272,38 @@ impl Document {
             return b.len();
         }
         5 + self.iter().map(|(k, v)| element_len(k.len(), v)).sum::<usize>()
+    }
+
+    /// The bytes [`Document::append_fragments`] writes into the buffer of [`Fragments`] made with
+    /// `min_borrowed`: [`Document::encoded_len`] without the documents that keep at least that
+    /// many bytes, which go by reference.
+    #[must_use]
+    pub fn fragments_own_len(&self, min_borrowed: usize) -> usize {
+        own_len(self, min_borrowed.max(1))
+    }
+}
+
+/// [`Document::fragments_own_len`] of `d`, the documents of at least `min` kept bytes left out.
+fn own_len(d: &Document, min: usize) -> usize {
+    if let Some(b) = d.canonical_bytes() {
+        return if b.len() < min { b.len() } else { 0 };
+    }
+    5 + d.iter().map(|(k, v)| 2 + k.len() + own_value_len(v, min)).sum::<usize>()
+}
+
+/// [`own_len`] of a value: documents and arrays may hold kept documents; the scope of
+/// JavaScript code is always written field by field.
+fn own_value_len(v: &Value, min: usize) -> usize {
+    match v {
+        Value::Document(d) => own_len(d, min),
+        Value::Array(items) => {
+            5 + items
+                .iter()
+                .enumerate()
+                .map(|(i, x)| 2 + digits(i) + own_value_len(x, min))
+                .sum::<usize>()
+        }
+        _ => value_len(v),
     }
 }
 
@@ -350,6 +407,54 @@ fn write_document<'a, S: Sink<'a>, K: AsRef<str>>(
     out.patch(start, limits)
 }
 
+/// An array at nesting level `depth`: a document whose names are the positions, written from a
+/// buffer on the stack (a `String` per position was allocated for every array written).
+fn write_array<'a, S: Sink<'a>>(
+    out: &mut S,
+    items: &'a [Value],
+    depth: usize,
+    limits: Limits,
+) -> Result<(), BsonError> {
+    if depth > limits.max_depth {
+        return Err(BsonError::TooDeep { offset: out.len(), path: String::new() });
+    }
+    let start = out.placeholder();
+    let mut digits = PositionName::default();
+    for (i, value) in items.iter().enumerate() {
+        out.byte(value.element_type());
+        let name = digits.of(i);
+        out.put(name.as_bytes());
+        out.byte(0);
+        write_value(out, value, depth, limits).map_err(|e| e.under(name))?;
+    }
+    out.byte(0);
+    out.patch(start, limits)
+}
+
+/// The decimal name of an array position, written in place.
+#[derive(Default)]
+struct PositionName {
+    buf: [u8; 20],
+}
+
+impl PositionName {
+    /// `i` in decimal.
+    fn of(&mut self, mut i: usize) -> &str {
+        let mut at = self.buf.len();
+        loop {
+            at -= 1;
+            // A digit: `i % 10` is below 10.
+            self.buf[at] = b'0' + u8::try_from(i % 10).unwrap_or(0);
+            i /= 10;
+            if i == 0 {
+                break;
+            }
+        }
+        // ASCII digits only.
+        std::str::from_utf8(&self.buf[at..]).unwrap_or("0")
+    }
+}
+
 fn write_value<'a, S: Sink<'a>>(
     out: &mut S,
     value: &'a Value,
@@ -360,10 +465,7 @@ fn write_value<'a, S: Sink<'a>>(
         Value::Double(x) => out.put(&x.to_le_bytes()),
         Value::String(s) | Value::JavaScript(s) | Value::Symbol(s) => string(out, s, limits)?,
         Value::Document(d) => write_whole(out, d, depth + 1, limits)?,
-        Value::Array(items) => {
-            let names: Vec<String> = (0..items.len()).map(|i| i.to_string()).collect();
-            write_document(out, names.iter().zip(items), depth + 1, limits)?;
-        }
+        Value::Array(items) => write_array(out, items, depth + 1, limits)?,
         Value::Binary { subtype, bytes } => {
             let old = *subtype == types::BINARY_OLD;
             let len = within(bytes.len() + if old { 4 } else { 0 }, limits)?;
