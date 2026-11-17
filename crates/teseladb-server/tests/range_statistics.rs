@@ -13,6 +13,7 @@ use common::{Client, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_server::client_listener::Hooks;
 use teseladb_server::node::{Node, NodeConfig};
+use teseladb_stages::Stage;
 
 const DB: &str = "stats";
 const DOCS: i32 = 2000;
@@ -90,6 +91,10 @@ fn a_compaction_gives_the_planner_statistics_and_it_picks_without_a_trial() {
         (rejected == 0).then_some(plan)
     });
     assert!(plan.contains("\"v_1\""), "{plan}");
+    // The pass that published them, in the background's group, timed its stages.
+    for stage in [Stage::StatsPass, Stage::StatsRead, Stage::StatsBuild] {
+        assert!(teseladb_stages::count(stage) >= 1, "{stage:?}");
+    }
     let r = run(&mut c, Document::new().with("find", "c").with("filter", filter()));
     let found = batch(&r, "firstBatch");
     assert_eq!(found.len(), 1, "{found:?}");

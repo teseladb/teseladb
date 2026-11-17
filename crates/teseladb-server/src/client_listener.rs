@@ -693,22 +693,32 @@ impl ClientListener {
             crate::tenant_limits::run_reader(backend, stop);
         });
         self.tasks.push(spawn(shard(1), usage).ok_or_else(gone)?);
-        // The statistics of the ranges compactions rewrote (010 FR-029).
+        // The statistics of the ranges compactions rewrote (010 FR-029), in the background's
+        // group of its shard (023 FR-012): a pass reads and sorts every value of the indexes of
+        // each range, and gives the shard back whenever the reactor asks for it.
+        use teseladb_wire::commands::range_stats;
         let hs = h.clone();
         let every = hooks.stats_every;
         let statistics = Box::new(move |stop: &crate::client_tasks::TaskStop| {
-            let mut backend = ServerBackend::new(hs, seed(u64::MAX - 3 - RESOLVERS as u64));
+            let mut backend =
+                ServerBackend::new(hs, seed(u64::MAX - 3 - RESOLVERS as u64)).yielding_reads();
+            let mut pause = || {
+                if teseladb::engine::core::thread::Thread::running_in_thread() {
+                    teseladb::engine::core::thread::Thread::maybe_yield();
+                }
+            };
             while !stop.stopped() {
                 stop.pause(every);
                 if stop.stopped() {
                     break;
                 }
                 // A range whose statistics could not be read waits for the next pass.
-                let _ = teseladb_wire::commands::range_stats::pass(&mut backend);
+                let _ = range_stats::pass_pausing(&mut backend, &mut pause);
                 teseladb_wire::commands::Backend::end_operation(&mut backend);
             }
         });
-        self.tasks.push(spawn(shard(2), statistics).ok_or_else(gone)?);
+        let task = crate::client_tasks::spawn_background(shard(2), statistics);
+        self.tasks.push(task.ok_or_else(gone)?);
         // The resolvers of the finished transactions (008 FR-005), apart from the connections:
         // run after the answer on the connection, a resolution held that client's next command
         // for a write of the log (H-050 of the native tests).
