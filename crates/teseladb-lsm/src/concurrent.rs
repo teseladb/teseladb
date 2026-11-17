@@ -188,6 +188,15 @@ impl SharedLsm {
         }
     }
 
+    /// Drops the blocks of file `file`, which left the current version, from the shared cache.
+    /// A reader of an older view that still reads it puts the blocks it reads back, since its
+    /// next try looks for them there; they go with the file ([`SharedLsm::forget`]).
+    pub(crate) fn retire(&self, file: u64) {
+        for shard in self.inner.cache.iter() {
+            shard.with_waiting(|c| c.retire(file, false));
+        }
+    }
+
     /// Bytes of the blocks in the shared cache of the files `live` says no.
     pub(crate) fn bytes_outside(&self, live: &dyn Fn(u64) -> bool) -> u64 {
         self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.bytes_outside(live))).sum()
@@ -197,8 +206,7 @@ impl SharedLsm {
     pub fn supply(&self, need: &BlockNeed, bytes: &[u8]) -> Result<(), LsmError> {
         let raw = Bytes::copy_from_slice(bytes);
         let payload =
-            need.table.payload(need.block, &raw).map_err(|_| corrupt(&need.table, need.block))?;
-        let (file, block) = (need.table.number, need.block);
+            need.table.payload(need.block, &raw).map_err(|_| corrupt(&need.table, need.block))?;        let (file, block) = (need.table.number, need.block);
         let shard = self.inner.shard(file, block);
         // A miss already cost a read of the disk; a moment's retry keeps the block for the next
         // reads instead of dropping it when another thread holds the shard.

@@ -108,8 +108,15 @@ impl Lsm {
         }
     }
 
-    /// Leaves `t`, which left the current version, to go from the disk once nothing holds it.
+    /// Leaves `t`, which left the current version, to go from the disk once nothing holds it,
+    /// and drops its blocks, and those of its history file, from both caches now: the views that
+    /// still hold it are those of reads under way, which read what they still need from the
+    /// disk, and its blocks would otherwise hold memory of the caches until it goes.
     fn retire(&mut self, t: Arc<Table>) {
+        for f in std::iter::once(&t).chain(t.history.as_ref()) {
+            self.reader.cache.retire(f.number, true);
+            self.shared.retire(f.number);
+        }
         self.obsolete.push(t);
     }
 
