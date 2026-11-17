@@ -1721,19 +1721,25 @@ impl Node {
 
     /// Stops the cores, the peers' listener, the device log and the engine.
     pub fn stop(mut self) {
-        if let Some(p) = self.replica_port {
+        self.shutdown();
+    }
+
+    /// [`Node::stop`] once: a node dropped without a stop stops the same way, as its engine
+    /// would otherwise wait for its cores and ports forever.
+    fn shutdown(&mut self) {
+        let Some(engine) = self.engine.take() else { return };
+        if let Some(p) = self.replica_port.take() {
             p.stop();
         }
-        if let Some(c) = self.client {
+        if let Some(c) = self.client.take() {
             c.stop();
         }
-        if let Some(a) = self.admin {
+        if let Some(a) = self.admin.take() {
             a.stop();
         }
-        if let Some(h) = self.http {
+        if let Some(h) = self.http.take() {
             h.stop();
         }
-        let engine = self.engine.take().expect("a running node has its engine");
         engine.stop_peers(None);
         let senders: Vec<_> = self.senders.iter().map(CoreSenders::sender).collect();
         stop_cores(&senders, std::mem::take(&mut self.cores_run));
@@ -1753,6 +1759,12 @@ impl Node {
         // before the engine stops; later ones are written at once (023 FR-018).
         crate::outlet::flush_all();
         engine.stop();
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
