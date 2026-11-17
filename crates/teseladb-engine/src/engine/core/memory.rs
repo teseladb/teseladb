@@ -703,6 +703,82 @@ pub use default_allocator::*;
 #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
 pub use engine_allocator::*;
 
+/// Allocates a block for `layout` from the global allocator; allocation failure goes to
+/// [`std::alloc::handle_alloc_error`], as with `Box`.
+///
+/// When the engine allocator is the global allocator (every build but
+/// `engine_default_allocator`, see `lib.rs`), its `GlobalAlloc::alloc` is called directly, so
+/// its fast path is inlined into the caller: `std::alloc::alloc` (and `Box::new`) first call
+/// the out-of-line no-op `__rust_no_alloc_shim_is_unstable_v2` and then the out-of-line
+/// `__rust_alloc`, two calls on the path of every task, continuation and coroutine frame.
+/// The block belongs to the global allocator either way, so `std::alloc::dealloc` or a `Box`
+/// may free it as well as [`dealloc_direct`].
+///
+/// # Safety
+/// `layout` has a non-zero size.
+#[inline(always)]
+pub(crate) unsafe fn alloc_direct(layout: std::alloc::Layout) -> *mut u8 {
+    #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
+    // SAFETY: the layout's size is not zero (the caller's contract).
+    let p = unsafe { std::alloc::GlobalAlloc::alloc(&EngineAllocator, layout) };
+    #[cfg(not(all(target_os = "linux", not(engine_default_allocator))))]
+    // SAFETY: as above.
+    let p = unsafe { std::alloc::alloc(layout) };
+    if p.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    p
+}
+
+/// Frees a block of the global allocator, calling the engine allocator directly when it is
+/// the global allocator (see [`alloc_direct`]; `std::alloc::dealloc` is the out-of-line
+/// `__rust_dealloc`).
+///
+/// # Safety
+/// `p` was allocated by the global allocator with `layout` and is not used afterwards.
+#[inline(always)]
+pub(crate) unsafe fn dealloc_direct(p: *mut u8, layout: std::alloc::Layout) {
+    #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
+    // SAFETY: guaranteed by the caller; the engine allocator is the global allocator.
+    unsafe {
+        std::alloc::GlobalAlloc::dealloc(&EngineAllocator, p, layout)
+    };
+    #[cfg(not(all(target_os = "linux", not(engine_default_allocator))))]
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        std::alloc::dealloc(p, layout)
+    };
+}
+
+/// `Box::<T>::new_uninit()` through [`alloc_direct`]. The box may be freed as any box, or
+/// with [`drop_box_direct`].
+#[inline(always)]
+pub(crate) fn new_uninit_box<T>() -> Box<std::mem::MaybeUninit<T>> {
+    let layout = const {
+        assert!(std::mem::size_of::<T>() != 0);
+        std::alloc::Layout::new::<T>()
+    };
+    // SAFETY: `T` is not zero-sized (checked above); the block is the global allocator's,
+    // allocated for `T`'s layout, as `Box` requires of a pointer it frees.
+    unsafe { Box::from_raw(alloc_direct(layout).cast::<std::mem::MaybeUninit<T>>()) }
+}
+
+/// `drop(Box::from_raw(p))` with the block freed through [`dealloc_direct`].
+///
+/// # Safety
+/// `p` comes from `Box::into_raw` of a `Box<T>` (or of a [`new_uninit_box`] box once
+/// initialized), holds a live `T`, and is not used afterwards.
+#[inline(always)]
+pub(crate) unsafe fn drop_box_direct<T>(p: *mut T) {
+    // SAFETY: guaranteed by the caller: a live T in a block of the global allocator with
+    // T's layout (T is not zero-sized: a zero-sized box holds no block, so new_uninit_box
+    // refuses such a T, and this is only used for the boxes it made).
+    unsafe {
+        std::ptr::drop_in_place(p);
+        dealloc_direct(p.cast::<u8>(), std::alloc::Layout::new::<T>());
+    }
+}
+
 #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
 mod engine_allocator {
     use super::*;

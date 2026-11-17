@@ -10,6 +10,7 @@ use std::ptr::{self, NonNull};
 
 use crate::engine::core::future::internal::{PromiseBaseWithType, PromiseNode};
 use crate::engine::core::future::{Future, Futurize, futurize_invoke};
+use crate::engine::core::memory::{dealloc_direct, drop_box_direct, new_uninit_box};
 use crate::engine::core::scheduling::{SchedulingGroup, current_scheduling_group};
 use crate::engine::core::task::{Task, TaskBase, TaskPtr, task_ptr};
 
@@ -95,10 +96,10 @@ impl<Func: FnOnce() -> R + 'static, R: Futurize> LambdaTask<Func, R> {
             if Self::CACHED {
                 ptr::drop_in_place(me);
                 if !task_block_cache::push(me.cast::<u8>()) {
-                    drop(Box::from_raw(me.cast::<mem::MaybeUninit<Self>>()));
+                    dealloc_direct(me.cast::<u8>(), std::alloc::Layout::new::<Self>());
                 }
             } else {
-                drop(Box::from_raw(me));
+                drop_box_direct(me);
             }
         }
     }
@@ -157,35 +158,6 @@ impl<Func: FnOnce() -> R + 'static, R: Futurize> LambdaTask<Func, R> {
     pub unsafe fn as_task_ptr(this: *mut Self) -> TaskPtr {
         // SAFETY: guaranteed by the caller (a live heap task, so non-null).
         task_ptr(unsafe { NonNull::new_unchecked(this) })
-    }
-}
-
-/// `Box::<T>::new_uninit()`, allocated by calling the engine allocator directly when it is the
-/// global allocator: `alloc::alloc::alloc` first calls an out-of-line no-op symbol
-/// (`__rust_no_alloc_shim_is_unstable_v2`), a call on the path of every task that the
-/// allocator's inlined fast path does not need. The box is freed by the global allocator,
-/// which is the same allocator.
-#[inline(always)]
-fn new_uninit_box<T>() -> Box<mem::MaybeUninit<T>> {
-    #[cfg(not(engine_default_allocator))]
-    {
-        use std::alloc::{GlobalAlloc, Layout};
-        const { assert!(mem::size_of::<T>() != 0) };
-        let layout = Layout::new::<T>();
-        // SAFETY: the layout is not zero-sized; the block is allocated by the global allocator
-        // (`EngineAllocator`, installed by the crate unless `engine_default_allocator`) for
-        // `layout`, as `Box` requires of a pointer it frees.
-        unsafe {
-            let p = crate::engine::core::memory::EngineAllocator.alloc(layout);
-            if p.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-            Box::from_raw(p.cast::<mem::MaybeUninit<T>>())
-        }
-    }
-    #[cfg(engine_default_allocator)]
-    {
-        Box::<T>::new_uninit()
     }
 }
 
@@ -321,8 +293,12 @@ pub(crate) mod task_block_cache {
     /// The largest alignment of a cached block's type (the allocator aligns a 64-byte block
     /// to at least 16 bytes, so any type of that size and alignment can reuse it).
     pub(crate) const BLOCK_ALIGN: usize = 16;
-    /// The most blocks one thread keeps.
-    const CAP: u32 = 32;
+    /// The most blocks one thread keeps: 16 KiB, enough for the tasks of a
+    /// `parallel_for_each` over a few hundred elements that all yield (with 32, a loop over
+    /// 100 such elements took 68 of its tasks from the allocator and gave them back to it,
+    /// with the cache's own tests on top: 20 more instructions per element than with no
+    /// miss).
+    const CAP: u32 = 256;
 
     #[repr(C)]
     struct FreeBlock {

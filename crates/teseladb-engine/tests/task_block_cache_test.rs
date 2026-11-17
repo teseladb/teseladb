@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::make_ready_future;
+use teseladb::engine::core::loop_::parallel_for_each;
 use teseladb::engine::core::memory;
 use teseladb::engine::core::reactor::{later, yield_};
 use teseladb::engine_test_case;
@@ -51,7 +52,7 @@ engine_test_case!(cached_tasks_still_run_in_order, {
         for round in 0..3u32 {
             let order = Rc::new(Cell::new(0u32));
             let mut futs = Vec::new();
-            for i in 0..100u32 {
+            for i in 0..300u32 {
                 let o = Rc::clone(&order);
                 futs.push(if i % 2 == 0 { yield_() } else { later() }.then(move |()| {
                     assert_eq!(o.get(), i, "round {round}: task {i} ran out of order");
@@ -62,7 +63,29 @@ engine_test_case!(cached_tasks_still_run_in_order, {
             for f in futs {
                 f.await?;
             }
-            assert_eq!(order.get(), 100);
+            assert_eq!(order.get(), 300);
+        }
+        Ok(())
+    })
+});
+
+engine_test_case!(a_loop_of_200_yields_at_once_takes_every_task_from_the_cache, {
+    make_coroutine(async move {
+        // 200 tasks of yield() alive at once: once a first round has filled the cache, the
+        // next rounds take all of them from it and give all of them back. What the
+        // allocator still counts is the loop's own state and the vector of its pending
+        // futures.
+        parallel_for_each(0..200u32, |_| yield_()).await?;
+        let s0 = memory::stats();
+        for _ in 0..10 {
+            parallel_for_each(0..200u32, |_| yield_()).await?;
+        }
+        let s1 = memory::stats();
+        let live = s1.live_objects() as i64 - s0.live_objects() as i64;
+        assert!(live.abs() <= 2, "live objects after 10 rounds: {live}");
+        if CACHE_ENABLED {
+            let mallocs = s1.mallocs() - s0.mallocs();
+            assert!(mallocs <= 40, "{mallocs} allocations for 10 rounds of 200 yields");
         }
         Ok(())
     })

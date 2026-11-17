@@ -53,13 +53,19 @@ pub struct ParallelForEachState {
     ex: ExceptionPtr,
 }
 
-/// The pending futures of a [`ParallelForEachState`]: the first [`IncompleteFutures::N`]
-/// inline in the state, the rest in a heap vector. As the upstream change
-/// "loop: use small_vector for parallel_for_each_state incomplete futures": a loop with a
-/// few pending futures no longer allocates a buffer for them besides the state.
+/// The pending futures of a [`ParallelForEachState`], as the upstream change "loop: use
+/// small_vector for parallel_for_each_state incomplete futures" (`small_vector<future<>, 5>`
+/// with `reserve(n)`): a loop over at most [`IncompleteFutures::N`] elements keeps them inline
+/// in the state, without a buffer of their own; a longer one reserves a heap vector for all
+/// `n` at once, as `reserve(n)` moves a small vector to the heap, and uses only that.
+///
+/// The storage is chosen once, in [`IncompleteFutures::with_capacity`], so a long loop pays
+/// one predictable test per operation and no inline bookkeeping (keeping the first five
+/// inline and the rest on the heap cost a long loop 5 instructions per pending future).
 struct IncompleteFutures {
-    /// Initialized inline slots (`inline[..len]`); the heap part is used only when they are
-    /// all taken.
+    /// Whether the futures are in `heap` (the loop had more than `N` elements).
+    on_heap: bool,
+    /// Initialized inline slots (`inline[..len]`), used when not `on_heap`.
     len: usize,
     inline: [std::mem::MaybeUninit<Future<()>>; IncompleteFutures::N],
     heap: Vec<Future<()>>,
@@ -68,21 +74,27 @@ struct IncompleteFutures {
 impl IncompleteFutures {
     const N: usize = 5;
 
-    /// Empty, with heap room for the futures beyond the inline ones when `n` are expected.
+    /// Empty, with room for the `n` futures a loop over `n` elements can leave pending.
     fn with_capacity(n: usize) -> Self {
+        let on_heap = n > Self::N;
         IncompleteFutures {
+            on_heap,
             len: 0,
             inline: [const { std::mem::MaybeUninit::uninit() }; Self::N],
-            heap: Vec::with_capacity(n.saturating_sub(Self::N)),
+            heap: if on_heap { Vec::with_capacity(n) } else { Vec::new() },
         }
     }
 
     #[inline]
     fn push(&mut self, f: Future<()>) {
-        if self.len < Self::N {
+        if self.on_heap {
+            self.heap.push(f);
+        } else if self.len < Self::N {
             self.inline[self.len].write(f);
             self.len += 1;
         } else {
+            // More pending futures than the loop announced (its iterator's lower bound):
+            // the rest go to the heap, after the inline ones.
             self.heap.push(f);
         }
     }
@@ -90,6 +102,9 @@ impl IncompleteFutures {
     /// The last future pushed, if any.
     #[inline]
     fn last(&self) -> Option<&Future<()>> {
+        if self.on_heap {
+            return self.heap.last();
+        }
         if let Some(f) = self.heap.last() {
             return Some(f);
         }
@@ -99,6 +114,9 @@ impl IncompleteFutures {
 
     #[inline]
     fn pop(&mut self) -> Option<Future<()>> {
+        if self.on_heap {
+            return self.heap.pop();
+        }
         if let Some(f) = self.heap.pop() {
             return Some(f);
         }

@@ -1233,6 +1233,47 @@ engine_test_case!(test_parallel_for_each, {
     })
 });
 
+// The pending futures are kept inline for a loop over at most five elements, in one heap
+// vector for a longer one, and inline then on the heap when the iterator announced fewer
+// elements than it yields (a filter's lower bound is 0): every element runs once, and a
+// failure among pending futures is reported, in each storage.
+engine_test_case!(test_parallel_for_each_pending_futures_in_every_storage, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        fn run<I: IntoIterator<Item = i32>>(items: I, fail_at: Option<i32>) -> (i32, bool) {
+            let sum = Rc::new(Cell::new(0));
+            let s = sum.clone();
+            let r = parallel_for_each(items, move |v: i32| {
+                let s = s.clone();
+                yield_().then(move |()| -> Result<(), ExceptionPtr> {
+                    s.set(s.get() + v);
+                    if Some(v) == fail_at {
+                        return Err(make_exception_ptr(IntException(v)));
+                    }
+                    Ok(())
+                })
+            })
+            .get();
+            let failed_as_expected = match (r, fail_at) {
+                (Ok(()), None) => true,
+                (Err(e), Some(v)) => int_of(&e) == Some(v),
+                _ => false,
+            };
+            (sum.get(), failed_as_expected)
+        }
+        let total = |n: i32| n * (n - 1) / 2;
+        for n in [1, 3, 5, 6, 100] {
+            assert_eq!(run(0..n, None), (total(n), true), "range of {n}");
+            assert_eq!(run(0..n, Some(n / 2)), (total(n), true), "range of {n}, one failure");
+            let filtered = (0..n).filter(|_| true);
+            assert_eq!(filtered.size_hint().0, 0);
+            assert_eq!(run(filtered, None), (total(n), true), "filter of {n}");
+            let filtered = (0..n).filter(|_| true);
+            assert_eq!(run(filtered, Some(n - 1)), (total(n), true), "filter of {n}, failure");
+        }
+        Ok(())
+    })
+});
+
 engine_test_case!(test_parallel_for_each_early_failure, {
     do_with(0i32, |counter: &mut i32| {
         let cp: *mut i32 = counter;

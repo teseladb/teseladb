@@ -409,7 +409,7 @@ pub mod internal {
         pub(super) fn alloc(with_future: bool, frame: Fut) -> *mut Self {
             let frame = ManuallyDrop::new(frame);
             let sg = current_scheduling_group();
-            let mut b = Box::<Self>::new_uninit();
+            let mut b = crate::engine::core::memory::new_uninit_box::<Self>();
             let p = b.as_mut_ptr();
             // SAFETY: `p` is the uninitialized allocation of a Self, uniquely owned here;
             // every field is written once before the box is given up as initialized.
@@ -441,7 +441,10 @@ pub mod internal {
                 if CoroutineCore::unreferenced(this.cast::<CoroutineCore>()) {
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).core));
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).promise.local_state));
-                    std::alloc::dealloc(this.cast::<u8>(), std::alloc::Layout::new::<Self>());
+                    crate::engine::core::memory::dealloc_direct(
+                        this.cast::<u8>(),
+                        std::alloc::Layout::new::<Self>(),
+                    );
                 }
             }
         }
@@ -533,7 +536,10 @@ pub mod internal {
                 CoroutineCore::retire_node(c);
                 if CoroutineCore::unreferenced(c) {
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).core));
-                    std::alloc::dealloc(this.cast::<u8>(), std::alloc::Layout::new::<Self>());
+                    crate::engine::core::memory::dealloc_direct(
+                        this.cast::<u8>(),
+                        std::alloc::Layout::new::<Self>(),
+                    );
                 }
             }
         }

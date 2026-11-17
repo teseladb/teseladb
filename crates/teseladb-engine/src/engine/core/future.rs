@@ -1662,7 +1662,7 @@ where
         let sg = current_scheduling_group();
         // Built in place on the heap, field by field (as anotherproduct and async-task do), so the
         // function object is written once and not built on the stack and copied.
-        let mut b = Box::<Self>::new_uninit();
+        let mut b = crate::engine::core::memory::new_uninit_box::<Self>();
         let c = b.as_mut_ptr();
         // SAFETY: c is the uninitialized allocation of a Self, uniquely owned here; every
         // field is written once before the box is given up as initialized, and the field
@@ -1705,7 +1705,7 @@ where
             let c = n.byte_sub(mem::offset_of!(Self, node)).cast::<Self>();
             (*n).holder_node_live = false;
             if (*n).holder_done {
-                drop(Box::from_raw(c));
+                crate::engine::core::memory::drop_box_direct(c);
             }
         }
     }
@@ -1756,9 +1756,9 @@ where
                 (*n).holder_node_live = false;
             }
             if !(*n).holder_node_live {
-                // Continuations are allocated with Box::new in alloc(); nothing refers to
+                // Continuations are boxed by new_uninit_box in alloc(); nothing refers to
                 // the node any more and `c` is not used after this point.
-                drop(Box::from_raw(c));
+                crate::engine::core::memory::drop_box_direct(c);
             }
         }
     }
@@ -2478,7 +2478,7 @@ impl<T: 'static> Default for HostedPromise<T> {
 /// `p` must come from `Box::<H>::into_raw`, with the value already dropped.
 unsafe fn dealloc_host<H>(p: *mut u8) {
     // SAFETY: guaranteed by the caller; Box allocates with Layout::new::<H>().
-    unsafe { std::alloc::dealloc(p, std::alloc::Layout::new::<H>()) };
+    unsafe { crate::engine::core::memory::dealloc_direct(p, std::alloc::Layout::new::<H>()) };
 }
 
 /// Placeholder deallocation of an unbound hosted promise (never called: an unbound
@@ -2705,7 +2705,7 @@ impl<H: PromiseHost> HostBox<H> {
         // temporary copied whole into the allocation with 16-byte loads over narrower
         // stores (see `CoroutinePromise::alloc`). The handler aborts, so nothing is lost.
         let h = ManuallyDrop::new(h);
-        let p = Box::into_raw(Box::<H>::new_uninit()).cast::<H>();
+        let p = Box::into_raw(crate::engine::core::memory::new_uninit_box::<H>()).cast::<H>();
         // SAFETY: p is a fresh, uninitialized allocation of an H, uniquely owned here.
         unsafe { p.write(ManuallyDrop::into_inner(h)) };
         // SAFETY: p was just allocated and is uniquely owned here; the promise pointer is
