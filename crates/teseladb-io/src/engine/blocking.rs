@@ -545,7 +545,11 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             for _ in 0..super::OFFLOAD_THREADS {
                 let tx = tx.clone();
-                queue.send(Box::new(move || drop(tx.send(blocks(Stop::Terminate))))).unwrap();
+                queue
+                    .send(Box::new(move || {
+                        let _ = tx.send(blocks(Stop::Terminate));
+                    }))
+                    .unwrap();
             }
             let blocked: Vec<bool> = rx.iter().take(super::OFFLOAD_THREADS).collect();
             (blocked, blocks(Stop::Terminate))

@@ -19,7 +19,9 @@ const T: Duration = Duration::from_secs(10);
 /// Whether a closure posted with `lease` runs on a shard.
 fn runs_on_a_shard(lease: &EngineLease) -> bool {
     let (tx, rx) = mpsc::channel();
-    if !lease.post(move || drop(tx.send(engine_is_ready()))) {
+    if !lease.post(move || {
+        let _ = tx.send(engine_is_ready());
+    }) {
         return false;
     }
     rx.recv_timeout(T).unwrap_or(false)
