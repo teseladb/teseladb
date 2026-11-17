@@ -377,6 +377,10 @@ pub(crate) struct Reader {
     /// Point reads that finished, and the files they searched.
     pub(crate) gets: u64,
     pub(crate) probes: u64,
+    /// The cache the readers on other threads share, when it is large enough to hold the data
+    /// blocks: the core keeps its data blocks there too, so that a block both read is cached
+    /// once, and `cache` holds the meta bytes of the open files.
+    pub(crate) shared: Option<crate::concurrent::SharedLsm>,
 }
 
 /// Completed reads after which a block nobody came back for leaves [`Reader::fresh`].
@@ -401,6 +405,37 @@ impl Reader {
             reads_done: 0,
             gets: 0,
             probes: 0,
+            shared: None,
+        }
+    }
+
+    /// Block `block` of `file` from the cache that holds the data blocks, counting a hit.
+    fn cached(&mut self, file: u64, block: u32) -> Option<Bytes> {
+        let Some(shared) = &self.shared else {
+            return self.cache.get(file, block);
+        };
+        let found = shared.cached(file, block);
+        if found.is_some() {
+            self.cache.hits += 1;
+        }
+        found
+    }
+
+    /// Whether block `block` of `file` is cached, without counting a hit.
+    fn holds(&self, file: u64, block: u32) -> bool {
+        match &self.shared {
+            Some(shared) => shared.holds(file, block),
+            None => self.cache.contains(file, block),
+        }
+    }
+
+    /// Caches a data block read from the disk; not one of a retired file, which only reads of
+    /// older views still read.
+    fn keep(&mut self, file: u64, block: u32, payload: Bytes) {
+        match &self.shared {
+            Some(_) if self.cache.is_retired(file) => {}
+            Some(shared) => shared.keep(file, block, payload),
+            None => self.cache.insert(file, block, payload),
         }
     }
 
@@ -464,7 +499,7 @@ impl Reader {
                 self.touched.push(key);
                 Some(payload.clone())
             }
-            None => self.cache.get(table.number, i as u32),
+            None => self.cached(table.number, i as u32),
         };
         if let Some(payload) = cached {
             return Ok((Ok(payload), 0));
@@ -506,7 +541,7 @@ impl Reader {
         let (from, len) = table.pages(s);
         let stop = from + len;
         let held = self.fresh.contains_key(&(table.number, s))
-            || self.cache.contains(table.number, s as u32)
+            || self.holds(table.number, s as u32)
             || self.by_block.contains_key(&(table.number, s));
         let follows = from >= offset && from <= end && stop >= end;
         (follows && stop - offset <= ahead && !held).then_some(stop)
@@ -558,7 +593,7 @@ impl Reader {
             if s == i {
                 self.fresh.insert((table.number, s), (payload.clone(), now));
             }
-            self.cache.insert(table.number, s as u32, payload);
+            self.keep(table.number, s as u32, payload);
         }
     }
 }

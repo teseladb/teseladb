@@ -197,6 +197,33 @@ impl SharedLsm {
         }
     }
 
+    /// The core's lookup of block `block` of `file`: `None` when it is not cached, or when a
+    /// reader holds its shard, which the core then takes as a miss rather than wait.
+    pub(crate) fn cached(&self, file: u64, block: u32) -> Option<Bytes> {
+        let shard = self.inner.shard(file, block as usize);
+        shard.try_with(|c| c.get(file, block)).flatten()
+    }
+
+    /// Whether block `block` of `file` is cached (`false` when a reader holds its shard).
+    pub(crate) fn holds(&self, file: u64, block: u32) -> bool {
+        let shard = self.inner.shard(file, block as usize);
+        shard.try_with(|c| c.contains(file, block)).unwrap_or(false)
+    }
+
+    /// Caches a block the core read from the disk.
+    pub(crate) fn keep(&self, file: u64, block: u32, payload: Bytes) {
+        let shard = self.inner.shard(file, block as usize);
+        shard.with_waiting(|c| c.insert(file, block, payload.clone()));
+    }
+
+    /// Whether each shard of the cache can hold at least `blocks` blocks of `block_bytes`.
+    pub(crate) fn holds_blocks(&self, blocks: u64, block_bytes: u64) -> bool {
+        self.inner
+            .cache
+            .first()
+            .is_some_and(|s| s.with_waiting(|c| c.budget()) >= blocks * block_bytes)
+    }
+
     /// Bytes of the blocks in the shared cache of the files `live` says no.
     pub(crate) fn bytes_outside(&self, live: &dyn Fn(u64) -> bool) -> u64 {
         self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.bytes_outside(live))).sum()

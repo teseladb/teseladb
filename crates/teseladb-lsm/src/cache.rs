@@ -84,6 +84,11 @@ impl BlockCache {
         self.cache.used()
     }
 
+    /// The budget.
+    pub(crate) fn budget(&self) -> u64 {
+        self.cache.budget()
+    }
+
     /// The payload of block `block` of file `file`, if cached (a hit). A miss is counted by the
     /// reader when it asks the disk for the block ([`BlockCache::note_miss`], FR-013).
     pub(crate) fn get(&mut self, file: u64, block: u32) -> Option<Bytes> {
@@ -158,6 +163,11 @@ impl BlockCache {
         if refuse {
             self.retired.insert(file);
         }
+    }
+
+    /// Whether [`BlockCache::retire`] refused file `file`'s blocks.
+    pub(crate) fn is_retired(&self, file: u64) -> bool {
+        self.retired.contains(&file)
     }
 
     /// Forgets every block of a file that is going away, its meta bytes too.
