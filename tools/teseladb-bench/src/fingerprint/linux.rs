@@ -16,9 +16,23 @@ fn field(text: &str, prefix: &str) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix(prefix).map(|v| v.trim().to_owned()))
 }
 
+/// The value of a `/proc/cpuinfo` field, without its colon.
+fn cpu_field(info: &str, name: &str) -> Option<String> {
+    field(info, name).map(|v| v.trim_start_matches(':').trim().to_owned()).filter(|v| !v.is_empty())
+}
+
+/// The CPU model: `model name` on x86, and on ARM, where `/proc/cpuinfo` has none, the
+/// `Hardware` line or the implementer and part of the first core (MIDR fields).
+fn cpu_model(info: &str) -> Option<String> {
+    cpu_field(info, "model name").or_else(|| cpu_field(info, "Hardware")).or_else(|| {
+        let implementer = cpu_field(info, "CPU implementer")?;
+        let part = cpu_field(info, "CPU part")?;
+        Some(format!("ARM implementer {implementer} part {part}"))
+    })
+}
+
 pub(crate) fn probe() -> Probe {
-    let cpu = field(&read("/proc/cpuinfo"), "model name")
-        .map(|v| v.trim_start_matches(':').trim().to_owned());
+    let cpu = cpu_model(&read("/proc/cpuinfo"));
     let memory_kib: u64 = field(&read("/proc/meminfo"), "MemTotal:")
         .and_then(|v| v.trim_end_matches("kB").trim().parse().ok())
         .unwrap_or(0);
@@ -60,6 +74,14 @@ mod tests {
     fn fields_are_read_from_their_line() {
         assert_eq!(field("a: 1\nmodel name\t: X\n", "model name"), Some(": X".into()));
         assert_eq!(field("", "x"), None);
+        let x86 = "processor\t: 0\nmodel name\t: Some CPU @ 3 GHz\n";
+        assert_eq!(cpu_model(x86).as_deref(), Some("Some CPU @ 3 GHz"));
+        // An ARM core's cpuinfo has no model name.
+        let arm =
+            "processor\t: 0\nCPU implementer\t: 0x61\nCPU architecture: 8\nCPU part\t: 0x000\n";
+        assert_eq!(cpu_model(arm).as_deref(), Some("ARM implementer 0x61 part 0x000"));
+        assert_eq!(cpu_model("Hardware\t: Board X\n").as_deref(), Some("Board X"));
+        assert_eq!(cpu_model("processor\t: 0\n"), None);
         let p = probe();
         assert!(p.memory_bytes > 0);
         assert!(load_average().is_some_and(|l| l >= 0.0));
