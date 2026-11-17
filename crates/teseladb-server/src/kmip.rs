@@ -283,10 +283,12 @@ pub fn master_key(
 ) -> Result<MasterKey, String> {
     let tls = o.tls()?;
     let path = dir.join(KEYSTORE);
+    // Drawn first, whatever the start: a random source that fails stops every start at once,
+    // before the server is asked.
+    let nonce = drawn::<NONCE_LEN>(random)?;
     if !path.exists() {
         let ask = o.key_identifier.clone().map_or(Ask::Create, Ask::Key);
         let mut got = fetch_off_shard(o, &tls, ask)?;
-        let nonce = drawn::<NONCE_LEN>(random)?;
         let own = drawn::<KEY_LEN>(random)?;
         write_keystore(dir, &keystore_text(&got.id, &got.key, &own, &nonce))?;
         let (id, log) = (std::mem::take(&mut got.id), std::mem::take(&mut got.log));
@@ -306,7 +308,6 @@ pub fn master_key(
         return Ok(MasterKey { key: own, id, log: Vec::new(), rotated: false });
     }
     let mut new = fetch_off_shard(o, &tls, Ask::Create)?;
-    let nonce = drawn::<NONCE_LEN>(random)?;
     write_keystore(dir, &keystore_text(&new.id, &new.key, &own, &nonce))?;
     let (new_id, mut log) = (std::mem::take(&mut new.id), std::mem::take(&mut new.log));
     log.push(format!("Rotated master encryption key oldMasterKeyId={id} newMasterKeyId={new_id}"));
