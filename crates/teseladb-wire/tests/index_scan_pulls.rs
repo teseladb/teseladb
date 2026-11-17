@@ -127,6 +127,19 @@ fn a_residual_filter_over_a_long_range_keeps_what_the_collection_scan_keeps() {
 }
 
 #[test]
+fn a_read_with_a_limit_reads_its_range_once_up_to_what_it_takes() {
+    let mut m = loaded();
+    // The 300th document of `b` 3 is at `a` 2096: 2097 entries and their documents, and what the
+    // scan reads ahead of them, at most one pull and one batch of documents. Before, each read
+    // that ran out of entries read the range again from its start with four times as many.
+    m.scanned_rows = 0;
+    let first = found(&mut m, r#""filter":{"a":{"$gte":0},"b":3},"hint":"a_1","limit":300"#);
+    assert_eq!(first.len(), 300);
+    let read = m.scanned_rows;
+    assert!(read <= 2 * 2097 + 1024 + 512, "{read} rows read");
+}
+
+#[test]
 fn several_long_intervals_come_in_the_order_of_the_index_both_ways() {
     let mut m = loaded();
     let filter = r#""filter":{"b":{"$in":[4,1]}}"#;

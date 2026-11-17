@@ -153,21 +153,30 @@ fn refresh<B: Backend + ?Sized>(
     for index in indexes.iter().filter(|i| i.gives_statistics()) {
         let (first, past) = index.span((coll.tenant, coll.id));
         let within = cut((&first, &past), (&span.0, &span.1));
-        let Some(mut entries) = plan_exec::index_values(backend, coll, index, &within)? else {
-            continue;
-        };
-        pause();
-        for (i, path) in index.paths().enumerate() {
-            if fields.iter().any(|(p, _)| p == path) {
-                continue;
+        // The positions of the fields no index before this one gave, each with its values. The
+        // entries are read a pull at a time and only those values are kept (023 FR-012): reading
+        // every entry of the range first held them all, with their keys, at once.
+        let taken: Vec<(usize, &str)> = index
+            .paths()
+            .enumerate()
+            .filter(|(_, p)| !fields.iter().any(|(f, _)| f == p))
+            .collect();
+        let mut columns: Vec<Vec<Value>> = vec![Vec::new(); taken.len()];
+        let mut keep = |pulled: Vec<Vec<Value>>| {
+            for mut values in pulled {
+                for (column, (i, _)) in columns.iter_mut().zip(&taken) {
+                    if let Some(v) = values.get_mut(*i) {
+                        column.push(std::mem::replace(v, Value::Null));
+                    }
+                }
             }
-            // Each position is taken once: the values move out of the entries.
-            let values = entries
-                .iter_mut()
-                .filter_map(|e| e.get_mut(i).map(|v| std::mem::replace(v, Value::Null)))
-                .collect();
-            fields.push((path.to_owned(), values));
+        };
+        if !plan_exec::index_values(backend, coll, index, &within, pause, &mut keep)? {
+            continue;
         }
+        pause();
+        let names = taken.iter().map(|(_, p)| (*p).to_owned());
+        fields.extend(names.zip(columns));
     }
     stages::record(Stage::StatsRead, nanos_since(started));
     let started = Instant::now();
