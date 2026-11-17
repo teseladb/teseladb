@@ -90,4 +90,82 @@ impl Partitions {
     pub fn end(&self, tenant: u32) -> Key {
         KeyBuilder::collection_end(tenant, self.first + u32::from(self.count) - 1)
     }
+
+    /// `[start, end)` read in every partition: the same interval after the collection number in
+    /// each one's. `start` may carry any of the collection's numbers (a read that goes on from a
+    /// key it gave); `end` carries the first one with the rest of the key, or the next number with
+    /// nothing after it, the end of the collection, which is then the end of each partition.
+    /// `None` when the interval is not inside the collection's keys.
+    pub fn spans(&self, start: &[u8], end: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+        let (s, start_rest) = split_number(start)?;
+        let (e, end_rest) = split_number(end)?;
+        if !self.contains(s) || start[..5] != end[..5] {
+            return None;
+        }
+        let past = match e.checked_sub(self.first)? {
+            0 => false,
+            1 if end_rest.is_empty() => true,
+            _ => return None,
+        };
+        let spans = self
+            .numbers()
+            .map(|n| {
+                let lo = with_number(start, n, start_rest);
+                let hi = match past {
+                    true => with_number(end, n + 1, &[]),
+                    false => with_number(end, n, end_rest),
+                };
+                (lo, hi)
+            })
+            .collect();
+        Some(spans)
+    }
+}
+
+/// Bytes of `01 · tenant` before a data key's collection number.
+const NUMBER_AT: usize = 5;
+
+/// The collection number of data key `key` and the bytes after it.
+fn split_number(key: &[u8]) -> Option<(u32, &[u8])> {
+    if key.first() != Some(&crate::space::DATA) {
+        return None;
+    }
+    let n = u32::from_be_bytes(key.get(NUMBER_AT..NUMBER_AT + 4)?.try_into().ok()?);
+    Some((n, &key[NUMBER_AT + 4..]))
+}
+
+/// `key`'s first bytes with collection number `n` and `rest` after it.
+fn with_number(key: &[u8], n: u32, rest: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(NUMBER_AT + 4 + rest.len());
+    out.extend_from_slice(&key[..NUMBER_AT]);
+    out.extend_from_slice(&n.to_be_bytes());
+    out.extend_from_slice(rest);
+    out
+}
+
+/// The bytes of data key `key` after its collection number: what orders the keys of the
+/// partitions of one collection among themselves.
+pub fn after_number(key: &[u8]) -> &[u8] {
+    key.get(NUMBER_AT + 4..).unwrap_or_default()
+}
+
+/// The rows of the partitions' reads `lists`, each in key order (backward: from the highest),
+/// merged in the order of their keys after the collection number, at most `limit`.
+pub fn merge<V>(lists: Vec<Vec<(Vec<u8>, V)>>, limit: usize, backward: bool) -> Vec<(Vec<u8>, V)> {
+    let mut lanes: Vec<std::collections::VecDeque<(Vec<u8>, V)>> =
+        lists.into_iter().map(Into::into).collect();
+    let mut out = Vec::new();
+    while out.len() < limit {
+        let heads = lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.front().map(|(k, _)| (i, after_number(k))));
+        let next = match backward {
+            true => heads.max_by(|a, b| a.1.cmp(b.1)),
+            false => heads.min_by(|a, b| a.1.cmp(b.1)),
+        };
+        let Some((i, _)) = next else { break };
+        out.extend(lanes[i].pop_front());
+    }
+    out
 }

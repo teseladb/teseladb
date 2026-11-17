@@ -79,6 +79,48 @@ fn one_partition_is_the_collection_itself() {
 }
 
 #[test]
+fn an_interval_of_the_collection_is_read_in_every_partition() {
+    use teseladb_keys::partition::merge;
+    let parts = Partitions::new(40, 3);
+    let docs = |n: u32| KeyBuilder::index_prefix(TENANT, n, 0).as_bytes().to_vec();
+    let entries = |n: u32| KeyBuilder::index_prefix(TENANT, n, 2).as_bytes().to_vec();
+    // The documents of the collection: those of each partition.
+    let spans =
+        parts.spans(&docs(40), &KeyBuilder::index_prefix(TENANT, 40, 1).as_bytes().to_vec());
+    let want: Vec<_> = (40..43)
+        .map(|n| (docs(n), KeyBuilder::index_prefix(TENANT, n, 1).as_bytes().to_vec()))
+        .collect();
+    assert_eq!(spans, Some(want));
+    // The whole collection: each partition to its end.
+    let whole = parts.spans(&docs(40), KeyBuilder::collection_end(TENANT, 40).as_bytes());
+    assert_eq!(
+        whole.unwrap()[2],
+        (docs(42), KeyBuilder::collection_end(TENANT, 42).as_bytes().to_vec())
+    );
+    // A read that goes on from a key of partition 2 goes on from it in every partition.
+    let from = [entries(42).as_slice(), b"k7"].concat();
+    let on = parts.spans(&from, &entries(40)).map(|s| s[0].0.clone());
+    assert_eq!(on, Some([entries(40).as_slice(), b"k7"].concat()));
+    // Outside the collection.
+    assert_eq!(parts.spans(&docs(39), &docs(40)), None);
+    assert_eq!(parts.spans(&docs(40), &docs(44)), None);
+    // The partitions' rows merge in the index's order, forward and backward.
+    let row = |n: u32, s: &str| ([entries(n).as_slice(), s.as_bytes()].concat(), n);
+    let lists = vec![vec![row(40, "a"), row(40, "d")], vec![row(41, "b")], vec![row(42, "c")]];
+    let got: Vec<u32> = merge(lists.clone(), 10, false).into_iter().map(|(_, v)| v).collect();
+    assert_eq!(got, vec![40, 41, 42, 40]);
+    let back: Vec<_> = lists
+        .into_iter()
+        .map(|mut l| {
+            l.reverse();
+            l
+        })
+        .collect();
+    let got: Vec<u32> = merge(back, 2, true).into_iter().map(|(_, v)| v).collect();
+    assert_eq!(got, vec![40, 42]);
+}
+
+#[test]
 #[should_panic(expected = "partitions")]
 fn more_than_the_most_partitions_is_refused() {
     let _ = Partitions::new(1, MAX_PARTITIONS + 1);
