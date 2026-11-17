@@ -74,6 +74,8 @@ impl ServerBackend {
         let mut found: Vec<Option<Fetched>> = vec![None; keys.len()];
         let mut by_range: Vec<((GroupId, u16), Vec<usize>)> = Vec::new();
         for (i, key) in keys.iter().enumerate() {
+            // A long batch of point reads gives the shard back once its quota is used up.
+            teseladb_io::engine::wait::yield_if_asked();
             if let Some(value) = self.read_outside(key, concern) {
                 KEYS_HERE.fetch_add(1, Ordering::Relaxed);
                 found[i] = Some(value.map_or(Fetched::Missing, Fetched::Doc));

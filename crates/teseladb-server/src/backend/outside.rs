@@ -484,7 +484,14 @@ impl ServerBackend {
         let Outside { caches, files, .. } = &mut self.outside;
         let supply = |need: &BlockNeed| {
             let Some(dir) = dir.as_deref() else { return false };
+            wait::yield_if_asked();
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
+        };
+        // The shard's other work runs between two batches once the task quota is used up: the
+        // core's turns and the device log's writer do not wait for the whole part.
+        let keep = |batch: &[&[u8]]| {
+            wait::yield_if_asked();
+            keep(batch)
         };
         let span = (start, hi.as_slice());
         let most = (examine, MAX_SCAN_BLOCKS, &begun);
@@ -542,7 +549,12 @@ impl ServerBackend {
         let Outside { caches, files, .. } = &mut self.outside;
         let supply = |need: &BlockNeed| {
             let Some(dir) = dir.as_deref() else { return false };
+            wait::yield_if_asked();
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
+        };
+        let keep = |batch: &[&[u8]]| {
+            wait::yield_if_asked();
+            keep(batch)
         };
         let span = (start, hi.as_slice());
         let most = (examine, MAX_SCAN_BLOCKS, &begun);
