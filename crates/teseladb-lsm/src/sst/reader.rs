@@ -16,7 +16,7 @@ use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::pgm::{self, Pgm};
 use super::zone::ZoneMap;
-use super::{ALIGN, Bad, align_down, align_up, get_varint};
+use super::{ALIGN, Bad, align_down, align_up, get_varint, separator};
 use crate::entry;
 
 /// An open SST.
@@ -28,8 +28,11 @@ pub struct Table {
     pub size: u64,
     /// Properties.
     pub props: Props,
-    /// The last internal key of each data block.
+    /// The last internal key of each data block, or in a file of version 2 a short key at or
+    /// above it and below the next block's first key ([`separator`]).
     last_keys: Vec<Box<[u8]>>,
+    /// Whether its index may hold short keys (version 2).
+    short_keys: bool,
     /// Where each data block starts and ends, in turn, as Elias-Fano (FR-040): the blocks follow
     /// one another, so the sequence never decreases.
     bounds: EliasFano,
@@ -215,6 +218,7 @@ impl Table {
             }
         };
         Ok(Table {
+            short_keys: footer.short_keys,
             zones,
             columns,
             number,
@@ -284,9 +288,16 @@ impl Table {
         (i < self.last_keys.len()).then_some(i)
     }
 
-    /// The last internal key of data block `i`.
+    /// The index key of data block `i`: its last internal key, or a short key at or above it and
+    /// below the next block's first key when [`Table::exact_last`] says it may not be.
     pub(crate) fn last_key(&self, i: usize) -> &[u8] {
         &self.last_keys[i]
+    }
+
+    /// Whether [`Table::last_key`] of block `i` is the block's last internal key: always in a file
+    /// of version 1, and in one of version 2 unless it has the version of a short key.
+    pub(crate) fn exact_last(&self, i: usize) -> bool {
+        !self.short_keys || !separator::may_be_short(&self.last_keys[i])
     }
 
     /// The logical keys data block `i` may hold, both included: from the logical key of the
@@ -630,7 +641,8 @@ mod tests {
             crate::sst::pad(&mut data);
         }
         let start = data.len() as u64;
-        let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
+        let ok =
+            |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None, short_keys: false };
         let (size, meta) = crafted(start, &entries, ok);
         let t = Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).unwrap();
         for (i, k) in [&b"b"[..], b"m"].into_iter().enumerate() {
@@ -656,7 +668,8 @@ mod tests {
     #[test]
     fn impossible_handles_with_right_checksums_are_refused() {
         let start = 2 * ALIGN as u64;
-        let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
+        let ok =
+            |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None, short_keys: false };
         let good = vec![(ikey(b"m"), handle(0, 100))];
         let (size, meta) = crafted(start, &good, ok);
         assert!(Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).is_ok());
@@ -666,18 +679,21 @@ mod tests {
                 props: Handle { offset: 0, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
             &|f, p: Handle, i| Footer {
                 filter: f,
                 props: Handle { offset: p.offset + 1, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
             &|f, p: Handle, i| Footer {
                 filter: f,
                 props: Handle { len: 1 << 20, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
         ];
         for (n, footer) in footers.iter().enumerate() {

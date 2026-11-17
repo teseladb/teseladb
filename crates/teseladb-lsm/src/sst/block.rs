@@ -276,9 +276,17 @@ impl BlockBuilder {
     ) {
         let whole = form == 0;
         let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
+        // A version of a long key after another of it shares the key with it instead of starting
+        // a restart point for the bytes before it, which are mostly that key: the versions of
+        // an index entry of 15 MiB take it once ([`super::separator::LONG_KEY`]).
+        // The lengths first: a block of the index or of the tests may hold keys shorter than a
+        // version suffix.
+        let same_long = key.len() > super::separator::LONG_KEY + VERSION_LEN
+            && self.last.len() == key.len()
+            && logical(&self.last) == logical(key);
         let restart = self.since_restart == self.interval
             || self.restarts.is_empty()
-            || self.buf.len() - restart_at >= RESTART_BYTES;
+            || (self.buf.len() - restart_at >= RESTART_BYTES && !same_long);
         let shared = if restart {
             self.restarts.push(self.buf.len() as u32);
             self.since_restart = 0;

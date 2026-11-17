@@ -7,7 +7,9 @@
 //! [zone block]    optional: per data block, the bounds of the fields most documents hold
 //! [props block]   key and timestamp bounds, number of versions, range tombstones,
 //!                 where the zone block is
-//! [index block]   last internal key of each data block → offset and length
+//! [index block]   last internal key of each data block → offset and length; in version 2 a
+//!                 long last key may be a short key at or above it and below the next block's
+//!                 first key ([`separator`])
 //! [footer page]   4 KiB whose last 128 bytes are the footer
 //! ```
 //!
@@ -31,6 +33,7 @@ pub(crate) mod pgm;
 pub(crate) mod reader;
 pub(crate) mod ribbon;
 pub(crate) mod schema;
+pub(crate) mod separator;
 pub(crate) mod value;
 pub(crate) mod writer;
 pub(crate) mod zone;

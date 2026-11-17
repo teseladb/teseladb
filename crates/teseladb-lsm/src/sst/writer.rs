@@ -15,7 +15,7 @@ use super::reader::{BlockStats, Table};
 use super::schema::Packer;
 use super::value::ValueRef;
 use super::zone::ZoneBuilder;
-use super::{ALIGN, PAD, filter, pad, put_varint};
+use super::{ALIGN, PAD, filter, pad, put_varint, separator};
 use crate::config::Codec;
 use crate::entry::{self, Kind, RangeTombstone};
 
@@ -76,6 +76,11 @@ pub(crate) struct TableWriter {
     stats: BlockStats,
     data: BlockBuilder,
     index: BlockBuilder,
+    /// The last key and the handle of the block just written, whose index entry waits for the
+    /// first key of the next block (or the end of the file) to get its short key.
+    unindexed: Option<(Vec<u8>, Vec<u8>)>,
+    /// Whether an index entry has a short key in place of its block's last key (version 2).
+    short_keys: bool,
     out: Vec<u8>,
     taken: u64,
     hashes: Vec<(u32, u32)>,
@@ -113,6 +118,8 @@ impl TableWriter {
             stats: BlockStats::default(),
             data: BlockBuilder::new(RESTART_INTERVAL),
             index: BlockBuilder::new(1),
+            unindexed: None,
+            short_keys: false,
             out: Vec::new(),
             taken: 0,
             hashes: Vec::new(),
@@ -224,8 +231,22 @@ impl TableWriter {
         let written = Handle { offset, len: framed.len() as u64 };
         // The next block starts right after it (FR-043).
         self.out.extend_from_slice(&framed);
-        self.index.add(&last, Kind::Put, &handle);
+        debug_assert!(self.unindexed.is_none(), "every block is indexed before the next ends");
+        self.unindexed = Some((last, handle));
         written
+    }
+
+    /// Adds the index entry of the block written last, now that the first key of the next one,
+    /// `next`, is known (`None`: it was the file's last): its last key, or a short key for a long
+    /// one ([`separator`]).
+    fn index_last_block(&mut self, next: Option<&[u8]>) {
+        let Some((last, handle)) = self.unindexed.take() else { return };
+        let short = match next {
+            Some(n) => separator::between(&last, n),
+            None => separator::after(&last),
+        };
+        self.short_keys |= short.is_some();
+        self.index.add(short.as_deref().unwrap_or(&last), Kind::Put, &handle);
     }
 
     /// Adds a version; internal keys come in order. A document with a shape of the file goes
@@ -295,6 +316,7 @@ impl TableWriter {
         if !self.data.is_empty() {
             self.flush_block();
         }
+        self.index_last_block(Some(ikey));
         self.block_first = Some(entry::logical(ikey).to_vec());
         self.data.add(ikey, Kind::Put, value);
         self.note(ikey);
@@ -310,12 +332,21 @@ impl TableWriter {
     /// Ends the open data block when an entry of `value_len` bytes and key `ikey` does not fit,
     /// and notes the first key of a new one.
     fn open_block(&mut self, ikey: &[u8], value_len: usize) {
+        // A version of a long key whose value fits a block stays in the block of the version
+        // before it, sharing the key with it ([`BlockBuilder`]): a block may then pass its size
+        // by those versions, which keeps the key once.
+        let joins = !self.data.is_empty()
+            && value_len + ENTRY_HEADER <= self.block_bytes
+            && entry::logical(ikey).len() > separator::LONG_KEY
+            && entry::logical(self.data.last_key()) == entry::logical(ikey);
         if !self.data.is_empty()
+            && !joins
             && self.data.framed_size() + ikey.len() + value_len + ENTRY_HEADER > self.block_bytes
         {
             self.flush_block();
         }
         if self.data.is_empty() {
+            self.index_last_block(Some(ikey));
             let first = entry::logical(ikey);
             if !self.block_last.is_empty() && self.block_last == first {
                 // The versions of the previous block's last key go on in this one.
@@ -430,6 +461,7 @@ impl TableWriter {
         if !self.data.is_empty() {
             self.flush_block();
         }
+        self.index_last_block(None);
         let column_sizes = self.write_columns();
         pad(&mut self.out);
         let mut chunks = Vec::new();
@@ -476,7 +508,8 @@ impl TableWriter {
         let index = self.meta_block(&index_payload, &mut chunks);
         drop(index_payload);
         let wrapped = self.key.as_ref().map(|(_, w)| *w);
-        let footer = Footer { filter, props: props_handle, index, wrapped };
+        let footer =
+            Footer { filter, props: props_handle, index, wrapped, short_keys: self.short_keys };
         let mut last = Vec::with_capacity(ALIGN);
         last.resize(ALIGN - FOOTER, PAD);
         last.extend_from_slice(&footer.encode());
@@ -501,9 +534,11 @@ mod tests {
     use super::super::block::BlockCursor;
     use super::*;
 
-    /// The end of a file whose index holds long keys (five of 2 MiB, as the entries of five
-    /// indexes on one long string) writes each meta block apart: no write holds more than the
-    /// largest block, the writes follow one another, and the file reads back from them.
+    /// The end of a file of long keys (five of 2 MiB, as the entries of five indexes on one long
+    /// string) writes each meta block apart: no write holds more than the largest block, the
+    /// writes follow one another, and the file reads back from them. Its index holds a short key
+    /// for each block (version 2), so its meta blocks take the properties' two keys and little
+    /// more.
     #[test]
     fn the_meta_blocks_of_a_file_of_long_keys_are_written_apart() {
         let mut w = TableWriter::new(4096, Codec::None);
@@ -527,16 +562,86 @@ mod tests {
             assert!(c.len() <= index, "a write of {} bytes", c.len());
             file.extend_from_slice(c);
         }
-        // The properties hold the lowest and highest keys, the index each block's last key.
-        assert!(meta > 7 * (2 << 20), "{meta}");
+        // The properties hold the lowest and highest keys; the index, a key of a few bytes for
+        // each block.
+        assert!(meta > 2 * (2 << 20) && meta < 2 * (2 << 20) + 8 * ALIGN, "{meta}");
         assert_eq!(table.size, file.len() as u64);
         assert_eq!(table.blocks(), 5);
+        for i in 0..5 {
+            assert!(table.last_key(i).len() <= 2 + teseladb_keys::VERSION_LEN, "block {i}");
+            assert!(!table.exact_last(i));
+        }
         let footer = Table::footer(&file).unwrap();
+        assert!(footer.short_keys);
         let start = footer.filter.offset;
         let meta_bytes = Bytes::from_vec(file[start as usize..].to_vec());
         let read = Table::with_key(9, table.size, start, &meta_bytes, None, &|_| None).unwrap();
         assert_eq!(read.blocks(), 5);
         assert_eq!(read.props.versions, 5);
+        // Every key is found in its block by the short keys.
+        for i in 0..5u8 {
+            let mut key = vec![i];
+            key.extend(std::iter::repeat_n(b'x', 2 << 20));
+            let ik = entry::internal_key(&key, Hlc { physical: 1, logical: 0 });
+            assert_eq!(read.find_block(&ik), Some(usize::from(i)));
+        }
+    }
+
+    /// The versions of a long key (an intent, its `Retract` and its commit, on an index entry of
+    /// 1 MiB) share one block and take the key once; they read back in order.
+    #[test]
+    fn the_versions_of_a_long_key_take_it_once() {
+        let mut w = TableWriter::new(4096, Codec::None);
+        let mut file = Vec::new();
+        let mut keys = Vec::new();
+        for i in 0..2u8 {
+            let mut key = vec![i];
+            key.extend(std::iter::repeat_n(b'x', 1 << 20));
+            for (v, kind) in [(3, Kind::Put), (2, Kind::Retract), (1, Kind::Intent)] {
+                let ik = entry::internal_key(&key, Hlc { physical: v, logical: 0 });
+                w.add(&ik, kind, b"v");
+                keys.push(ik);
+                if let Some((_, c)) = w.take() {
+                    file.extend_from_slice(&c);
+                }
+            }
+        }
+        let (chunks, table) = w.finish(9, Vec::new()).unwrap();
+        chunks.iter().for_each(|(_, c)| file.extend_from_slice(c));
+        // Two blocks of one key each, the properties' two keys: about four times the key.
+        assert_eq!(table.blocks(), 2);
+        assert!(file.len() < 4 * (1 << 20) + 16 * ALIGN, "{} bytes", file.len());
+        let mut read = Vec::new();
+        for i in 0..table.blocks() {
+            let (offset, len) = table.pages(i);
+            let bytes = Bytes::from_vec(file[offset as usize..(offset + len) as usize].to_vec());
+            let mut c = BlockCursor::first(table.block(i, &bytes).unwrap()).unwrap();
+            while c.valid() {
+                read.push(c.key().to_vec());
+                c.advance().unwrap();
+            }
+        }
+        assert_eq!(read, keys);
+    }
+
+    /// A file of short keys keeps each block's last key in its index and is written as version 1.
+    #[test]
+    fn a_file_of_short_keys_keeps_its_last_keys_and_version_1() {
+        let mut w = TableWriter::new(4096, Codec::None);
+        let mut file = Vec::new();
+        for i in 0..2000u32 {
+            let ik =
+                entry::internal_key(format!("k{i:06}").as_bytes(), Hlc { physical: 1, logical: 0 });
+            w.add(&ik, Kind::Put, &[7; 40]);
+            if let Some((_, c)) = w.take() {
+                file.extend_from_slice(&c);
+            }
+        }
+        let (chunks, table) = w.finish(9, Vec::new()).unwrap();
+        chunks.iter().for_each(|(_, c)| file.extend_from_slice(c));
+        assert!(table.blocks() > 10);
+        assert!((0..table.blocks()).all(|i| table.exact_last(i)));
+        assert!(!Table::footer(&file).unwrap().short_keys);
     }
 
     /// FR-031: the versions under a value or a deletion go to the history file; those under an
