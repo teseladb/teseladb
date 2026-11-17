@@ -939,25 +939,44 @@ impl FairQueue {
 
     /// When the pending reservation is expected to be fulfilled, in nanoseconds of the
     /// monotonic clock; `i64::MAX` when there is no reservation.
-    pub fn next_pending_aio(&self) -> ClockTypeTimePoint {
+    pub fn next_pending_aio(&mut self) -> ClockTypeTimePoint {
         if self._pending.cap != 0 {
-            /*
-             * We expect the disk to release the ticket within some time,
-             * but it's ... OK if it doesn't -- the pending wait still
-             * needs the head rover value to be ahead of the needed value.
-             *
-             * It may happen that the capacity gets released before we think
-             * it will, in this case we will wait for the full value again,
-             * which's sub-optimal. The expectation is that we think disk
-             * works faster, than it really does.
-             */
-            let over = self.group().capacity_deficiency(self._pending.head);
+            // The reservation may cover several queued requests: wake when the first of them
+            // can be dispatched, not when the whole reservation is available, which with idle
+            // polling off made the reactor sleep past the first request's turn. With no
+            // request queued (they were all cancelled) there is nothing to dispatch.
+            let Some(first) = self.top_capacity() else {
+                return ClockTypeTimePoint::MAX;
+            };
+            let head =
+                self._pending.head.wrapping_sub(self._pending.cap) + self._pending.cap.min(first);
+            let over = self.group().capacity_deficiency(head);
             let ticks = self.group().capacity_duration(over);
             let d = duration_cast_micros(ticks);
             return SteadyClock::now()
                 .saturating_add(i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
         }
         ClockTypeTimePoint::MAX
+    }
+
+    /// The capacity of the request to dispatch next, dropping from the heap the classes that
+    /// have nothing to dispatch (as dispatch_requests() does); `None` when no request is
+    /// queued.
+    fn top_capacity(&mut self) -> Option<CapacityT> {
+        loop {
+            if self._handles.empty() {
+                return None;
+            }
+            let h = self._handles.top();
+            // SAFETY: `h` is a live class of the heap; short reads of its fields.
+            if unsafe { (*h)._queue.empty() || !(*h)._plugged } {
+                // SAFETY: `h` is the top of the heap.
+                unsafe { self.pop_priority_class(h) };
+                continue;
+            }
+            // SAFETY: the queue is not empty; its entries are alive while queued.
+            return Some(unsafe { (*(*h)._queue.front())._capacity });
+        }
     }
 
     // This function is called by the shard on every poll.

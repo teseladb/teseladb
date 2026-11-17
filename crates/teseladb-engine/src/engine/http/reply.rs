@@ -102,6 +102,8 @@ impl StatusType {
     pub const UPGRADE_REQUIRED: StatusType = StatusType(426);
     /// too_many_requests
     pub const TOO_MANY_REQUESTS: StatusType = StatusType(429);
+    /// request_header_fields_too_large
+    pub const REQUEST_HEADER_FIELDS_TOO_LARGE: StatusType = StatusType(431);
     /// login_timeout
     pub const LOGIN_TIMEOUT: StatusType = StatusType(440);
     /// internal_server_error
@@ -479,6 +481,7 @@ mod status_strings {
             StatusType::UNPROCESSABLE_ENTITY => "422 Unprocessable Entity",
             StatusType::UPGRADE_REQUIRED => "426 Upgrade Required",
             StatusType::TOO_MANY_REQUESTS => "429 Too Many Requests",
+            StatusType::REQUEST_HEADER_FIELDS_TOO_LARGE => "431 Request Header Fields Too Large",
             StatusType::LOGIN_TIMEOUT => "440 Login Timeout",
             StatusType::INTERNAL_SERVER_ERROR => "500 Internal Server Error",
             StatusType::NOT_IMPLEMENTED => "501 Not Implemented",

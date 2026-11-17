@@ -3154,6 +3154,23 @@ impl Session {
 
     /// # Safety
     /// `this` is a live session on this shard; no reference to it is live during the call.
+    /// Fails the handshake with `e` once the output in flight (a write gnutls started during
+    /// the handshake) is done, ignoring its result: failing at once left that write's future
+    /// pending in the session, and a write that then failed was never consumed.
+    ///
+    /// # Safety
+    /// As [`Session::do_handshake`].
+    unsafe fn fail_after_output(this: *mut Session, e: ExceptionPtr) -> Future<()> {
+        // SAFETY: the caller's contract; the continuation runs while the session lives.
+        unsafe {
+            Session::wait_for_output(this).then_wrapped(move |mut f: Future<()>| {
+                f.ignore_ready_future();
+                (*this)._error = Some(e.clone());
+                make_exception_future(e)
+            })
+        }
+    }
+
     unsafe fn do_handshake(this: *mut Session) -> Future<()> {
         // SAFETY: the caller upholds this function's `# Safety` contract (`this` is a live session
         // on this shard; no reference to it is live during the call). See the aliasing note above.
@@ -3189,16 +3206,19 @@ impl Session {
                         });
                     }
                     GNUTLS_E_NO_CERTIFICATE_FOUND => {
-                        return make_exception_future(ExceptionPtr::from(VerificationError(
-                            "No certificate was found".to_string(),
-                        )));
+                        return Session::fail_after_output(
+                            this,
+                            ExceptionPtr::from(VerificationError(
+                                "No certificate was found".to_string(),
+                            )),
+                        );
                     }
                     _ => {
                         if res == GNUTLS_E_CERTIFICATE_ERROR
                             && let Err(e) = Session::verify(this)
                         {
                             // a verification failure is the error; otherwise fall through
-                            return make_exception_future(e);
+                            return Session::fail_after_output(this, e);
                         }
                         // Send the handshake error returned by gnutls_handshake()
                         // to the client, as an alert. For example, if the protocol
@@ -3224,7 +3244,7 @@ impl Session {
                 || (*this)._creds.get_client_auth() != ClientAuth::NONE)
                 && let Err(e) = Session::verify(this)
             {
-                return make_exception_future(e);
+                return Session::fail_after_output(this, e);
             }
             (*this)._connected = true;
             // make sure we reset output_pending

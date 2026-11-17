@@ -541,6 +541,8 @@ pub struct SndBuf {
     pub size: u32,
     /// Its buffers.
     pub bufs: Bufs,
+    /// The units of the sink's memory limit that the frame holds until it is freed.
+    pub su: Option<SemaphoreUnits>,
 }
 
 impl SndBuf {
@@ -551,13 +553,13 @@ impl SndBuf {
     /// A frame of one buffer.
     #[inline]
     pub fn from_buffer(b: TemporaryBuffer<u8>) -> Self {
-        SndBuf { size: b.size() as u32, bufs: Bufs::One(b) }
+        SndBuf { size: b.size() as u32, bufs: Bufs::One(b), su: None }
     }
 
     /// A frame of several buffers.
     #[inline]
     pub fn from_buffers(bufs: Vec<TemporaryBuffer<u8>>, size: usize) -> Self {
-        SndBuf { size: size as u32, bufs: Bufs::Many(bufs) }
+        SndBuf { size: size as u32, bufs: Bufs::Many(bufs), su: None }
     }
 }
 

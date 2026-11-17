@@ -322,6 +322,8 @@ pub mod httpd {
         /// resolves ([`Connection::process`] owns it for that long).
         unsafe fn read_one(&mut self) -> Future<()> {
             self._parser.init();
+            let limit = self.server().get_request_size_limit();
+            self._parser.set_size_limit(limit);
             let this: *mut Connection = self;
             let parser: *mut HttpRequestParser = &mut self._parser;
             // Every closure below relies on the connection outliving process(), which awaits
@@ -351,6 +353,19 @@ pub mod httpd {
                     if req._version.empty() {
                         // we might have failed to parse even the version
                         req._version = Sstring::from("1.1");
+                    }
+                    if c._parser.size_limit_exceeded() {
+                        let status = if c._parser.uri_too_large() {
+                            StatusType::URI_TOO_LONG
+                        } else {
+                            StatusType::REQUEST_HEADER_FIELDS_TOO_LARGE
+                        };
+                        c.generate_error_reply_and_close(
+                            req,
+                            status,
+                            &Sstring::from("Request line or headers too large"),
+                        );
+                        return make_ready_future(());
                     }
                     c.generate_error_reply_and_close(req, StatusType::BAD_REQUEST, &Sstring::from("Can't parse the request"));
                     return make_ready_future(());
@@ -838,6 +853,7 @@ pub mod httpd {
         _date: Sstring,
         _date_format_timer: Timer,
         _content_length_limit: usize,
+        _request_size_limit: usize,
         _content_streaming: bool,
         _task_gate: Gate,
         /// The routes of the server.
@@ -881,6 +897,7 @@ pub mod httpd {
                 _date: Self::http_date(),
                 _date_format_timer: Timer::default(),
                 _content_length_limit: usize::MAX,
+                _request_size_limit: 32 * 1024,
                 _content_streaming: false,
                 _task_gate: Gate::default(),
                 _routes: Routes::new(),
@@ -932,6 +949,19 @@ pub mod httpd {
         /// Sets the largest content length accepted.
         pub fn set_content_length_limit(&mut self, limit: usize) {
             self._content_length_limit = limit;
+        }
+
+        /// The size limit of the request line and headers together.
+        pub fn get_request_size_limit(&self) -> usize {
+            self._request_size_limit
+        }
+
+        /// Sets the size limit of the request line and headers together. A request past it
+        /// is answered with 414 URI Too Long or 431 Request Header Fields Too Large before
+        /// the handler runs, which bounds the memory a client can make the server buffer.
+        /// Defaults to 32 KiB.
+        pub fn set_request_size_limit(&mut self, limit: usize) {
+            self._request_size_limit = limit;
         }
 
         /// Whether the handlers read the content as a stream.
