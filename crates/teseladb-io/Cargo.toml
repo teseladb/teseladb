@@ -63,6 +63,11 @@ harness = false
 name = "engine_probe"
 harness = false
 
+# A shard of its own memory under many commands at once.
+[[test]]
+name = "engine_stacks"
+harness = false
+
 # TLS on the engine against the blocking implementation (023 FR-016): a program with its own main
 # that runs inside the engine; empty outside Linux.
 [[bench]]

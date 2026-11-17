@@ -36,10 +36,11 @@ use crate::tls_port::TlsPort;
 
 /// The reference server's default `net.maxIncomingConnections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 1_000_000;
-/// The stack of the engine threads that run a connection's commands: it comes from the shard's
-/// memory and a shard keeps its idle ones for the next commands, so it is far smaller than the
-/// `COMMAND_STACK` of server-side JavaScript. A call of JavaScript runs on a stack of its own of
-/// that size instead ([`set_deep_stack`], 016 A016-3-18).
+/// The stack a connection's commands run on: address space outside the shard's memory that the
+/// kernel commits as a command reaches it (`teseladb_io::engine::stacks`), so what a command
+/// takes from the shard does not grow with it. It is far smaller than the `COMMAND_STACK` of
+/// server-side JavaScript: a call of JavaScript runs on a stack of its own of that size instead
+/// ([`set_deep_stack`], 016 A016-3-18).
 pub const ENGINE_COMMAND_STACK: usize = 16 << 20;
 
 /// Runs each call of server-side JavaScript on a native stack of its own of `COMMAND_STACK`

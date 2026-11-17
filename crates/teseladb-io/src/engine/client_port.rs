@@ -19,6 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::reactor::internal_misc::run_in_background;
+use teseladb::engine::core::sleep::sleep_steady;
 use teseladb::engine::core::timer::Timer;
 use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig};
 use teseladb_x509::Certificate;
@@ -81,8 +83,53 @@ pub trait Session {
     /// Whether it must close now, without running anything more (a drained node, a suspended
     /// tenant); looked at after every wake-up.
     fn must_close(&mut self) -> bool;
+    /// No engine thread could run its work ([`super::stacks::run`] failed to start it, `why`
+    /// says why): it logs it and answers its next request with an error instead of running it;
+    /// `false` closes the connection once that answer is sent (what a session that cannot
+    /// answer does).
+    fn refuse(&mut self, why: &str) -> bool {
+        let _ = why;
+        false
+    }
     /// The connection ended; what was not run is dropped.
     fn end(self: Box<Self>);
+}
+
+/// What came of running a session's work in an engine thread.
+pub(crate) enum Ran {
+    /// It ran; whether the connection stays open.
+    Done(bool),
+    /// It panicked (the panic's message went to the standard error).
+    Panicked,
+    /// No engine thread could run it, and why.
+    NotRun(String),
+}
+
+/// How long a connection whose work no engine thread could run waits before it tries again.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_millis(10);
+
+/// Runs the work of `session` in an engine thread of this shard; the session comes back with
+/// what came of it, also when its work panicked or did not run (the job owns the session only
+/// while it runs, so it always comes back).
+pub(crate) async fn run_work(
+    session: Box<dyn Session>,
+    now: Instant,
+) -> (Option<Box<dyn Session>>, Ran) {
+    let slot = Rc::new(RefCell::new(Some(session)));
+    let outcome = Rc::new(RefCell::new(None));
+    let (back, out) = (Rc::clone(&slot), Rc::clone(&outcome));
+    let ran = stacks::run(Box::new(move || {
+        let Some(mut s) = back.borrow_mut().take() else { return };
+        let r = catch_unwind(AssertUnwindSafe(|| s.run(now)));
+        *out.borrow_mut() = Some(r.map_or(Ran::Panicked, Ran::Done));
+        *back.borrow_mut() = Some(s);
+    }))
+    .await;
+    let how = outcome.borrow_mut().take().unwrap_or_else(|| {
+        Ran::NotRun(ran.err().map_or_else(|| "it did not start".to_owned(), |e| e.to_string()))
+    });
+    let session = slot.borrow_mut().take();
+    (session, how)
 }
 
 /// What makes the sessions of a port; one for the whole port, shared by its shards.
@@ -473,19 +520,24 @@ async fn drive(conn: &Rc<Conn>, session: Box<dyn Session>) {
         }
         let now = Instant::now();
         if s.has_work(now) {
-            let alive = Rc::new(Cell::new(true));
-            let (back, flag) = (Rc::clone(&slot), Rc::clone(&alive));
-            let ran = stacks::run(Box::new(move || {
-                let mut s = s;
-                flag.set(s.run(now));
-                *back.borrow_mut() = Some(s);
-            }))
-            .await;
-            let Some(mut s) = slot.borrow_mut().take() else { return };
+            let (back, how) = run_work(s, now).await;
+            let Some(mut s) = back else { return };
+            let (alive, retry) = match how {
+                Ran::Done(alive) => (alive, false),
+                // Its state is not known after a panic: it ends, and the connection with it.
+                Ran::Panicked => (false, false),
+                // Answered with an error and logged; it waits before it tries again.
+                Ran::NotRun(why) => (s.refuse(&why), true),
+            };
             hand_out(conn, s.as_mut(), &mut scratch);
-            if ran.is_err() || !alive.get() {
+            if !alive {
                 finish(s).await;
                 return;
+            }
+            if retry {
+                *slot.borrow_mut() = Some(s);
+                let _ = sleep_steady(RETRY_AFTER).await;
+                continue;
             }
             *slot.borrow_mut() = Some(s);
             // More may have arrived, or be due, while it ran.

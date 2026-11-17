@@ -21,7 +21,7 @@ use teseladb_wire::commands::{Shared, lock};
 use teseladb_wire::compressed::Compressor;
 use teseladb_wire::connection::{Connection, ReplyPieces, Request, RequestArena};
 use teseladb_wire::dispatch::{Action, NodeInfo, dispatch_with, hello_after_wait};
-use teseladb_wire::error::{CommandError, SHUTDOWN_IN_PROGRESS};
+use teseladb_wire::error::{CommandError, INTERNAL_ERROR, SHUTDOWN_IN_PROGRESS};
 use teseladb_wire::hello::HelloRequest;
 use teseladb_wire::ingress::Admission;
 use teseladb_x509::Certificate;
@@ -31,6 +31,10 @@ use crate::client_listener::{NodeState, next_connection_id, quiesce_reply, seed}
 use crate::diag::{Diag, PortStats};
 use crate::routes::{SharedRoutes, TenantStates};
 use crate::tls_port::TlsPort;
+
+/// The log line of a command no engine thread could run (no counterpart in the reference
+/// server, which closes the connection when it cannot start its thread).
+pub(crate) const NOT_RUN_ID: i32 = 0;
 
 /// What a new connection of the port starts with.
 #[derive(Clone)]
@@ -681,6 +685,32 @@ impl Session for WireSession {
         kill_suspended_cursors(&self.shared, self.tenants_seen.as_deref(), &states);
         self.tenants_seen = Some(states);
         false
+    }
+
+    fn refuse(&mut self, why: &str) -> bool {
+        let attr = format!("{{\"error\":{why:?}}}");
+        let msg = "A command could not run: no engine thread took it".to_owned();
+        crate::log::defer_at(
+            crate::log::Level::Error,
+            crate::log::Pending { id: NOT_RUN_ID, msg, attr },
+        );
+        // A wait that is due runs at the next try.
+        if self.wait.is_some() {
+            return true;
+        }
+        let Some(mut conn) = self.conn.take() else { return false };
+        let req = match conn.next_request() {
+            Ok(Some(r)) => r,
+            next => {
+                self.framer.none_left();
+                self.conn = Some(conn);
+                return next.is_ok();
+            }
+        };
+        self.framer.taken();
+        let e = CommandError::new(INTERNAL_ERROR, format!("the command could not run: {why}"));
+        let info = self.state.info();
+        self.apply(conn, req, Action::Reply(e.to_document()), &info)
     }
 
     fn end(mut self: Box<Self>) {
