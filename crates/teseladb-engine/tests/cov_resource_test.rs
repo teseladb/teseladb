@@ -168,6 +168,21 @@ fn allocation_over_hwloc_follows_the_configured_devices() {
     assert!(nr_processing_units(&mut c) >= 1);
 }
 
+// More shards than the CPU set holds, or none, fail the allocation with the reference's
+// messages (resource.cc, allocate() with hwloc) instead of planning shards without a CPU.
+#[test]
+fn allocation_refuses_more_shards_than_cpus_and_zero_shards() {
+    let mut c = config(Some(0), Some(64 * MIB), 0, 3);
+    c.cpu_set = Cpuset::from([0, 1]);
+    let e = allocate(&mut c).err().expect("three shards on two CPUs");
+    assert!(e.to_string().contains("insufficient processing units: needed 3 available 2"), "{e}");
+
+    let mut c = config(Some(0), Some(64 * MIB), 0, 0);
+    c.cpu_set = Cpuset::from([0, 1]);
+    let e = allocate(&mut c).err().expect("no shards");
+    assert!(e.to_string().contains("number of processing units must be positive"), "{e}");
+}
+
 #[test]
 fn io_queue_topologies_move_their_contents() {
     let mut a = IoQueueTopology {

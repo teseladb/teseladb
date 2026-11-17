@@ -1850,7 +1850,7 @@ mod engine_allocator {
                     unsafe { &*SmallPoolArray::<false>::get(&raw const pools as *mut _, idx) };
                 assert_eq!(pool.object_size(), SmallPool::idx_to_size(idx));
             }
-            std::mem::forget(pools);
+            // The pools are `ManuallyDrop`: going out of scope destroys none of them.
         }
 
         #[test]
@@ -4626,8 +4626,8 @@ mod engine_allocator {
     }
 
     /// The C `posix_memalign`, exported under its C name: stores
-    /// [`allocate_aligned`]`(align, size)` in `*ptr` and returns 0, or `ENOMEM` when it is
-    /// null or the failure injector fires (then `*ptr` is not written).
+    /// [`allocate_aligned`]`(align, size)` in `*ptr` (null on failure) and returns 0, or
+    /// `ENOMEM` when it is null or the failure injector fires (then `*ptr` is not written).
     /// `align` is not validated, so it never returns `EINVAL`; the block is aligned to `align`
     /// whatever `size` (see [`allocate_aligned`]).
     ///
@@ -4643,12 +4643,11 @@ mod engine_allocator {
             return ENOMEM;
         }
         let p = allocate_aligned(align, size);
-        // POSIX leaves `*ptr` unchanged when the allocation fails.
+        // SAFETY: `ptr` is non-null (nonnull(1)) and writable (by the caller).
+        unsafe { *ptr = p };
         if p.is_null() {
             return ENOMEM;
         }
-        // SAFETY: `ptr` is non-null (nonnull(1)) and writable (by the caller).
-        unsafe { *ptr = p };
         0
     }
 

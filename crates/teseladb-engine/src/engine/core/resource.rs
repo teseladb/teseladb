@@ -1479,13 +1479,28 @@ mod without_hwloc {
     /// 36-bit layout.
     ///
     /// # Errors
-    /// Fails if the requested memory exceeds what is available.
+    /// Fails if more shards are asked for than `c.cpu_set` has CPUs, if none are, or if the
+    /// requested memory exceeds what is available. The shard checks are those of the hwloc
+    /// planner (the reference's default build), whose topology is restricted to `c.cpu_set`.
     pub fn allocate(c: &mut Configuration) -> Result<Resources, ExceptionPtr> {
         let mut ret = Resources::default();
 
+        let procs = c.cpus;
+        let available_procs = c.cpu_set.len();
+        if procs > available_procs {
+            return Err(make_exception_ptr(RuntimeError::new(format!(
+                "insufficient processing units: needed {} available {}",
+                procs, available_procs
+            ))));
+        }
+        if procs == 0 {
+            return Err(make_exception_ptr(RuntimeError::new(
+                "number of processing units must be positive".to_string(),
+            )));
+        }
+
         let available_memory = get_machine_memory_from_sysconf() as usize;
         let mem = calculate_memory(c, available_memory, 1.0)?;
-        let procs = c.cpus;
         ret.cpus.reserve(procs);
         // Limit each shard's memory so that its addresses fit in 36 bits (the allocator's layout).
         const MAX_MEM_PER_PROC: usize = 1usize << 36;

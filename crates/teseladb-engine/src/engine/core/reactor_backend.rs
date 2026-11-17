@@ -4481,7 +4481,8 @@ impl ReactorBackendUring {
         let fut = desc.get_future();
         // `desc.release()`: the completion deletes itself when it completes.
         // SAFETY: `_r` is the reactor that owns this backend, live while the
-        // backend is; the sink is reached for this call only, which runs no completion.
+        // backend is; the sink is reached for this call only, which runs no completion; the
+        // released `desc` is the live completion of `req`, queued nowhere else.
         unsafe {
             (*std::ptr::addr_of_mut!((*(*this)._r)._io_sink))
                 .submit(Box::into_raw(desc).cast::<IoCompletion>(), req)

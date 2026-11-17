@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
-//! Shards that sleep between messages keep waking each other on every backend.
+//! Shards that sleep between messages keep waking each other on every backend, and a start that
+//! asks for more shards than CPUs fails cleanly.
 //!
 //! Three shards with no idle polling (`--idle-poll-time-us=0`, so a shard with nothing to do
 //! goes to sleep at once). Shard 0 sends, many times in a row, a message to shard 1 that sends
@@ -7,23 +8,36 @@
 //! sleeping shard is often woken by two others at nearly the same time. Every round must
 //! finish, within a bound far above the healthy run time.
 //!
-//! Each backend (io_uring, linux-aio, epoll) runs in a process of its own, chosen on the
-//! command line, and a process that does not finish in time counts as a hang. A program with
-//! its own `main` (`harness = false`): one engine per process, so each backend runs this
-//! program again with `SMP_CROSS_WAKEUPS_BACKEND` naming it.
+//! Three shards need three CPUs: like the reference (resource.cc, allocate()), the engine
+//! refuses to start more shards than the CPUs it may run on, with "insufficient processing
+//! units". So each backend runs the race when this process may use three CPUs or more, and
+//! otherwise must refuse the start with that error (exit 1, no panic). Whatever the CPUs, one
+//! more start asks for one shard more than there are CPUs and must be refused the same way.
+//!
+//! Each case runs in a process of its own, chosen on the command line, and a process that does
+//! not finish in time counts as a hang. A program with its own `main` (`harness = false`): one
+//! engine per process, so each case runs this program again with `SMP_CROSS_WAKEUPS_BACKEND`
+//! naming the backend and `SMP_CROSS_WAKEUPS_SHARDS` the shard count.
 
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::app_template::AppTemplate;
 use teseladb::engine::core::future::{ExceptionPtr, RuntimeError, make_ready_future};
+use teseladb::engine::core::posix::get_current_cpuset;
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::thread::async_ as thread_async;
 
 const BACKEND_VAR: &str = "SMP_CROSS_WAKEUPS_BACKEND";
+const SHARDS_VAR: &str = "SMP_CROSS_WAKEUPS_SHARDS";
 const BACKENDS: &[&str] = &["io_uring", "linux-aio", "epoll"];
-/// How long a backend's process may run before it counts as hung.
+/// How long a case's process may run before it counts as hung.
 const CASE_TIMEOUT: Duration = Duration::from_secs(60);
+/// The shards of the race: shard 0 and the two that wake each other.
+const RACE_SHARDS: usize = 3;
+/// The exit code of a start that `smp::configure()` refuses (app_template).
+const START_REFUSED: i32 = 1;
 
 const ROUNDS: u32 = 20_000;
 const ROUNDS_BOUND: Duration = Duration::from_secs(30);
@@ -51,12 +65,13 @@ fn workload() -> Result<(), ExceptionPtr> {
     ))))
 }
 
-/// Runs the workload on `backend` in this process and returns the engine's exit code.
-fn run_backend(backend: &str) -> i32 {
+/// Runs the workload on `backend` with `shards` shards in this process and returns the
+/// engine's exit code.
+fn run_backend(backend: &str, shards: usize) -> i32 {
     let args = vec![
         "smp_cross_wakeups_test".to_string(),
         format!("--reactor-backend={backend}"),
-        "--smp=3".to_string(),
+        format!("--smp={shards}"),
         "--idle-poll-time-us=0".to_string(),
         "--memory=1G".to_string(),
     ];
@@ -64,48 +79,114 @@ fn run_backend(backend: &str) -> i32 {
     app.run(args, || thread_async(workload))
 }
 
-/// Runs each backend in a child process and checks that it finishes in time with exit 0.
-fn run_all() -> i32 {
+/// How a case's process ended: its exit code (none if killed by a signal or by the timeout)
+/// and what it wrote to stderr.
+struct Outcome {
+    code: Option<i32>,
+    hung: bool,
+    stderr: String,
+}
+
+/// Runs this program for `backend` with `shards` shards in a child process.
+fn run_case(backend: &str, shards: usize) -> Outcome {
     let exe = std::env::current_exe().expect("this program");
+    let start = Instant::now();
+    let mut child = Command::new(&exe)
+        .env(BACKEND_VAR, backend)
+        .env(SHARDS_VAR, shards.to_string())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the case's process");
+    let mut pipe = child.stderr.take().expect("the case's stderr");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = pipe.read_to_string(&mut s);
+        s
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the case's status") {
+            break Some(status);
+        }
+        if start.elapsed() > CASE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stderr = reader.join().unwrap_or_default();
+    eprint!("{stderr}");
+    Outcome { code: status.and_then(|s| s.code()), hung: status.is_none(), stderr }
+}
+
+/// Checks that a start with `shards` shards on `cpus` CPUs was refused with the reference's
+/// error and exit code.
+fn check_refused(what: &str, outcome: &Outcome, shards: usize, cpus: usize) -> bool {
+    let expected = format!("insufficient processing units: needed {shards} available {cpus}");
+    let ok = outcome.code == Some(START_REFUSED) && outcome.stderr.contains(&expected);
+    if ok {
+        println!("{what}: start refused as expected ({expected})");
+    } else {
+        println!(
+            "{what}: expected exit {START_REFUSED} with \"{expected}\", got exit {:?}{}",
+            outcome.code,
+            if outcome.hung { " (hung, killed)" } else { "" }
+        );
+    }
+    ok
+}
+
+/// Runs every case and checks its outcome.
+fn run_all() -> i32 {
+    let cpus = get_current_cpuset().len();
+    println!("CPUs available to this process: {cpus}");
     let mut failures = Vec::new();
     for &backend in BACKENDS {
         let start = Instant::now();
-        let mut child =
-            Command::new(&exe).env(BACKEND_VAR, backend).spawn().expect("the backend's process");
-        let status = loop {
-            if let Some(status) = child.try_wait().expect("the backend's status") {
-                break Some(status);
+        let outcome = run_case(backend, RACE_SHARDS);
+        let what = format!("backend {backend}, {RACE_SHARDS} shards");
+        let ok = if cpus >= RACE_SHARDS {
+            match outcome.code {
+                Some(0) => {
+                    println!("{what}: ok in {:?}", start.elapsed());
+                    true
+                }
+                _ if outcome.hung => {
+                    println!("{what}: hung, killed after {CASE_TIMEOUT:?}");
+                    false
+                }
+                code => {
+                    println!("{what}: exit {code:?}");
+                    false
+                }
             }
-            if start.elapsed() > CASE_TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        } else {
+            check_refused(&what, &outcome, RACE_SHARDS, cpus)
         };
-        match status.and_then(|s| s.code()) {
-            Some(0) => println!("backend {backend}: ok in {:?}", start.elapsed()),
-            Some(code) => {
-                println!("backend {backend}: exit {code}");
-                failures.push(backend);
-            }
-            None => {
-                println!("backend {backend}: hung, killed after {CASE_TIMEOUT:?}");
-                failures.push(backend);
-            }
+        if !ok {
+            failures.push(what);
         }
+    }
+    let over = cpus + 1;
+    let what = format!("backend io_uring, {over} shards on {cpus} CPUs");
+    if !check_refused(&what, &run_case("io_uring", over), over, cpus) {
+        failures.push(what);
     }
     if failures.is_empty() {
         0
     } else {
-        eprintln!("backends whose shards stopped waking each other or that failed: {failures:?}");
+        eprintln!("cases that hung, failed or did not refuse the start: {failures:?}");
         1
     }
 }
 
 pub(crate) fn main() {
     let code = match std::env::var(BACKEND_VAR) {
-        Ok(backend) => run_backend(&backend),
+        Ok(backend) => {
+            let shards =
+                std::env::var(SHARDS_VAR).ok().and_then(|s| s.parse().ok()).unwrap_or(RACE_SHARDS);
+            run_backend(&backend, shards)
+        }
         Err(_) => run_all(),
     };
     std::process::exit(code);

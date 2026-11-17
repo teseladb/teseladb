@@ -941,8 +941,12 @@ impl IoSink {
     /// Queues `req` with its completion `desc` for the reactor to submit to the kernel. If the
     /// queue cannot grow (a failed allocation), `desc` fails with that error instead, as in the
     /// reference, which catches it around the queueing.
+    ///
+    /// # Safety
+    /// `desc` must be the live completion of `req`, not queued elsewhere, and stay live until
+    /// it completes (it is completed here at once if the request cannot be queued).
     #[inline]
-    pub fn submit(&mut self, desc: *mut IoCompletion, req: IoRequest) {
+    pub unsafe fn submit(&mut self, desc: *mut IoCompletion, req: IoRequest) {
         let queued =
             crate::engine::util::alloc_failure_injector::memory::catch_alloc_failure(|| {
                 self._pending_io.push_back(PendingIoRequest::new(req, desc));
