@@ -33,7 +33,6 @@ use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::Bytes;
 
 use super::{Batch, Dest, ShardWriter};
-use crate::shard_port::packet;
 
 /// `O_NONBLOCK` of Linux.
 const O_NONBLOCK: i32 = 0o4000;
@@ -215,7 +214,8 @@ impl Dest for StreamDest {
             StreamKind::Pollable => own(false)
                 .map(OwnedFd::from)
                 .or_else(|_| nonblocking_dup(&self.file))
-                .map(|fd| Rc::new(Pollable::new(fd)) as Rc<dyn ShardWriter>),
+                .and_then(Pollable::new)
+                .map(|p| Rc::new(p) as Rc<dyn ShardWriter>),
             StreamKind::Regular => own(true).map(|f| Rc::new(Plain(f)) as Rc<dyn ShardWriter>),
             StreamKind::Inline => Err(io::Error::other("written as it is")),
         };
@@ -239,24 +239,43 @@ fn nonblocking_dup(file: &File) -> io::Result<OwnedFd> {
 
 /// A non-blocking descriptor written through the engine.
 struct Pollable {
+    /// What the reactor waits on for room.
     fd: RefCell<PollableFd>,
+    /// A duplicate of the same open description (non-blocking too), written with `write(2)`.
+    out: File,
 }
 
 impl Pollable {
-    fn new(fd: OwnedFd) -> Pollable {
-        Pollable {
+    fn new(fd: OwnedFd) -> io::Result<Pollable> {
+        let out = File::from(fd.try_clone()?);
+        Ok(Pollable {
             fd: RefCell::new(PollableFd::from_file_desc(FileDesc::from_fd(fd.into_raw_fd()))),
-        }
+            out,
+        })
     }
 
-    /// Writes `bytes` whole; a failure loses them.
+    /// Writes `bytes` whole with `write(2)`, waiting for room whenever the descriptor is full; a
+    /// failure loses them. Not the descriptor's `write_all`: that one is `sendmsg`, which only a
+    /// socket takes (a pipe or a terminal fails it with `ENOTSOCK`), as in the reference, whose
+    /// pipes are written with plain writes.
     fn send(self: &Rc<Self>, bytes: Vec<u8>) -> Future<()> {
-        let mut p = Box::new(packet(bytes));
-        let sent = self.fd.borrow_mut().write_all(&mut p);
-        let keep = Rc::clone(self);
-        sent.then_wrapped(move |r: Future<()>| {
-            drop((p, keep));
-            let _ = r.get();
+        let me = Rc::clone(self);
+        make_coroutine(async move {
+            let mut at = 0;
+            while at < bytes.len() {
+                match (&me.out).write(&bytes[at..]) {
+                    Ok(0) => break,
+                    Ok(n) => at += n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        let room = me.fd.borrow_mut().writeable();
+                        if room.await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
             Ok::<(), ExceptionPtr>(())
         })
     }
@@ -317,13 +336,10 @@ impl Dest for SyslogDest {
         let own = UnixDatagram::unbound().and_then(|s| {
             s.connect(&self.path)?;
             s.set_nonblocking(true)?;
-            Ok(s)
+            Pollable::new(OwnedFd::from(s))
         });
         match own {
-            Ok(s) => Rc::new(Datagrams {
-                out: Rc::new(Pollable::new(OwnedFd::from(s))),
-                prefix: self.prefix.clone(),
-            }),
+            Ok(p) => Rc::new(Datagrams { out: Rc::new(p), prefix: self.prefix.clone() }),
             Err(_) => Rc::new(Lost),
         }
     }
