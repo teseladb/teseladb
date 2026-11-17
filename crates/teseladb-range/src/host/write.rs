@@ -185,7 +185,9 @@ impl RangeHost {
             if matches!(m.work, Work::Txn(_)) {
                 return self.step_txn(core, id, m, (latch, moved), now);
             }
-            if let Some(key) = m.dedup {
+            if let Some(key) = m.dedup
+                && !self.newest_txns(m.g).is_some_and(|n| n.is_new(&key))
+            {
                 match dedup::lookup(&self.lsm, m.g, key) {
                     None => {
                         self.wait_for_blocks(id, m);
@@ -227,6 +229,9 @@ impl RangeHost {
                         Some(Ok(None)) => {}
                     },
                 }
+            }
+            if let Some(key) = m.dedup {
+                self.note_txn(m.g, &key);
             }
             let view = TxnView::default();
             let leader = self.ranges.get(&m.g).and_then(|r| r.leader.as_ref());
@@ -327,6 +332,18 @@ impl RangeHost {
         }
         self.reqs.insert(id, Req::Mut(m));
         moved
+    }
+
+    /// The newest `txnNumber` of each session that range `g`'s leader here wrote for (FR-011).
+    pub(super) fn newest_txns(&self, g: GroupId) -> Option<&crate::dedup::NewestTxns> {
+        self.ranges.get(&g)?.leader.as_ref().map(|l| &l.newest_txns)
+    }
+
+    /// Notes in range `g`'s leader a statement that passed the idempotence reads (FR-011).
+    pub(super) fn note_txn(&mut self, g: GroupId, key: &crate::command::DedupKey) {
+        if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
+            l.newest_txns.note(key);
+        }
     }
 
     /// Leaves write `m` waiting for the blocks its reads just missed: it reads again once the

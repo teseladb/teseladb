@@ -289,6 +289,8 @@ pub(crate) struct Leader {
     cache: TsCache,
     /// The round of purging idempotence records (FR-011).
     purge: Purge,
+    /// The newest `txnNumber` of each session it wrote for (FR-011).
+    pub(crate) newest_txns: crate::dedup::NewestTxns,
     /// The round of raising the GC threshold (FR-013).
     pub(crate) gc: Round,
     /// The round of checksums (FR-014) and the tally of the last one.
@@ -1652,6 +1654,7 @@ impl RangeHost {
             locks: crate::locks::LockTable::default(),
             cache: TsCache::for_lease(lease, CACHE_INTERVALS),
             purge: Purge::Idle(0, None),
+            newest_txns: crate::dedup::NewestTxns::default(),
             gc: Round::Idle(0),
             check: Round::Idle(lease.physical + CHECKSUM_EVERY_MS),
             tally: None,

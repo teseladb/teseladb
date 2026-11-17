@@ -511,19 +511,24 @@ impl RangeHost {
         // left before it (FR-022): answered as it is, without a new entry. A session that has a
         // newer `txnNumber` in the range no longer commits this one.
         if let Some(key) = m.dedup {
-            let decided = match dedup::lookup(&self.lsm, m.g, key) {
-                None => None,
-                Some(Err(())) => Some(Err(RangeError::Unavailable)),
-                Some(Ok(Some((ts, result)))) => Some(match result == crate::onepc::COMMITTED {
-                    true => Ok(Reply::Intents { ts }),
-                    false => Err(RangeError::NoSuchTransaction),
-                }),
-                Some(Ok(None)) => match dedup::superseded(&self.lsm, m.g, key) {
+            // Past every record of its session in the range: nothing to read (FR-011).
+            let decided = if self.newest_txns(m.g).is_some_and(|n| n.is_new(&key)) {
+                Some(Ok(Reply::Batch(Vec::new())))
+            } else {
+                match dedup::lookup(&self.lsm, m.g, key) {
                     None => None,
                     Some(Err(())) => Some(Err(RangeError::Unavailable)),
-                    Some(Ok(Some(_))) => Some(Err(RangeError::NoSuchTransaction)),
-                    Some(Ok(None)) => Some(Ok(Reply::Batch(Vec::new()))),
-                },
+                    Some(Ok(Some((ts, result)))) => Some(match result == crate::onepc::COMMITTED {
+                        true => Ok(Reply::Intents { ts }),
+                        false => Err(RangeError::NoSuchTransaction),
+                    }),
+                    Some(Ok(None)) => match dedup::superseded(&self.lsm, m.g, key) {
+                        None => None,
+                        Some(Err(())) => Some(Err(RangeError::Unavailable)),
+                        Some(Ok(Some(_))) => Some(Err(RangeError::NoSuchTransaction)),
+                        Some(Ok(None)) => Some(Ok(Reply::Batch(Vec::new()))),
+                    },
+                }
             };
             match decided {
                 // A block is being read: the request waits for it.
@@ -532,7 +537,7 @@ impl RangeHost {
                     return moved;
                 }
                 // Nothing decided yet: the request goes on and leaves its record.
-                Some(Ok(Reply::Batch(_))) => {}
+                Some(Ok(Reply::Batch(_))) => self.note_txn(m.g, &key),
                 Some(answer) => {
                     self.release(m.g, m.term, latch);
                     self.reply(id, answer);

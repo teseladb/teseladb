@@ -27,6 +27,43 @@ pub const PURGE_BATCH: usize = 10_000;
 
 const NEWEST: Hlc = Hlc { physical: u64::MAX, logical: u32::MAX };
 
+/// Sessions a leader remembers the newest `txnNumber` of; past it the map starts again empty.
+const REMEMBERED_SESSIONS: usize = 1 << 16;
+
+/// The newest `txnNumber` each session wrote with through this leader, or one above it: a
+/// statement of a greater `txnNumber` has no record in the range and no newer one is there, so it
+/// skips both reads of the LSM ([`lookup`], [`superseded`]). The leader notes a statement once it
+/// passed them; a proposal that never applies leaves its number noted, which only sends the next
+/// statements of the session to the reads. A session it does not remember reads them, as a new
+/// leader's do, and so does any statement of the noted number or below.
+#[derive(Debug, Default)]
+pub(crate) struct NewestTxns(std::collections::HashMap<u128, i64>);
+
+impl NewestTxns {
+    /// Whether statement `key` is past every record its session has in the range.
+    pub(crate) fn is_new(&self, key: &DedupKey) -> bool {
+        self.0.get(&key.lsid).is_some_and(|newest| key.txn_number > *newest)
+    }
+
+    /// Notes statement `key`, which passed the reads or [`NewestTxns::is_new`].
+    pub(crate) fn note(&mut self, key: &DedupKey) {
+        if self.0.len() >= REMEMBERED_SESSIONS && !self.0.contains_key(&key.lsid) {
+            self.0.clear();
+        }
+        let newest = self.0.entry(key.lsid).or_insert(key.txn_number);
+        *newest = (*newest).max(key.txn_number);
+    }
+}
+
+/// The searches [`superseded`] made since the process started (FR-011): a write whose session
+/// the leader remembers makes none.
+static SEARCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`superseded`]'s searches so far.
+pub fn searches() -> u64 {
+    SEARCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The record of statement `key` in range `g`: its mark and result, `Some(Ok(None))` if there is
 /// none, `None` while a block is being read and `Some(Err(()))` if the LSM failed.
 pub fn lookup(
@@ -56,6 +93,7 @@ pub fn superseded(
     key: DedupKey,
 ) -> Option<Result<Option<i64>, ()>> {
     let Some(next) = key.txn_number.checked_add(1) else { return Some(Ok(None)) };
+    SEARCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let start = dedup_key(g, key.lsid, next, 0);
     let end = match key.lsid.checked_add(1) {
         Some(lsid) => dedup_key(g, lsid, i64::MIN, 0),
