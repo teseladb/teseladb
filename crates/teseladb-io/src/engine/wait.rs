@@ -75,6 +75,15 @@ pub fn sleep(d: Duration) {
     rt::finish_park(p, Some(Instant::now() + d));
 }
 
+/// Lets the shard run its other tasks once the engine asks for it (the task quota is used up),
+/// from an engine thread: a long read of a command between two of its parts gives the shard back,
+/// so the core's turns, the device log's writer and the other commands of the shard do not wait
+/// for its end. The command's thread-local state is saved meanwhile, as in a park. Anywhere else
+/// it does nothing.
+pub fn yield_if_asked() {
+    rt::yield_if_asked();
+}
+
 /// Runs `f`, which blocks (a file system call, a file written and synced), without blocking a
 /// shard: an engine thread hands it to the process's threads that are not shards
 /// ([`super::blocking::offload`]) and parks until it ends; any other thread that is not a shard
@@ -139,6 +148,7 @@ mod rt {
     use teseladb::engine::core::alien;
     use teseladb::engine::core::coroutine::make_coroutine;
     use teseladb::engine::core::future::{ExceptionPtr, Future};
+    use teseladb::engine::core::preempt::need_preempt;
     use teseladb::engine::core::reactor::engine_is_ready;
     use teseladb::engine::core::reactor::internal_misc::run_in_background;
     use teseladb::engine::core::shard_id::this_shard_id;
@@ -155,6 +165,19 @@ mod rt {
 
     pub(super) fn engine_thread_shard() -> Option<u32> {
         (engine_is_ready() && Thread::running_in_thread()).then(this_shard_id)
+    }
+
+    pub(super) fn yield_if_asked() {
+        // `need_preempt` first: it is one load, and a shard's thread that is not an engine
+        // thread never yields.
+        if !need_preempt() || !engine_is_ready() || !Thread::running_in_thread() {
+            return;
+        }
+        let saved = HOOKS.get().map(|h| (h, (h.save)()));
+        Thread::yield_();
+        if let Some((h, state)) = saved {
+            (h.restore)(state);
+        }
     }
 
     /// The result of `f`, waited for in this engine thread, with the command's thread-local
@@ -286,6 +309,8 @@ mod rt {
     pub(super) fn engine_thread_shard() -> Option<u32> {
         None
     }
+
+    pub(super) fn yield_if_asked() {}
 
     pub(super) fn post(_shard: u32, _f: Box<dyn FnOnce() + Send>) -> bool {
         false
