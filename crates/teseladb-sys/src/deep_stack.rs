@@ -1,9 +1,10 @@
-//! Native stacks of their own for calls that nest deep (016 A016-3-18, 023 FR-018): a client's
-//! commands run in engine threads whose stacks are small and come from the shard's memory, while
+//! Native stacks of their own for calls that nest deep (016 A016-3-18, 023 FR-018): engine threads
+//! have small stacks that come from the shard's memory, a client's command needs MiB, and
 //! server-side JavaScript must reach the 51 000 nested calls of the reference router, which take
-//! a stack of hundreds of MiB. [`run`] runs such a call on a stack of its own instead: address
-//! space reserved with `mmap` (`MAP_NORESERVE`), which the kernel commits a page at a time as the
-//! call reaches it, with an inaccessible guard below.
+//! a stack of hundreds of MiB. [`run`] runs such a call on a stack of its own instead, and an
+//! [`OwnStack`] is one its owner keeps from call to call: address space reserved with `mmap`
+//! (`MAP_NORESERVE`), which the kernel commits a page at a time as the call reaches it, with an
+//! inaccessible guard below.
 //!
 //! Each thread (each shard) keeps a few idle stacks for the next calls, so a call makes no system
 //! call once its shard has as many as it runs at once. A call that went deep leaves its pages
@@ -158,12 +159,15 @@ fn stack_address() -> usize {
 }
 
 /// Runs `call` once: with `Some(bytes)` on a stack of its own of at least `size` bytes, or with
-/// `None` where the caller runs, when the caller already is on such a stack or none could be
-/// made. A panic of `call` comes back here.
+/// `None` where the caller runs, when the caller already is on such a stack (one of at least
+/// `size` bytes) or none could be made. A panic of `call` comes back here.
 pub fn run(size: usize, call: &mut dyn FnMut(Option<usize>)) {
     let here = stack_address();
-    let nested =
-        POOL.with(|p| p.borrow().busy.iter().any(|&(base, len)| here >= base && here < base + len));
+    let nested = POOL.with(|p| {
+        p.borrow().busy.iter().any(|&(base, len)| {
+            here >= base && here < base + len && len.saturating_sub(GUARD) >= size
+        })
+    });
     if nested {
         call(None);
         return;
@@ -173,17 +177,8 @@ pub fn run(size: usize, call: &mut dyn FnMut(Option<usize>)) {
         call(None);
         return;
     };
-    let range = (stack.base as usize, stack.len);
-    POOL.with(|p| p.borrow_mut().busy.push(range));
     let usable = stack.usable();
-    let outcome = on_stack(stack.top(), &mut || call(Some(usable)));
-    POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        if let Some(i) = p.busy.iter().position(|r| *r == range) {
-            p.busy.swap_remove(i);
-        }
-    });
-    stack.trim();
+    let outcome = run_on(&stack, &mut || call(Some(usable)));
     POOL.with(|p| {
         let mut p = p.borrow_mut();
         if p.idle.len() < MAX_IDLE {
@@ -192,6 +187,49 @@ pub fn run(size: usize, call: &mut dyn FnMut(Option<usize>)) {
     });
     if let Err(panic) = outcome {
         resume_unwind(panic);
+    }
+}
+
+/// Runs `call` on `stack`, known as in use meanwhile, and trims it after.
+fn run_on(stack: &Stack, call: &mut dyn FnMut()) -> std::thread::Result<()> {
+    let range = (stack.base as usize, stack.len);
+    POOL.with(|p| p.borrow_mut().busy.push(range));
+    let outcome = on_stack(stack.top(), call);
+    POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        if let Some(i) = p.busy.iter().position(|r| *r == range) {
+            p.busy.swap_remove(i);
+        }
+    });
+    stack.trim();
+    outcome
+}
+
+/// A stack of its own that its owner keeps from one call to the next (an engine thread that runs
+/// a client's commands keeps one): address space outside any allocator's pool, which the kernel
+/// commits a page at a time as calls reach it, with an inaccessible guard below. A call of [`run`]
+/// made from it for at most its usable bytes runs where it is.
+pub struct OwnStack(Stack);
+
+impl OwnStack {
+    /// A stack with at least `size` usable bytes; `None` when the address space is not there.
+    #[must_use]
+    pub fn new(size: usize) -> Option<OwnStack> {
+        Stack::new(size).map(OwnStack)
+    }
+
+    /// The bytes a call may use.
+    #[must_use]
+    pub fn usable(&self) -> usize {
+        self.0.usable()
+    }
+
+    /// Runs `call` on this stack; a panic of `call` comes back here. The pages a deep call used
+    /// below the top [`KEEP`] bytes go back to the kernel after it.
+    pub fn run(&self, call: &mut dyn FnMut()) {
+        if let Err(panic) = run_on(&self.0, call) {
+            resume_unwind(panic);
+        }
     }
 }
 
@@ -335,6 +373,30 @@ mod tests {
         assert!(r.is_err());
         assert!(!on_own_stack());
         assert!(idle_here() >= 1);
+    }
+
+    #[test]
+    fn an_own_stack_runs_its_calls_and_a_deeper_one_takes_a_stack_of_its_own() {
+        let own = OwnStack::new(4 << 20).expect("mapped");
+        assert!(own.usable() >= 4 << 20);
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            own.run(&mut || {
+                assert!(on_own_stack());
+                // As large as the stack: it runs where it is.
+                run(4 << 20, &mut |size| seen.push(size));
+                // Larger: on a stack of its own.
+                run(64 << 20, &mut |size| seen.push(size));
+                assert_eq!(deep(1 << 10), 1 << 10);
+            });
+        }
+        assert!(!on_own_stack());
+        assert_eq!(seen[0], None);
+        assert!(seen[1].is_some_and(|s| s >= 64 << 20));
+        assert_eq!(seen[2], None);
+        let r = catch_unwind(AssertUnwindSafe(|| own.run(&mut || panic!("a call failed"))));
+        assert!(r.is_err());
+        assert!(!on_own_stack());
     }
 
     #[test]
