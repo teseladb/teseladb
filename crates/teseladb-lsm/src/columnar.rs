@@ -71,7 +71,8 @@ pub(crate) fn takes<'c>(
     mut others: impl Iterator<Item = &'c Cursor>,
 ) -> bool {
     let Some(e) = table.column_entry(i) else { return false };
-    if e.max_ts > ask.read {
+    // The batch's last key comes from the index: a short one is not the block's last document.
+    if e.max_ts > ask.read || !table.exact_last(i) {
         return false;
     }
     let (lo, hi) = table.block_span(i);

@@ -234,3 +234,28 @@ fn released_writes_are_kept_with_their_keys_for_the_scans_outside_the_core() {
     assert_eq!(spans.released().any_in((before, later), (b"e", b"f")), None);
     assert_eq!(spans.released().any_in((later - 1, later), (b"e", b"f")), Some(false));
 }
+
+/// Long keys (index entries of 1 MiB) are held once by the latches, and a released write keeps
+/// short bounds of them for the scans outside the core, which still see it in its keys.
+#[test]
+fn long_keys_leave_short_bounds_when_released() {
+    let mut latches = Latches::default();
+    let long = |b: u8| {
+        let mut k = vec![b];
+        k.resize(1 << 20, 0x61);
+        k
+    };
+    let keys = [long(b'c'), long(b'd')];
+    let (spans, released) = (latches.spans(), latches.released());
+    let id = latches.acquire(&keys).unwrap();
+    assert!(spans.any_in(b"c", b"e"));
+    latches.set_mark(id, ts(3));
+    latches.release(id);
+    let recent = spans.released();
+    let n = released.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(recent.key_bytes() <= 2 * teseladb_range::load::SAMPLE_KEY, "{}", recent.key_bytes());
+    assert_eq!(recent.any_in((0, n), (b"d", b"e")), Some(true));
+    assert_eq!(recent.any_in((0, n), (b"c\x61", b"c\x62")), Some(true));
+    assert_eq!(recent.any_in((0, n), (b"a", b"b")), Some(false));
+    assert!(latches.is_empty());
+}

@@ -81,9 +81,9 @@ pub mod internal {
             // bytewise loop through the two `UnsafeCell`s is kept as N byte moves, since the
             // compiler cannot tell that the storages do not overlap (the upstream change
             // "noncopyable_function: use memcpy instead of bytewise copy loop").
+            const { assert!(N <= NR_DIRECT) };
             // SAFETY: both storages are NR_DIRECT >= N bytes, and they are the storages of two
             // distinct functions (a move is never from a function into itself).
-            const { assert!(N <= NR_DIRECT) };
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     (*(*from)._storage.get()).direct.as_ptr(),

@@ -147,9 +147,8 @@ impl ValueSink {
     /// Ends its value file, if it started one, queueing its last write and its sync.
     pub(crate) fn finish(&mut self, queued: &mut VecDeque<IoOp>) -> Option<Arc<Table>> {
         let (number, w) = self.file.take()?;
-        let (at, chunk, table) = w.finish(number, Vec::new()).expect("a value file has values");
-        queued.push_back(write_at(number, at, chunk));
-        queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+        let (chunks, table) = w.finish(number, Vec::new()).expect("a value file has values");
+        write_end(number, chunks, queued);
         Some(Arc::new(table))
     }
 }
@@ -163,6 +162,14 @@ pub(crate) fn attach_values(table: &mut Table, numbers: &[u64], find: impl Fn(u6
 /// The write of `chunk` at `offset` of file `number`.
 pub(crate) fn write_at(number: u64, offset: u64, chunk: Vec<u8>) -> IoOp {
     IoOp::WriteAt { file: file_id(number), offset, data: Bytes::from_vec(chunk), batch: 0 }
+}
+
+/// Queues the last writes of file `number` ([`TableWriter::finish`]) and its sync.
+pub(crate) fn write_end(number: u64, chunks: Vec<(u64, Bytes)>, queued: &mut VecDeque<IoOp>) {
+    for (offset, data) in chunks {
+        queued.push_back(IoOp::WriteAt { file: file_id(number), offset, data, batch: 0 });
+    }
+    queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
 }
 
 /// What a finished job leaves to install.
@@ -206,6 +213,11 @@ pub(crate) enum Outcome {
 /// else (FR-030): merging a megabyte kept the core for several milliseconds.
 pub(crate) const STEP_BYTES: usize = 64 << 10;
 
+/// Work of the end of a file a background job does in one step, in keys of its filter
+/// ([`TableWriter::prepare`]): about a quarter of a millisecond (FR-030). Building the filter of
+/// a file of a million keys at once kept its core 65 ms.
+pub(crate) const END_STEP: usize = 4 << 10;
+
 /// The next thing a job wants.
 #[derive(Debug)]
 pub(crate) enum Next {
@@ -226,6 +238,8 @@ pub(crate) struct FlushJob {
     /// The number of its value file, which exists once a value goes apart (FR-034).
     values_number: u64,
     values: ValueSink,
+    /// Its value file once ended, for the file's references.
+    values_file: Option<Arc<Table>>,
     dir: PathBuf,
     chunk: usize,
     /// How its files are written: block size, codec and key ring.
@@ -248,6 +262,9 @@ pub(crate) struct FlushJob {
 #[derive(Debug, PartialEq, Eq)]
 enum FlushStage {
     Fill,
+    /// Every version is written: the ends of the file and of its history file are prepared in
+    /// steps (FR-030).
+    Close,
     Edit,
     Done,
 }
@@ -283,6 +300,7 @@ impl FlushJob {
             history_number,
             values_number,
             values: ValueSink::new(cfg.value_separation_bytes),
+            values_file: None,
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             writer: has_data.then(|| packing(new_writer(&format), cfg.pack_documents)),
@@ -374,23 +392,33 @@ impl FlushJob {
             self.write_full_chunks();
             return;
         }
-        let values = self.values.finish(&mut self.queued);
+        self.values_file = self.values.finish(&mut self.queued);
+        self.stage = FlushStage::Close;
+    }
+
+    /// One step of the ends of the file and of its history file; once both are ready, their last
+    /// writes and syncs are queued and the flush goes on to its edit.
+    fn close(&mut self) {
+        let ready = |w: &mut Option<TableWriter>| w.as_mut().is_none_or(|w| w.prepare(END_STEP));
+        if !ready(&mut self.writer) || !ready(&mut self.history) {
+            return;
+        }
+        let values = self.values_file.take();
         let find = |_| values.clone().expect("the flush's value file");
+        let mem = Arc::clone(&self.mem);
         let w = self.writer.take().expect("a flush with data has a writer");
         let numbers = w.value_numbers();
-        let (at, chunk, mut table) = w
+        let (chunks, mut table) = w
             .finish(self.number, mem.tombstones().cloned().collect())
             .expect("a memtable with data writes a file");
-        self.queued.push_back(write_at(self.number, at, chunk));
-        self.queued.push_back(IoOp::Sync { file: file_id(self.number), batch: 0 });
+        write_end(self.number, chunks, &mut self.queued);
         attach_values(&mut table, &numbers, find);
         if let Some(h) = self.history.take() {
             let numbers = h.value_numbers();
-            let (at, chunk, mut history) =
+            let (chunks, mut history) =
                 h.finish(self.history_number, Vec::new()).expect("a history file has versions");
             attach_values(&mut history, &numbers, find);
-            self.queued.push_back(write_at(self.history_number, at, chunk));
-            self.queued.push_back(IoOp::Sync { file: file_id(self.history_number), batch: 0 });
+            write_end(self.history_number, chunks, &mut self.queued);
             table.history = Some(Arc::new(history));
         }
         self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
@@ -408,6 +436,12 @@ impl FlushJob {
                 FlushStage::Fill => {
                     self.fill();
                     if self.queued.is_empty() && self.stage == FlushStage::Fill {
+                        return Next::More;
+                    }
+                }
+                FlushStage::Close => {
+                    self.close();
+                    if self.queued.is_empty() && self.stage == FlushStage::Close {
                         return Next::More;
                     }
                 }

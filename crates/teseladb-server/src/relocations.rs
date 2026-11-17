@@ -77,10 +77,12 @@ pub struct Handover {
     pub imp: GroupImport,
     /// Its local keys and data intervals.
     pub intervals: Intervals,
-    /// The SST files of those intervals the export wrote.
+    /// The SST files of those intervals the export wrote, when the cores do not share a file
+    /// system.
     pub files: Vec<Vec<u8>>,
-    /// The files the export linked whole, with their history files (004 FR-033): the target
-    /// core ingests them where they are, on the node's file system.
+    /// The files the export linked whole, with their history files (004 FR-033), and where the
+    /// cores share a file system the files it wrote too: the target core ingests them where
+    /// they are.
     pub linked: Vec<FileRef>,
 }
 
@@ -806,8 +808,13 @@ impl Relocations {
         }
         let (target, all) = (*target, std::mem::take(files));
         // The files linked whole are not read: their names go to the target core (FR-033).
+        // Where the cores share a file system the files the export wrote go the same way: the
+        // target core ingests them where they are, without this core reading them whole into
+        // memory and the target writing them again while the range serves nothing (the time
+        // from the hand-over to the import reached 1.2 s in the one-node load).
+        let link = self.link;
         let (linked, refs): (Vec<FileRef>, Vec<FileRef>) =
-            all.into_iter().partition(|f| f.group > 0);
+            all.into_iter().partition(|f| link || f.group > 0);
         for (i, f) in refs.iter().enumerate() {
             let file = self.file_id();
             let len = u32::try_from(f.size).unwrap_or(u32::MAX);
@@ -1787,6 +1794,39 @@ mod tests {
                 IoOp::Remove { path: linked.history_values[1].0.clone() },
             ]
         );
+    }
+
+    /// Where the cores share a file system, the files an export wrote go unread like the linked
+    /// ones: their names go with the hand-over, and they are removed when it is given up. Without
+    /// a shared file system they are read.
+    #[test]
+    fn written_files_go_by_name_where_the_cores_share_a_file_system() {
+        let written = FileRef::new("relocate/out-55-1/000011.sst".into(), 8192);
+        let exporting = Out::Exporting { target: 0, jobs: vec![5], files: Vec::new(), at: 0 };
+        let mut n = Node::new();
+        let c = &mut n.cores[1];
+        c.rel.link = true;
+        c.rel.out.insert(GroupId(55), exporting);
+        assert_eq!(c.rel.on_exported(5, vec![written.clone()]), Ok(()));
+        let read = c.rel.out.get(&GroupId(55));
+        assert!(
+            matches!(read, Some(Out::Read { files, linked, .. }) if files.is_empty() && *linked == [written.clone()]),
+            "the written file goes by name"
+        );
+        assert!(c.rel.ops.is_empty(), "nothing is read");
+        c.rel.drop_out(GroupId(55));
+        let removed: Vec<IoOp> = c.rel.ops.drain(..).map(|(op, _)| op).collect();
+        assert_eq!(removed, vec![IoOp::Remove { path: written.path.clone() }]);
+        // Cores with disks of their own read it.
+        let c = &mut n.cores[0];
+        c.rel.out.insert(
+            GroupId(56),
+            Out::Exporting { target: 1, jobs: vec![6], files: Vec::new(), at: 0 },
+        );
+        assert_eq!(c.rel.on_exported(6, vec![written.clone()]), Ok(()));
+        assert!(matches!(c.rel.out.get(&GroupId(56)), Some(Out::Reading { .. })));
+        let reads = c.rel.ops.iter().filter(|(op, _)| matches!(op, IoOp::ReadAt { .. })).count();
+        assert_eq!(reads, 1);
     }
 
     #[test]

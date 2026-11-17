@@ -86,6 +86,9 @@ pub struct Toy {
     pub file_sends: Option<bool>,
     /// Every frame received, with its sender.
     pub frames: Vec<(NodeId, PeerMsg)>,
+    /// Takes, at the first [`CoreLogic::poll_io`], the bytes of stack below it on a stack of
+    /// `teseladb_sys::deep_stack` (0 elsewhere).
+    pub first_poll_room: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 pub fn ack(req: u64) -> PeerMsg {
@@ -130,6 +133,9 @@ impl CoreLogic for Toy {
     }
 
     fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
+        if let Some(room) = self.first_poll_room.take() {
+            room.store(teseladb_sys::deep_stack::room_here().unwrap_or(0), Ordering::SeqCst);
+        }
         if self.io.is_empty() || (self.one_by_one && self.in_flight > 0) {
             return None;
         }
@@ -264,13 +270,28 @@ pub fn start_core<D: Disk + Send + 'static>(
     tick: Duration,
     tls: Option<PeerTls>,
 ) -> CoreHandle<Cmd, Stopped<D>> {
+    start_core_built(engine, shard, h, tick, tls, move || (toy, disk))
+}
+
+/// As [`start_core`], with the toy and its disk made by `build` where the engine builds the core.
+pub fn start_core_built<D: Disk + Send + 'static>(
+    engine: &NodeEngine,
+    shard: u16,
+    h: &Hello,
+    tick: Duration,
+    tls: Option<PeerTls>,
+    build: impl FnOnce() -> (Toy, D) + Send + 'static,
+) -> CoreHandle<Cmd, Stopped<D>> {
     let seed = h.node_id.0 * 16 + u64::from(h.core);
     let cfg = CoreConfig { hello: h.clone(), tick, seed, tls, origin: Instant::now() };
     engine
         .start_core(
             shard,
             cfg,
-            move || Ok::<_, std::io::Error>((toy, InlineDisk::new(disk), None)),
+            move || {
+                let (toy, disk) = build();
+                Ok::<_, std::io::Error>((toy, InlineDisk::new(disk), None))
+            },
             |toy, disk: InlineDisk<D>, gone| (toy, disk.disk, gone),
         )
         .unwrap()

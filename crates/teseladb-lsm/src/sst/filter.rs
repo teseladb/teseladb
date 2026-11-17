@@ -23,7 +23,9 @@ pub(crate) fn hashes(key: &[u8]) -> (u32, u32) {
     (crc32c(key), crc32c_append(SEED, key) | 1)
 }
 
-/// Builds the payload of the filter of `keys` (their [`hashes`]): a Ribbon filter (FR-042).
+/// Builds the payload of the filter of `keys` (their [`hashes`]) at once: a Ribbon filter
+/// (FR-042). A file's writer builds it in steps ([`ribbon::Builder`]).
+#[cfg(test)]
 pub(crate) fn build(keys: &[(u32, u32)]) -> Vec<u8> {
     ribbon::build(keys)
 }

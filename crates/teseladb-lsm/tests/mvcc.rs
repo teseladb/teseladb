@@ -549,3 +549,69 @@ fn a_scan_passes_old_versions_wherever_they_end_in_their_blocks() {
         assert_eq!(got, (57..143).map(key).collect::<Vec<_>>());
     }
 }
+
+/// Long keys (index entries on long strings) get short keys in the files' indexes (version 2 of
+/// the format): forward and backward scans, point reads at each mark and reads after a
+/// compaction see every version as with short keys, from cold files.
+#[test]
+fn long_keys_read_the_same_through_the_short_keys_of_the_index() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let key = |i: u32| {
+        let mut k = format!("L{:04}", i / 3).into_bytes();
+        // Two of every three keys are long; the long ones of a group share most of their bytes.
+        let fill = if i % 3 == 2 { 0 } else { 900 + 300 * (i % 3) as usize };
+        k.extend(std::iter::repeat_n(b'x', fill));
+        k.push(b'0' + (i % 3) as u8);
+        k
+    };
+    let keys: Vec<Vec<u8>> = (0..300).map(key).collect();
+    let mut index = 0;
+    for v in 1..=3u64 {
+        for (i, k) in keys.iter().enumerate() {
+            index += 1;
+            if v == 3 && i % 7 == 0 {
+                lsm.delete(G, index, k, ts(v, 0)).unwrap();
+            } else {
+                lsm.put(G, index, k, ts(v, 0), format!("{i}@{v}").as_bytes()).unwrap();
+            }
+        }
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    let check = |lsm: &mut Lsm, disk: &mut MemDisk| {
+        let mut sorted = keys.clone();
+        sorted.sort();
+        for at in 1..=3u64 {
+            let want: Vec<Vec<u8>> = sorted
+                .iter()
+                .filter(|k| at < 3 || keys.iter().position(|x| x == *k).unwrap() % 7 != 0)
+                .cloned()
+                .collect();
+            let v = lsm.view();
+            let fwd: Vec<Vec<u8>> =
+                scan(lsm, disk, &v, b"L", b"M", ts(at, 0)).into_iter().map(|r| r.0).collect();
+            assert_eq!(fwd, want, "forward at {at}");
+            let back: Vec<Vec<u8>> = common::scan_back(lsm, disk, &v, b"L", b"M", ts(at, 0))
+                .into_iter()
+                .map(|r| r.0)
+                .collect();
+            let mut rev = want.clone();
+            rev.reverse();
+            assert_eq!(back, rev, "backward at {at}");
+            for (i, k) in keys.iter().enumerate().step_by(5) {
+                let got = get(lsm, disk, &v, k, ts(at, 0)).map(|r| r.3);
+                let deleted = at == 3 && i % 7 == 0;
+                assert_eq!(got, (!deleted).then(|| format!("{i}@{at}").into_bytes()), "key {i}");
+            }
+        }
+    };
+    drop(lsm);
+    let mut lsm = open(&small(), &mut disk);
+    check(&mut lsm, &mut disk);
+    lsm.compact_all();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    drop(lsm);
+    let mut lsm = open(&small(), &mut disk);
+    check(&mut lsm, &mut disk);
+}

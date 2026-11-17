@@ -80,8 +80,10 @@ fn a_flush_takes_its_memtable_a_step_at_a_time() {
         lsm.put(G, i, format!("k{i:06}").as_bytes(), ts(i, 0), &[b'v'; 1024]).unwrap();
     }
     lsm.flush();
-    // The file is created first. Then each step takes 64 KiB of the 400 KiB and yields: the
-    // file's bytes are handed out once, at the end, since they are less than a chunk.
+    // The file is created first. Then each step takes 64 KiB of the 400 KiB and yields, and the
+    // end of the file takes two more, one to end its last block and one for the filter's keys
+    // (its rows are solved in the step that hands out the bytes): the file's bytes are handed
+    // out once, at the end, since they are less than a chunk.
     let Polled::Op(create) = lsm.poll_io_step(NOW) else { panic!("the flush starts") };
     let done = disk.execute(create);
     lsm.on_io_done(done, NOW);
@@ -93,7 +95,7 @@ fn a_flush_takes_its_memtable_a_step_at_a_time() {
             Polled::Idle => panic!("a flush in progress"),
         }
     };
-    assert!((5..=7).contains(&yields), "{yields} yields for 400 KiB");
+    assert!((7..=9).contains(&yields), "{yields} yields for 400 KiB");
     let done = disk.execute(write);
     lsm.on_io_done(done, NOW);
     // Whoever has nothing else to serve asks for the next operation and gets it, however
@@ -111,6 +113,32 @@ fn a_flush_takes_its_memtable_a_step_at_a_time() {
     let view = lsm.view();
     let found = common::get(&mut lsm, &mut disk, &view, b"k000400", ts(900, 0));
     assert!(found.is_some(), "flushed and read back");
+}
+
+/// The end of a file goes in steps too: the filter of a file of many short keys took its core
+/// 65 ms at once. A flush of 50 000 keys of 20 bytes takes about 16 steps of 64 KiB of entries,
+/// and its filter at least 2 × 50 000 / 4096 more: 4096 keys a step, then as many rows.
+#[test]
+fn the_end_of_a_file_of_many_keys_goes_in_steps() {
+    const N: u64 = 50_000;
+    let cfg = LsmConfig { memtable_bytes: 64 << 20, ..small() };
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&cfg, &mut disk);
+    for i in 0..N {
+        lsm.put(G, i + 1, format!("k{i:06}").as_bytes(), ts(i + 1, 0), b"v").unwrap();
+    }
+    lsm.flush();
+    let yields = run_in_steps(&mut lsm, &mut disk);
+    let entries = N * (7 + 12 + 1);
+    let fill = entries.div_ceil(64 << 10) + 1;
+    let filter = 2 * (N / 4096);
+    assert!(yields as u64 >= fill + filter, "{yields} yields");
+    let view = lsm.view();
+    for i in [0, N / 2, N - 1] {
+        let key = format!("k{i:06}");
+        let found = common::get(&mut lsm, &mut disk, &view, key.as_bytes(), ts(N + 1, 0));
+        assert!(found.is_some(), "{key} flushed and read back");
+    }
 }
 
 #[test]

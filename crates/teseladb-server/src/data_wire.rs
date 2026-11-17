@@ -716,6 +716,7 @@ fn put_error(e: &mut Encoder, err: &RangeError) {
         RangeError::Fenced => (14, 0, ""),
         RangeError::KeyLocked => (15, 0, ""),
         RangeError::EntryLost => (16, 0, ""),
+        RangeError::ExceededMemory { needed, .. } => (17, *needed, ""),
     };
     e.u8(tag).u64(hint).str(text);
     let put_owner = |e: &mut Encoder, o: &IntentOwner| {
@@ -729,6 +730,9 @@ fn put_error(e: &mut Encoder, err: &RangeError) {
         }
         RangeError::ReadUncertain { ts } => {
             e.u64(ts.physical).u32(ts.logical);
+        }
+        RangeError::ExceededMemory { free, .. } => {
+            e.u64(*free);
         }
         _ => {}
     }
@@ -767,6 +771,7 @@ fn get_error(d: &mut Decoder<'_>) -> Result<RangeError, DecodeError> {
         14 => RangeError::Fenced,
         15 => RangeError::KeyLocked,
         16 => RangeError::EntryLost,
+        17 => RangeError::ExceededMemory { needed: hint, free: d.u64()? },
         _ => return Err(DecodeError::InvalidValue { offset: at }),
     })
 }
@@ -1199,6 +1204,7 @@ mod tests {
             Err(RangeError::OutOfRange),
             Err(RangeError::Unsatisfiable),
             Err(RangeError::TooLarge),
+            Err(RangeError::ExceededMemory { needed: 900 << 20, free: 300 << 20 }),
             Err(RangeError::Unavailable),
             Err(RangeError::SnapshotTooOld),
             Err(RangeError::ReadUncertain { ts: Hlc { physical: 8, logical: 3 } }),

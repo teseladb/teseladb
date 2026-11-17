@@ -106,6 +106,7 @@ impl RangeClient {
                 | RangeError::EntryLost
                 | RangeError::Unsatisfiable
                 | RangeError::TooLarge
+                | RangeError::ExceededMemory { .. }
                 | RangeError::Unavailable
                 | RangeError::SnapshotTooOld
                 | RangeError::ReadUncertain { .. }

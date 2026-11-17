@@ -215,7 +215,8 @@ impl BackScan {
 }
 
 /// The last internal key of table `t` before `target`: from the block `target` falls in, or the
-/// last key of the block before it, which the index holds. The block's keys stay in `cached` for
+/// last key of the block before it, which the index holds unless it holds a short key there
+/// (`sst-format.md`, version 2), and then from that block. The block's keys stay in `cached` for
 /// the next, lower, target.
 fn table_before<B: Blocks>(
     r: &mut B,
@@ -225,25 +226,10 @@ fn table_before<B: Blocks>(
 ) -> Result<InTable, crate::LsmError> {
     let Some(i) = t.find_block(target) else {
         // Every key of the file is below the target: its last one.
-        return Ok(InTable::Ready(t.blocks().checked_sub(1).map(Last::OfBlock)));
+        return last_of(r, t, t.blocks().checked_sub(1), cached);
     };
-    if cached.as_ref().is_none_or(|d| d.index != i) {
-        let block = match r.block(t, i)? {
-            Fetch::Ready(b) => b,
-            Fetch::Wait(token) => return Ok(InTable::Wait(token)),
-        };
-        let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
-        // The buffers of the block decoded before are reused.
-        let (mut bytes, mut ends) =
-            cached.take().map_or_else(|| (Vec::new(), Vec::new()), |d| (d.bytes, d.ends));
-        bytes.clear();
-        ends.clear();
-        while c.valid() {
-            bytes.extend_from_slice(c.key());
-            ends.push(bytes.len());
-            c.advance().map_err(|_| corrupt(t, i))?;
-        }
-        *cached = Some(Decoded { index: i, bytes, ends });
+    if let Some(token) = decode(r, t, i, cached)? {
+        return Ok(InTable::Wait(token));
     }
     let Some(d) = cached.as_ref() else { return Ok(InTable::Ready(None)) };
     // The first key at or above the target, by bisection over the decoded keys.
@@ -256,9 +242,57 @@ fn table_before<B: Blocks>(
             hi = mid;
         }
     }
-    let last = match lo {
-        0 => i.checked_sub(1).map(Last::OfBlock),
-        n => Some(Last::Decoded(n - 1)),
-    };
+    match lo {
+        0 => last_of(r, t, i.checked_sub(1), cached),
+        n => Ok(InTable::Ready(Some(Last::Decoded(n - 1)))),
+    }
+}
+
+/// The last internal key of block `b` of `t`, if there is a block: from the index, or decoded
+/// when the index holds a short key in its place.
+fn last_of<B: Blocks>(
+    r: &mut B,
+    t: &Arc<Table>,
+    b: Option<usize>,
+    cached: &mut Option<Decoded>,
+) -> Result<InTable, crate::LsmError> {
+    let Some(b) = b else { return Ok(InTable::Ready(None)) };
+    if t.exact_last(b) {
+        return Ok(InTable::Ready(Some(Last::OfBlock(b))));
+    }
+    if let Some(token) = decode(r, t, b, cached)? {
+        return Ok(InTable::Wait(token));
+    }
+    let last = cached.as_ref().and_then(|d| d.len().checked_sub(1)).map(Last::Decoded);
     Ok(InTable::Ready(last))
+}
+
+/// Decodes block `i` of `t` into `cached` unless it holds it already; the token of its read when
+/// the block is not in memory yet.
+fn decode<B: Blocks>(
+    r: &mut B,
+    t: &Arc<Table>,
+    i: usize,
+    cached: &mut Option<Decoded>,
+) -> Result<Option<ReadToken>, crate::LsmError> {
+    if cached.as_ref().is_some_and(|d| d.index == i) {
+        return Ok(None);
+    }
+    let block = match r.block(t, i)? {
+        Fetch::Ready(b) => b,
+        Fetch::Wait(token) => return Ok(Some(token)),
+    };
+    let mut c = BlockCursor::first(block).map_err(|_| corrupt(t, i))?;
+    // The buffers of the block decoded before are reused.
+    let (mut bytes, mut ends) =
+        cached.take().map_or_else(|| (Vec::new(), Vec::new()), |d| (d.bytes, d.ends));
+    bytes.clear();
+    ends.clear();
+    while c.valid() {
+        bytes.extend_from_slice(c.key());
+        ends.push(bytes.len());
+        c.advance().map_err(|_| corrupt(t, i))?;
+    }
+    *cached = Some(Decoded { index: i, bytes, ends });
+    Ok(None)
 }

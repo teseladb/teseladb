@@ -863,6 +863,13 @@ impl DataCore {
         client: Client,
         (now, wall_ms): (Nanos, u64),
     ) {
+        // A write the core's free memory cannot hold is refused before it starts.
+        if let Err(e) =
+            crate::write_admission::admit(&r, crate::write_admission::core_free_memory())
+        {
+            self.send_answer(core, client, Err(e), now);
+            return;
+        }
         let id = match r {
             RemoteReq::Write { keys, mutation, dedup, wc, deadline, prepared } => {
                 // Decoded only if the host has to evaluate it (005 FR-035); a mutation that

@@ -55,54 +55,103 @@ impl Default for SimDiskConfig {
     }
 }
 
+/// A file. Its durable contents are not a second copy: they are its visible contents with the
+/// writes since its last `Sync` undone, from the bytes each of them overwrote within the durable
+/// length (an undo log), cut to that length. A file written once and synced, as the files of the
+/// log and the LSM are, takes its bytes once, where a copy of each file doubled the memory of
+/// every test and of `none` mode (a document of 15 MiB with five indexes ran a shard of 2 GiB
+/// out of memory).
 #[derive(Clone, Debug, Default)]
 struct Inode {
     /// Visible contents.
     data: Vec<u8>,
-    /// Durable contents.
-    durable: Vec<u8>,
+    /// Length of the durable contents.
+    durable_len: usize,
+    /// What each unsynced change overwrote within the durable length, in order: its offset and
+    /// the bytes there before it.
+    undo: Vec<(usize, Vec<u8>)>,
     /// Unsynced writes, in order: (offset, length).
     unsynced: Vec<(u64, usize)>,
 }
 
 impl Inode {
-    /// Goes back to the durable contents undoing only the pending ranges (visible and durable
-    /// only differ there and in the length).
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the simulated files live in memory, so their offsets and lengths fit usize"
-    )]
+    /// A file of `len` zeros, durable.
+    fn zeros(len: usize) -> Inode {
+        Inode { data: vec![0; len], durable_len: len, undo: Vec::new(), unsynced: Vec::new() }
+    }
+
+    /// Notes what a change of `[off, end)` overwrites of the durable contents.
+    fn save(&mut self, off: usize, end: usize) {
+        let hi = end.min(self.data.len()).min(self.durable_len);
+        if off < hi {
+            self.undo.push((off, self.data[off..hi].to_vec()));
+        }
+    }
+
+    /// Writes `bytes` at `off`, growing the file.
+    fn write(&mut self, off: usize, bytes: &[u8]) {
+        let end = off + bytes.len();
+        self.save(off, end);
+        if self.data.len() < end {
+            grow(&mut self.data, end);
+        }
+        self.data[off..end].copy_from_slice(bytes);
+        self.unsynced.push((off as u64, bytes.len()));
+    }
+
+    /// Cuts or grows the file to `len` (zeros), as a write of the part that changes.
+    fn truncate(&mut self, len: usize) {
+        let cur = self.data.len();
+        self.save(len, cur);
+        if len > cur {
+            grow(&mut self.data, len);
+        } else {
+            self.data.truncate(len);
+        }
+        self.unsynced.push((len.min(cur) as u64, len.abs_diff(cur)));
+    }
+
+    /// Goes back to the durable contents.
     fn revert(&mut self) {
-        let durable_len = self.durable.len();
-        for &(off, len) in &self.unsynced {
-            let lo = (off as usize).min(durable_len).min(self.data.len());
-            let hi = (off as usize + len).min(durable_len).min(self.data.len());
-            self.data[lo..hi].copy_from_slice(&self.durable[lo..hi]);
+        if self.data.len() < self.durable_len {
+            grow(&mut self.data, self.durable_len);
         }
-        // What grew beyond the durable part is cut; what shrank comes back with zeros the previous
-        // loop no longer reaches, so the rest of the durable contents is copied.
-        let visible = self.data.len();
-        self.data.resize(durable_len, 0);
-        if visible < durable_len {
-            self.data[visible..].copy_from_slice(&self.durable[visible..]);
+        for (off, bytes) in self.undo.drain(..).rev() {
+            self.data[off..off + bytes.len()].copy_from_slice(&bytes);
         }
+        self.data.truncate(self.durable_len);
         self.unsynced.clear();
     }
 
-    /// Makes the pending part durable copying only its ranges.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the simulated files live in memory, so their offsets and lengths fit usize"
-    )]
+    /// Makes the visible contents durable.
     fn sync(&mut self) {
-        self.durable.resize(self.data.len(), 0);
-        for &(off, len) in &self.unsynced {
-            let lo = (off as usize).min(self.data.len());
-            let hi = (off as usize + len).min(self.data.len());
-            self.durable[lo..hi].copy_from_slice(&self.data[lo..hi]);
-        }
+        self.durable_len = self.data.len();
+        self.undo.clear();
         self.unsynced.clear();
     }
+
+    /// Flips byte `at` of the durable contents, and of the visible ones when the file reaches it.
+    fn corrupt(&mut self, at: usize) {
+        // The first change since the sync that overwrote it holds the durable byte.
+        if let Some((off, bytes)) =
+            self.undo.iter_mut().find(|(off, b)| *off <= at && at < off + b.len())
+        {
+            bytes[at - *off] ^= 0xff;
+        }
+        if let Some(b) = self.data.get_mut(at) {
+            *b ^= 0xff;
+        }
+    }
+}
+
+/// Grows `v` to `len` with zeros, reserving at most an eighth more than it holds: a file of tens
+/// of MiB does not take twice its size, as doubling the buffer would.
+fn grow(v: &mut Vec<u8>, len: usize) {
+    if len > v.capacity() {
+        let want = len.max(v.len() + v.len() / 8);
+        v.reserve_exact(want - v.len());
+    }
+    v.resize(len, 0);
 }
 
 /// Simulated disk (see the module documentation).
@@ -230,13 +279,10 @@ impl SimDisk {
         };
         let inode = self.inodes.get_mut(&ino).expect("a durable name has its inode");
         let at = offset as usize;
-        if at >= inode.durable.len() {
+        if at >= inode.durable_len {
             return false;
         }
-        inode.durable[at] ^= 0xff;
-        if let Some(b) = inode.data.get_mut(at) {
-            *b ^= 0xff;
-        }
+        inode.corrupt(at);
         true
     }
 
@@ -288,6 +334,8 @@ impl SimDisk {
             let last_write = inode.data[lo_all..hi_all].to_vec();
             inode.revert();
             if rng.chance(self.cfg.torn_write_probability) {
+                // The sectors that persist go over the durable contents, which are now the
+                // visible ones.
                 let first = off / SECTOR;
                 let last = (off + len).div_ceil(SECTOR);
                 for s in first..last {
@@ -299,13 +347,13 @@ impl SimDisk {
                     if lo >= hi {
                         continue;
                     }
-                    if inode.durable.len() < hi {
-                        inode.durable.resize(hi, 0);
+                    if inode.data.len() < hi {
+                        grow(&mut inode.data, hi);
                     }
-                    inode.durable[lo..hi].copy_from_slice(&last_write[lo - lo_all..hi - lo_all]);
+                    inode.data[lo..hi].copy_from_slice(&last_write[lo - lo_all..hi - lo_all]);
                     self.stats.torn_sectors += 1;
                 }
-                inode.data.clone_from(&inode.durable);
+                inode.sync();
             }
         }
     }
@@ -351,10 +399,8 @@ impl SimDisk {
                 }
                 let ino = self.next_inode;
                 self.next_inode += 1;
-                let data = vec![0u8; *prealloc as usize];
                 // The reservation is considered durable together with the directory entry.
-                self.inodes
-                    .insert(ino, Inode { durable: data.clone(), data, unsynced: Vec::new() });
+                self.inodes.insert(ino, Inode::zeros(*prealloc as usize));
                 self.names.insert(path.clone(), ino);
                 self.dirty_names.insert(path.clone());
                 self.open.insert(*file, ino);
@@ -371,12 +417,7 @@ impl SimDisk {
                 if end > cur && !self.grow_ok((end - cur) as u64) {
                     return Err(IoErrno::NoSpace);
                 }
-                let inode = self.inode_of(*file)?;
-                if inode.data.len() < end {
-                    inode.data.resize(end, 0);
-                }
-                inode.data[*offset as usize..end].copy_from_slice(data);
-                inode.unsynced.push((*offset, data.len()));
+                self.inode_of(*file)?.write(*offset as usize, data);
                 self.stats.bytes_written += data.len() as u64;
                 Ok(None)
             }
@@ -417,10 +458,8 @@ impl SimDisk {
                 if len > cur && !self.grow_ok((len - cur) as u64) {
                     return Err(IoErrno::NoSpace);
                 }
-                let inode = self.inode_of(*file)?;
-                inode.data.resize(len, 0);
                 // Modelled as a write of the part that changes (durable after `Sync`).
-                inode.unsynced.push((len.min(cur) as u64, len.abs_diff(cur)));
+                self.inode_of(*file)?.truncate(len);
                 Ok(None)
             }
             IoOp::Rename { from, to } => {

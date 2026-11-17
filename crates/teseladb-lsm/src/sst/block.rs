@@ -58,6 +58,18 @@ pub(crate) fn frame(payload: &[u8], method: Method<'_>) -> Vec<u8> {
     assemble(&body, code, &[0; ENCRYPTION])
 }
 
+/// [`frame`] of `payload` stored as it is, in clear (code 0), appended to `out` without a copy
+/// of its own: a meta block of a file in clear, whose payload may be tens of MiB (an index of
+/// long keys).
+pub(crate) fn frame_plain_into(out: &mut Vec<u8>, payload: &[u8]) {
+    let start = out.len();
+    out.extend_from_slice(payload);
+    out.push(COMPRESSION_NONE);
+    out.extend_from_slice(&[0; ENCRYPTION]);
+    let crc = crc32c(&out[start..]);
+    out.extend_from_slice(&crc.to_le_bytes());
+}
+
 /// The body of a block and its compression code: `payload` itself (code 0) when `method` does
 /// not shrink it.
 pub(crate) fn compressed(payload: &[u8], method: Method<'_>) -> (Vec<u8>, u8) {
@@ -264,9 +276,17 @@ impl BlockBuilder {
     ) {
         let whole = form == 0;
         let restart_at = self.restarts.last().map_or(0, |r| *r as usize);
+        // A version of a long key after another of it shares the key with it instead of starting
+        // a restart point for the bytes before it, which are mostly that key: the versions of
+        // an index entry of 15 MiB take it once ([`super::separator::LONG_KEY`]).
+        // The lengths first: a block of the index or of the tests may hold keys shorter than a
+        // version suffix.
+        let same_long = key.len() > super::separator::LONG_KEY + VERSION_LEN
+            && self.last.len() == key.len()
+            && logical(&self.last) == logical(key);
         let restart = self.since_restart == self.interval
             || self.restarts.is_empty()
-            || self.buf.len() - restart_at >= RESTART_BYTES;
+            || (self.buf.len() - restart_at >= RESTART_BYTES && !same_long);
         let shared = if restart {
             self.restarts.push(self.buf.len() as u32);
             self.since_restart = 0;

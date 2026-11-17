@@ -16,7 +16,7 @@ use super::filter::Filter;
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::pgm::{self, Pgm};
 use super::zone::ZoneMap;
-use super::{ALIGN, Bad, align_down, align_up, get_varint};
+use super::{ALIGN, Bad, align_down, align_up, get_varint, separator};
 use crate::entry;
 
 /// An open SST.
@@ -28,8 +28,11 @@ pub struct Table {
     pub size: u64,
     /// Properties.
     pub props: Props,
-    /// The last internal key of each data block.
+    /// The last internal key of each data block, or in a file of version 2 a short key at or
+    /// above it and below the next block's first key ([`separator`]).
     last_keys: Vec<Box<[u8]>>,
+    /// Whether its index may hold short keys (version 2).
+    short_keys: bool,
     /// Where each data block starts and ends, in turn, as Elias-Fano (FR-040): the blocks follow
     /// one another, so the sequence never decreases.
     bounds: EliasFano,
@@ -108,10 +111,49 @@ impl Table {
         key: Option<Arc<FileKey>>,
         dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
     ) -> Result<Table, Bad> {
-        if !size.is_multiple_of(ALIGN as u64) || meta_start + meta.len() as u64 != size {
+        if meta_start + meta.len() as u64 != size {
             return Err(Bad);
         }
         let footer = Table::footer(meta)?;
+        let stored = |offset: u64, end: u64| {
+            Some(meta.slice((offset - meta_start) as usize..(end - meta_start) as usize))
+        };
+        Table::with_blocks(number, (size, meta_start), footer, key, dict_of, &stored)
+    }
+
+    /// [`Table::with_key`] of a file just written, from the writes of its meta blocks and its
+    /// footer page (`pieces`, in order, each at its offset), read where they are.
+    pub(crate) fn from_written(
+        number: u64,
+        size: u64,
+        meta_start: u64,
+        pieces: &[(u64, Bytes)],
+        key: Option<Arc<FileKey>>,
+        dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
+    ) -> Result<Table, Bad> {
+        let (_, last) = pieces.last().ok_or(Bad)?;
+        let footer = Table::footer(last)?;
+        let stored = |offset: u64, end: u64| {
+            let (at, piece) =
+                pieces.iter().find(|(at, b)| *at <= offset && end <= at + b.len() as u64)?;
+            Some(piece.slice((offset - at) as usize..(end - at) as usize))
+        };
+        Table::with_blocks(number, (size, meta_start), footer, key, dict_of, &stored)
+    }
+
+    /// The table of a file of `size` bytes whose meta blocks start at `meta_start`, with `footer`,
+    /// whose stored bytes `[offset, end)` within its meta blocks `stored` gives.
+    fn with_blocks(
+        number: u64,
+        (size, meta_start): (u64, u64),
+        footer: Footer,
+        key: Option<Arc<FileKey>>,
+        dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
+        stored: &dyn Fn(u64, u64) -> Option<Bytes>,
+    ) -> Result<Table, Bad> {
+        if !size.is_multiple_of(ALIGN as u64) || size < meta_start + ALIGN as u64 {
+            return Err(Bad);
+        }
         if footer.wrapped.is_some() != key.is_some() {
             return Err(Bad);
         }
@@ -124,7 +166,7 @@ impl Table {
             if end > footer_page {
                 return Err(Bad);
             }
-            let stored = meta.slice((h.offset - meta_start) as usize..(end - meta_start) as usize);
+            let stored = stored(h.offset, end).ok_or(Bad)?;
             unframe_with(&stored, key.as_deref().map(|k| (k, h.offset)), None)
         };
         if footer.filter.offset != meta_start {
@@ -176,6 +218,7 @@ impl Table {
             }
         };
         Ok(Table {
+            short_keys: footer.short_keys,
             zones,
             columns,
             number,
@@ -245,9 +288,16 @@ impl Table {
         (i < self.last_keys.len()).then_some(i)
     }
 
-    /// The last internal key of data block `i`.
+    /// The index key of data block `i`: its last internal key, or a short key at or above it and
+    /// below the next block's first key when [`Table::exact_last`] says it may not be.
     pub(crate) fn last_key(&self, i: usize) -> &[u8] {
         &self.last_keys[i]
+    }
+
+    /// Whether [`Table::last_key`] of block `i` is the block's last internal key: always in a file
+    /// of version 1, and in one of version 2 unless it has the version of a short key.
+    pub(crate) fn exact_last(&self, i: usize) -> bool {
+        !self.short_keys || !separator::may_be_short(&self.last_keys[i])
     }
 
     /// The logical keys data block `i` may hold, both included: from the logical key of the
@@ -374,8 +424,11 @@ mod tests {
             end: b"zz".to_vec(),
             ts: Hlc { physical: 7, logical: 0 },
         };
-        let (_, c, table) = w.finish(3, vec![t]).unwrap();
-        bytes.extend_from_slice(&c);
+        let (chunks, table) = w.finish(3, vec![t]).unwrap();
+        for (at, c) in chunks {
+            assert_eq!(at, bytes.len() as u64, "the writes follow one another");
+            bytes.extend_from_slice(&c);
+        }
         (bytes, table)
     }
 
@@ -405,8 +458,10 @@ mod tests {
                 bytes.extend_from_slice(&c);
             }
         }
-        let (_, c, _) = w.finish(3, Vec::new()).unwrap();
-        bytes.extend_from_slice(&c);
+        let (chunks, _) = w.finish(3, Vec::new()).unwrap();
+        for (_, c) in chunks {
+            bytes.extend_from_slice(&c);
+        }
         bytes
     }
 
@@ -586,7 +641,8 @@ mod tests {
             crate::sst::pad(&mut data);
         }
         let start = data.len() as u64;
-        let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
+        let ok =
+            |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None, short_keys: false };
         let (size, meta) = crafted(start, &entries, ok);
         let t = Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).unwrap();
         for (i, k) in [&b"b"[..], b"m"].into_iter().enumerate() {
@@ -612,7 +668,8 @@ mod tests {
     #[test]
     fn impossible_handles_with_right_checksums_are_refused() {
         let start = 2 * ALIGN as u64;
-        let ok = |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None };
+        let ok =
+            |f, p, i| Footer { filter: f, props: p, index: i, wrapped: None, short_keys: false };
         let good = vec![(ikey(b"m"), handle(0, 100))];
         let (size, meta) = crafted(start, &good, ok);
         assert!(Table::from_meta(1, size, start, &meta, (None, &Dictionaries::new())).is_ok());
@@ -622,18 +679,21 @@ mod tests {
                 props: Handle { offset: 0, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
             &|f, p: Handle, i| Footer {
                 filter: f,
                 props: Handle { offset: p.offset + 1, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
             &|f, p: Handle, i| Footer {
                 filter: f,
                 props: Handle { len: 1 << 20, ..p },
                 index: i,
                 wrapped: None,
+                short_keys: false,
             },
         ];
         for (n, footer) in footers.iter().enumerate() {

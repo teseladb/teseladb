@@ -31,8 +31,10 @@ use crate::entry::{self, Kind, RangeTombstone};
 use crate::error::LsmError;
 use crate::gc::{self, Candidate, GcTable};
 use crate::ingest::FileRef;
+use crate::jobs::END_STEP;
 use crate::jobs::{
     ManifestFile, Next, Outcome, STEP_BYTES, ValueSink, attach_values, file_metas, write_at,
+    write_end,
 };
 use crate::manifest::Edit;
 use crate::range_tombstone;
@@ -393,6 +395,15 @@ impl Output {
     }
 }
 
+/// A file whose versions are all written, its end prepared in steps (FR-030): the filter of a
+/// file of a million keys took its core 65 ms at once.
+#[derive(Debug)]
+struct Closing {
+    out: Output,
+    /// The range tombstones it ends with.
+    pieces: Vec<RangeTombstone>,
+}
+
 /// A version's value as the merge holds it (FR-034).
 #[derive(Clone, Debug)]
 enum Val {
@@ -427,6 +438,8 @@ enum Reading {
 #[derive(Debug, PartialEq, Eq)]
 enum Stage {
     Merge,
+    /// Every version is written: the files' ends are prepared, then the directory is synced.
+    Close,
     Edit,
     Done,
 }
@@ -444,6 +457,8 @@ pub(crate) struct CompactJob {
     /// Which of an output and its history file each version goes to.
     split: Split,
     out: Option<Output>,
+    /// The files whose ends are being prepared, oldest first.
+    closing: VecDeque<Closing>,
     finished: Vec<Table>,
     started: bool,
     queued: VecDeque<IoOp>,
@@ -509,6 +524,7 @@ impl CompactJob {
             versions: Vec::new(),
             split: Split::default(),
             out: None,
+            closing: VecDeque::new(),
             finished: Vec::new(),
             started: false,
             queued: VecDeque::new(),
@@ -666,29 +682,46 @@ impl CompactJob {
         self.out = Some(Output { number, writer, history: None, values, known, lo });
     }
 
+    /// Ends the output in hand at `hi`: its value file now, the rest in steps
+    /// ([`CompactJob::close_step`]).
     fn finish_output(&mut self, hi: Option<&[u8]>) {
         let Some(mut o) = self.out.take() else { return };
         if let Some(v) = o.values.finish(&mut self.queued) {
             o.known.insert(v.number, v);
         }
-        let find = |n| o.known.get(&n).expect("a value file the output refers to").clone();
         let pieces = range_tombstone::pieces(&self.surviving, o.lo.as_deref(), hi);
+        self.closing.push_back(Closing { out: o, pieces });
+    }
+
+    /// One step of the end of the oldest file whose versions are all written (FR-030). Whether
+    /// it ended, with its last writes and syncs queued.
+    fn close_step(&mut self) -> bool {
+        let Some(Closing { out: o, .. }) = self.closing.front_mut() else { return false };
+        if !o.writer.prepare(END_STEP) {
+            return false;
+        }
+        if let Some((_, h)) = &mut o.history
+            && !h.prepare(END_STEP)
+        {
+            return false;
+        }
+        let Closing { out: o, pieces } = self.closing.pop_front().expect("checked above");
+        let find = |n| o.known.get(&n).expect("a value file the output refers to").clone();
         let numbers = o.writer.value_numbers();
-        let (at, chunk, mut table) =
+        let (chunks, mut table) =
             o.writer.finish(o.number, pieces).expect("an output has versions or tombstones");
         attach_values(&mut table, &numbers, find);
-        self.queued.push_back(write_at(o.number, at, chunk));
-        self.queued.push_back(IoOp::Sync { file: file_id(o.number), batch: 0 });
+        write_end(o.number, chunks, &mut self.queued);
         if let Some((number, h)) = o.history {
             let numbers = h.value_numbers();
-            let (at, chunk, mut history) =
+            let (chunks, mut history) =
                 h.finish(number, Vec::new()).expect("a history file has versions");
             attach_values(&mut history, &numbers, find);
-            self.queued.push_back(write_at(number, at, chunk));
-            self.queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+            write_end(number, chunks, &mut self.queued);
             table.history = Some(Arc::new(history));
         }
         self.finished.push(table);
+        true
     }
 
     /// Starts the history file of the output in hand (FR-031).
@@ -916,10 +949,7 @@ impl CompactJob {
                         Some(Output { number: n, writer, history: None, values, known, lo: None });
                 }
                 self.finish_output(None);
-                if !self.finished.is_empty() {
-                    self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
-                }
-                self.stage = Stage::Edit;
+                self.stage = Stage::Close;
                 return Ok(());
             };
             // An export passes over what is outside its interval before giving bases: a version
@@ -1001,12 +1031,25 @@ impl CompactJob {
             if let Some(op) = self.queued.pop_front() {
                 return Ok(Next::Op(op));
             }
+            // The end of a file written goes first, a step a call: the merge waits for it.
+            if !self.closing.is_empty() {
+                if !self.close_step() {
+                    return Ok(Next::More);
+                }
+                continue;
+            }
             match self.stage {
                 Stage::Merge => {
                     self.merge(next_file)?;
                     if self.queued.is_empty() && matches!(self.stage, Stage::Merge) {
                         return Ok(Next::More);
                     }
+                }
+                Stage::Close => {
+                    if !self.finished.is_empty() {
+                        self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });
+                    }
+                    self.stage = Stage::Edit;
                 }
                 Stage::Edit if self.export.is_some() => {
                     for t in &self.finished {

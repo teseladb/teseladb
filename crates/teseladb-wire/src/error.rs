@@ -201,6 +201,8 @@ codes! {
     TRANSACTION_TOO_LARGE = 257, "TransactionTooLarge";
     /// Overload.
     EXCEEDED_TIME_LIMIT = 262, "ExceededTimeLimit";
+    /// A write that would take more memory than its range's core has free.
+    EXCEEDED_MEMORY_LIMIT = 146, "ExceededMemoryLimit";
     /// A sort over 100 MiB without `allowDiskUse`.
     QUERY_EXCEEDED_MEMORY_LIMIT = 292, "QueryExceededMemoryLimitNoDiskUseAllowed";
     /// `OP_QUERY` command other than `hello` or `isMaster`.
@@ -715,6 +717,17 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
             false,
         ),
         RangeError::TooLarge => (CommandError::new(BSON_OBJECT_TOO_LARGE, ENTRY_TOO_LARGE), false),
+        RangeError::ExceededMemory { needed, free } => (
+            CommandError::new(
+                EXCEEDED_MEMORY_LIMIT,
+                format!(
+                    "the write needs about {} MiB of its range's core and {} MiB are free",
+                    needed >> 20,
+                    free >> 20
+                ),
+            ),
+            false,
+        ),
         RangeError::Unavailable => {
             (CommandError::new(INTERRUPTED_AT_SHUTDOWN, "interrupted at shutdown"), true)
         }
