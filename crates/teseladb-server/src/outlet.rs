@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future};
+use teseladb::engine::core::reactor::internal::at_destroy;
 use teseladb::engine::core::reactor::internal_misc::run_in_background;
 use teseladb::engine::core::reactor::later;
 use teseladb::engine::core::smp::Smp;
@@ -305,6 +306,11 @@ pub fn flush_all() {
 fn home_receive(o: &Outlet, batch: Batch, waiter: Option<answer::Sender<()>>) {
     let start = HOMES.with(|h| {
         let mut h = h.borrow_mut();
+        if h.is_empty() {
+            // The writers hold the reactor's descriptors: they go while it still runs, not with
+            // the thread's locals once it is gone (a descriptor dropped then aborts the process).
+            at_destroy(|| drop(HOMES.with(|h| std::mem::take(&mut *h.borrow_mut()))));
+        }
         let home = h.entry(o.inner.id).or_insert_with(|| Home {
             writer: o.inner.dest.writer(),
             queue: Batch::default(),

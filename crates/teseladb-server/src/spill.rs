@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use teseladb::engine::core::reactor::internal::at_destroy;
 use teseladb_exec::pipeline::spill::SpillStore;
 use teseladb_io::engine::disk::{DiskPlace, ShardDisk};
 use teseladb_mql::{MqlError, codes};
@@ -63,7 +64,17 @@ impl SpillDisk for ShardSpillDisk {
                 let d = DiskPlace::Files(self.root.clone())
                     .on_shard()
                     .map_err(|_| failed("open the directory of", IoErrno::Io))?;
-                SHARD_DISKS.with(|m| m.borrow_mut().insert(self.root.clone(), d.clone()));
+                SHARD_DISKS.with(|m| {
+                    let mut m = m.borrow_mut();
+                    if m.is_empty() {
+                        // The executors go while the reactor still runs, not with the thread's
+                        // locals once it is gone.
+                        at_destroy(|| {
+                            drop(SHARD_DISKS.with(|m| std::mem::take(&mut *m.borrow_mut())))
+                        });
+                    }
+                    m.insert(self.root.clone(), d.clone());
+                });
                 d
             }
         };
