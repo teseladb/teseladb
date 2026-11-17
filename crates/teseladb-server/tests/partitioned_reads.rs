@@ -70,3 +70,36 @@ fn a_client_s_aggregation_sees_each_write_it_was_answered() {
         assert_eq!(count_and_sum(&mut c), (n, v), "round {round}");
     }
 }
+
+#[test]
+fn a_client_s_aggregation_sees_each_transaction_over_partitions_it_committed() {
+    // A transaction's writes in several partitions go across ranges: the range of its record
+    // answers the commit, and the next read still sees every document (control_agg of p7, p8).
+    let config = NodeConfig { cores: Some(4), ..common::config(Vec::new()) };
+    let node = Node::start(config, DiskPlace::Memory, None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    assert!(ok(&c.run("app", Document::new().with("create", "c"))));
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![7; 16] });
+    let mut n = 0i64;
+    for round in 0..ROUNDS {
+        let txn = |cmd: Document, start: bool| {
+            let cmd = cmd.with("lsid", lsid.clone()).with("txnNumber", i64::from(round) + 1);
+            let cmd = if start { cmd.with("startTransaction", true) } else { cmd };
+            cmd.with("autocommit", false)
+        };
+        let docs: Vec<Value> = (0..4)
+            .map(|k| {
+                let id = round * 4 + k;
+                Value::Document(Document::new().with("_id", id).with("c", 1).with("v", 0))
+            })
+            .collect();
+        let insert = Document::new().with("insert", "c").with("documents", Value::Array(docs));
+        let r = c.run("app", txn(insert, true));
+        assert!(ok(&r), "{r:?}");
+        let r = c.run("admin", txn(Document::new().with("commitTransaction", 1), false));
+        assert!(ok(&r), "{r:?}");
+        n += 4;
+        assert_eq!(count_and_sum(&mut c).0, n, "round {round}");
+    }
+}
