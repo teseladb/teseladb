@@ -10,11 +10,14 @@
 //! its entries are the documents themselves and reading them all is the cost the statistics
 //! exist to avoid. A field two indexes share is read from the first one.
 
+use std::time::Instant;
+
 use teseladb_bson::Value;
 use teseladb_keys::space::KeyBuilder;
 use teseladb_meta::catalog::CollectionEntry;
 use teseladb_plan::stats;
 use teseladb_range::read::ReadConcern;
+use teseladb_stages::{self as stages, Stage};
 
 use super::Backend;
 use super::plan_exec::{self, PlanIndex};
@@ -36,6 +39,33 @@ type Span = (Vec<u8>, Vec<u8>);
 /// statistics cannot be read now (no leader for a range) waits for the next pass. Gives the
 /// ranges it published.
 pub fn pass<B: Backend + ?Sized>(backend: &mut B) -> Result<usize, CommandError> {
+    pass_pausing(backend, &mut || {})
+}
+
+/// [`pass`], calling `pause` between the steps of its reads and builds, where the caller may
+/// give the CPU to other work (023 FR-012): a range of hundreds of thousands of index entries
+/// is minutes of comparisons. Each pass, read and build is timed in the stages `stats_pass`,
+/// `stats_read` and `stats_build`.
+pub fn pass_pausing<B: Backend + ?Sized>(
+    backend: &mut B,
+    pause: &mut dyn FnMut(),
+) -> Result<usize, CommandError> {
+    let started = Instant::now();
+    let out = ranges(backend, pause);
+    if matches!(out, Ok(n) if n > 0) {
+        stages::record(Stage::StatsPass, nanos_since(started));
+    }
+    out
+}
+
+fn nanos_since(t: Instant) -> u64 {
+    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn ranges<B: Backend + ?Sized>(
+    backend: &mut B,
+    pause: &mut dyn FnMut(),
+) -> Result<usize, CommandError> {
     // The routing table first: a pass that cannot read it leaves the ranges marked.
     let live = backend.route_entries()?;
     let due = stats::take_compacted();
@@ -55,7 +85,7 @@ pub fn pass<B: Backend + ?Sized>(backend: &mut B) -> Result<usize, CommandError>
         let span = (start, end);
         let mut read = Ok(());
         for (_, coll) in collections.iter().filter(|(_, c)| holds(&span, c)) {
-            read = refresh(backend, coll, range, &span);
+            read = refresh(backend, coll, (range, &span), pause);
             if read.is_err() {
                 break;
             }
@@ -91,12 +121,13 @@ fn cut((a0, a1): (&[u8], &[u8]), (b0, b1): (&[u8], &[u8])) -> Span {
 fn refresh<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
-    range: u64,
-    span: &Span,
+    (range, span): (u64, &Span),
+    pause: &mut dyn FnMut(),
 ) -> Result<(), CommandError> {
     if !plan_exec::plannable_kind(coll)? {
         return Ok(());
     }
+    let started = Instant::now();
     let (first, past) = documents_of(coll);
     let docs = cut((&first, &past), (&span.0, &span.1));
     let documents = match backend.doc_tally((coll.tenant, coll.id), (&docs.0, &docs.1))? {
@@ -108,19 +139,27 @@ fn refresh<B: Backend + ?Sized>(
     for index in indexes.iter().filter(|i| i.gives_statistics()) {
         let (first, past) = index.span((coll.tenant, coll.id));
         let within = cut((&first, &past), (&span.0, &span.1));
-        let Some(entries) = plan_exec::index_values(backend, coll, index, &within)? else {
+        let Some(mut entries) = plan_exec::index_values(backend, coll, index, &within)? else {
             continue;
         };
+        pause();
         for (i, path) in index.paths().enumerate() {
             if fields.iter().any(|(p, _)| p == path) {
                 continue;
             }
-            let values = entries.iter().filter_map(|e| e.get(i).cloned()).collect();
+            // Each position is taken once: the values move out of the entries.
+            let values = entries
+                .iter_mut()
+                .filter_map(|e| e.get_mut(i).map(|v| std::mem::replace(v, Value::Null)))
+                .collect();
             fields.push((path.to_owned(), values));
         }
     }
+    stages::record(Stage::StatsRead, nanos_since(started));
+    let started = Instant::now();
     let prefix = KeyBuilder::collection_start(coll.tenant, coll.id).as_bytes().to_vec();
-    stats::recompute_range(&prefix, (range, span.clone()), documents, fields);
+    stats::recompute_range_pausing(&prefix, (range, span.clone()), documents, fields, pause);
+    stages::record(Stage::StatsBuild, nanos_since(started));
     Ok(())
 }
 
