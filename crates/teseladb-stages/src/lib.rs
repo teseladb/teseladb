@@ -126,11 +126,17 @@ pub enum Stage {
     StatsRead,
     /// The build of one range's statistics from the values read: their sort and histograms.
     StatsBuild,
+    /// A write of a client's command on its connection's shard, from the request sent to its
+    /// range's core to the answer back: both hops between the shards with the range's work.
+    WriteAsk,
+    /// Entries of a core's Raft log from the first one appended to its batch until the batch's
+    /// sync is handed to the disk or to the device log.
+    LogAppendToSyncOut,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 44] = [
+    pub const ALL: [Stage; 46] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -175,6 +181,8 @@ impl Stage {
         Stage::StatsPass,
         Stage::StatsRead,
         Stage::StatsBuild,
+        Stage::WriteAsk,
+        Stage::LogAppendToSyncOut,
     ];
 
     /// Its label in the metrics.
@@ -224,6 +232,8 @@ impl Stage {
             Stage::StatsPass => "stats_pass",
             Stage::StatsRead => "stats_read",
             Stage::StatsBuild => "stats_build",
+            Stage::WriteAsk => "write_ask",
+            Stage::LogAppendToSyncOut => "log_append_to_sync_out",
         }
     }
 }

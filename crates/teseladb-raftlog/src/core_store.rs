@@ -143,6 +143,8 @@ struct InFlight {
     tickets: Vec<Ticket>,
     snaps: Vec<PendingSnap>,
     started_at: Nanos,
+    /// When its first request came in, until its first sync is handed out.
+    opened_at: Option<Nanos>,
     /// It only writes the WAL in its current segment and syncs it: it may go out while the
     /// batches before it wait for their syncs.
     appends_only: bool,
@@ -513,6 +515,7 @@ impl CoreStore {
     /// go: the first one in flight, or one that only appends while every batch before it only
     /// waits for its syncs.
     fn next_op(&mut self) -> Option<IoOp> {
+        let now = self.now;
         let mut before_only_sync = true;
         for (k, f) in self.inflight.iter_mut().enumerate() {
             if (k == 0 || (f.appends_only && before_only_sync))
@@ -520,6 +523,12 @@ impl CoreStore {
                 && let Some((op, state)) = phase.iter_mut().find(|(_, st)| *st == OpState::Waiting)
             {
                 *state = OpState::Delivered;
+                if matches!(op, IoOp::Sync { .. })
+                    && let Some(opened) = f.opened_at.take()
+                {
+                    let waited = now.saturating_since(opened).0;
+                    teseladb_stages::record(teseladb_stages::Stage::LogAppendToSyncOut, waited);
+                }
                 return Some(op.clone());
             }
             before_only_sync = before_only_sync && f.only_syncs_left();
@@ -609,6 +618,7 @@ impl CoreStore {
             tickets,
             snaps: batch.snaps,
             started_at: now,
+            opened_at: batch.opened_at.or(Some(now)),
             appends_only,
         });
         true
