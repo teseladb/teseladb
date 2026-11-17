@@ -132,7 +132,7 @@ fn refresh<B: Backend + ?Sized>(
     let docs = cut((&first, &past), (&span.0, &span.1));
     let documents = match backend.doc_tally((coll.tenant, coll.id), (&docs.0, &docs.1))? {
         Some((n, _, _)) => n,
-        None => counted(backend, &docs)?,
+        None => counted(backend, &docs, pause)?,
     };
     let indexes = plan_exec::plan_indexes(backend, coll)?;
     let mut fields: Vec<(String, Vec<Value>)> = Vec::new();
@@ -163,13 +163,18 @@ fn refresh<B: Backend + ?Sized>(
     Ok(())
 }
 
-/// The documents of `span`, counted by reading them.
-fn counted<B: Backend + ?Sized>(backend: &mut B, span: &Span) -> Result<u64, CommandError> {
+/// The documents of `span`, counted by reading them, with a pause after each chunk.
+fn counted<B: Backend + ?Sized>(
+    backend: &mut B,
+    span: &Span,
+    pause: &mut dyn FnMut(),
+) -> Result<u64, CommandError> {
     let mut from = span.0.clone();
     let mut n = 0u64;
     loop {
         let rows = backend.scan(&from, &span.1, COUNT_CHUNK, ReadConcern::Local)?;
         n += rows.iter().filter(|(_, v)| teseladb_keys::stored::raw(v).is_ok()).count() as u64;
+        pause();
         match rows.last() {
             Some((k, _)) if rows.len() == COUNT_CHUNK => from = [k.as_slice(), &[0]].concat(),
             _ => return Ok(n),
