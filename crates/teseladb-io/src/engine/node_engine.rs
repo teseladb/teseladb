@@ -401,46 +401,43 @@ impl NodeEngine {
         // waits on the shard's disk executor through the synchronous `Disk` (023 FR-010). It
         // runs on a deep stack of its own, as a client's command does ([`super::stacks`]): the
         // engine thread's stack is 128 KiB of the shard's memory, and a recovery that went past
-        // it wrote over the blocks beside it, which crashed the node later in an allocation.
+        // it wrote over the blocks beside it, which crashed the node later in an allocation. The
+        // driver is made there too: it takes the logic, which may be large, by value.
         let sent = post.clone().post(move || {
             drop(in_thread(move || {
-                let mut build = Some(build);
-                let mut built = None;
-                teseladb_sys::deep_stack::run(super::stacks::stack_size(), &mut |_| {
-                    built = build.take().map(|b| b());
+                super::stacks::deep(move || {
+                    let (logic, mut disk, mut log) = match build() {
+                        Ok(v) => v,
+                        Err(e) => return drop(built_tx.send(Err(e))),
+                    };
+                    let io = Rc::new(CoreIo::default());
+                    let inbox = Rc::new(Inbox::<L::Msg>::new());
+                    disk.attach(DiskWaker::new(io.clone()));
+                    if let Some(port) = log.as_mut() {
+                        let back = post.clone();
+                        port.attach(Box::new(move |d| back.post_log(Instant::now(), d)));
+                    }
+                    let net = Net::new(cfg.hello, cfg.tls, cfg.seed, io.clone(), gate, cfg.origin);
+                    let mut driver = Driver::new(
+                        logic,
+                        disk,
+                        net,
+                        io.clone(),
+                        inbox.clone(),
+                        log,
+                        cfg.tick,
+                        cfg.origin,
+                    );
+                    post::install(io, inbox);
+                    let _ = built_tx.send(Ok(()));
+                    drop(make_coroutine(async move {
+                        driver.run().await;
+                        post::uninstall();
+                        let Driver { logic, disk, disk_gone, .. } = driver;
+                        let _ = done_tx.send(finish(logic, disk, disk_gone));
+                        Ok::<(), ExceptionPtr>(())
+                    }));
                 });
-                let built = built.expect("the deep stack runs its call once");
-                let (logic, mut disk, mut log) = match built {
-                    Ok(v) => v,
-                    Err(e) => return drop(built_tx.send(Err(e))),
-                };
-                let io = Rc::new(CoreIo::default());
-                let inbox = Rc::new(Inbox::<L::Msg>::new());
-                disk.attach(DiskWaker::new(io.clone()));
-                if let Some(port) = log.as_mut() {
-                    let back = post.clone();
-                    port.attach(Box::new(move |d| back.post_log(Instant::now(), d)));
-                }
-                let net = Net::new(cfg.hello, cfg.tls, cfg.seed, io.clone(), gate, cfg.origin);
-                let mut driver = Driver::new(
-                    logic,
-                    disk,
-                    net,
-                    io.clone(),
-                    inbox.clone(),
-                    log,
-                    cfg.tick,
-                    cfg.origin,
-                );
-                post::install(io, inbox);
-                let _ = built_tx.send(Ok(()));
-                drop(make_coroutine(async move {
-                    driver.run().await;
-                    post::uninstall();
-                    let Driver { logic, disk, disk_gone, .. } = driver;
-                    let _ = done_tx.send(finish(logic, disk, disk_gone));
-                    Ok::<(), ExceptionPtr>(())
-                }));
             }))
         });
         if !sent {
