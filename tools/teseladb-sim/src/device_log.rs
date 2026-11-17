@@ -57,6 +57,39 @@ impl World {
         }
         let mut ops = Vec::new();
         answers.extend(log.next(&mut n.log_disk, &mut ops));
+        // The next file, made ahead as the node's writer makes it apart from its records: here at
+        // once, on the same disk, whose failures and full space it meets as the records do.
+        if let Some(job) = log.spare_job() {
+            let made = job.ops.into_iter().try_for_each(|op| match n.log_disk.execute(op) {
+                IoDone::Err { errno, .. } => Err(errno),
+                _ => Ok(()),
+            });
+            log.spare_done(job.seq, made);
+        }
+        // The reads of a copy forward of the oldest file, which the node's writer runs apart.
+        if let Some(job) = log.copy_job() {
+            let mut read = Ok(Vec::new());
+            for op in job.reads {
+                let (offset, len) = match &op {
+                    IoOp::ReadAt { offset, len, .. } => (*offset, *len as usize),
+                    _ => (0, 0),
+                };
+                let piece = match n.log_disk.execute(op) {
+                    IoDone::Read { data: Ok(d), .. } if d.len() == len => Ok(d),
+                    IoDone::Read { data: Err(e), .. } | IoDone::Err { errno: e, .. } => Err(e),
+                    _ => Err(teseladb_raftlog::IoErrno::Io),
+                };
+                match (piece, &mut read) {
+                    (Ok(d), Ok(v)) => v.push((offset, d)),
+                    (Err(e), r) => {
+                        *r = Err(e);
+                        break;
+                    }
+                    (Ok(_), Err(_)) => {}
+                }
+            }
+            answers.extend(log.copy_done(job.file, read));
+        }
         for op in ops {
             if matches!(op, IoOp::Sync { .. }) {
                 n.log_syncs.push(op);

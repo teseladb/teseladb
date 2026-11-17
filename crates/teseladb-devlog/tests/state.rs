@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use teseladb_devlog::state::{KEPT_FILES, LogState};
+use teseladb_devlog::state::{CopyJob, KEPT_FILES, LogState, SpareJob};
 use teseladb_raftlog::{
     Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, SimDisk, SimDiskConfig, StorageError,
 };
@@ -13,6 +13,11 @@ use teseladb_types::Rng;
 
 fn sync_op(n: u64) -> IoOp {
     IoOp::Sync { file: FileId(1), batch: n }
+}
+
+/// `len` bytes without a run of one byte long enough for a `FILL`.
+fn varied(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
 }
 
 /// What a core's WAL segments should hold.
@@ -25,6 +30,19 @@ fn put(model: &mut Model, key: (u16, u64), offset: u64, data: &[u8]) {
         w.resize(end, 0);
     }
     w[offset as usize..end].copy_from_slice(data);
+}
+
+/// Bytes as a core's WAL writes them: random records, often followed by a run of one byte as long
+/// as the padding of a batch (or shorter than a `FILL` takes).
+fn wal_bytes(rng: &mut Rng, most: u64) -> Vec<u8> {
+    let mut data = vec![0u8; rng.range(1, most) as usize];
+    rng.fill(&mut data);
+    if rng.range(0, 2) == 0 {
+        let byte = [0x5a, 0, 7][rng.range(0, 3) as usize];
+        let run = rng.range(1, 4096) as usize;
+        data.resize(data.len() + run, byte);
+    }
+    data
 }
 
 fn check(state: &mut LogState, disk: &mut dyn Disk, model: &Model) {
@@ -101,8 +119,7 @@ fn random_writes_overwrites_truncations_and_removals_survive_restarts() {
                     let cur = model[&(core, w)].len() as u64;
                     // Mostly appends, sometimes an overwrite inside.
                     let offset = if rng.range(0, 4) == 0 { rng.range(0, cur + 1) } else { cur };
-                    let mut data = vec![0u8; rng.range(1, 6000) as usize];
-                    rng.fill(&mut data);
+                    let data = wal_bytes(&mut rng, 6000);
                     s.write(core, w, offset, &data);
                     put(&mut model, (core, w), offset, &data);
                 }
@@ -145,7 +162,7 @@ fn old_files_go_and_a_quiet_core_does_not_keep_them() {
     s.sync(1, sync_op(1));
     s.flush(&mut disk);
     // Core 0 writes a lot, a segment at a time, and lets the old segments go.
-    let block = vec![7u8; 8000];
+    let block = varied(8000);
     for w in 1..60u64 {
         s.create(0, w, 0);
         for k in 0..3 {
@@ -174,7 +191,7 @@ fn nothing_is_removed_while_the_cores_recover() {
     let mut s = LogState::recover(&mut disk, 16 << 10).unwrap();
     for w in 1..10u64 {
         s.create(0, w, 0);
-        s.write(0, w, 0, &[1; 9000]);
+        s.write(0, w, 0, &varied(9000));
         s.remove(0, w);
         s.sync(0, sync_op(w));
         s.flush(&mut disk);
@@ -196,7 +213,7 @@ fn a_full_disk_waits_and_another_error_stops_the_log() {
     s.sync(0, sync_op(1));
     assert_eq!(s.flush(&mut disk).len(), 1);
     // The next file does not fit: the sync waits.
-    s.write(0, 1, 100, &[2; 20000]);
+    s.write(0, 1, 100, &varied(20000));
     s.sync(0, sync_op(2));
     assert!(s.flush(&mut disk).is_empty());
     assert!(s.disk_full());
@@ -270,8 +287,7 @@ fn a_crash_at_any_operation_keeps_every_answered_write() {
                 continue;
             }
             let w = *mine.last().unwrap();
-            let mut data = vec![0u8; rng.range(1, 5000) as usize];
-            rng.fill(&mut data);
+            let data = wal_bytes(rng, 5000);
             let at = model[&(core, w)].len() as u64;
             s.write(core, w, at, &data);
             put(&mut model, (core, w), at, &data);
@@ -444,7 +460,7 @@ fn recovery_ends_at_a_record_out_of_order_of_another_version_or_with_broken_fram
     assert_eq!(s.segments_of(0), vec![1, 2]);
     let (at, body) = second_record(&mut whole);
     let mut newer = record(2, &body);
-    newer[4] = 2;
+    newer[4] = 3;
     // A record whose flush is not the next one (a stale record of an earlier flush), one of a
     // version this build does not read, and one whose frames do not parse: the log ends before it.
     for damaged in [record(7, &body), newer, record(2, &[0xEE; 40])] {
@@ -523,7 +539,7 @@ fn writes_nobody_syncs_wait_until_enough_bytes_wait_or_a_flush() {
     // Below the bytes written ahead, nothing goes to the disk.
     assert!(s.next(&mut disk, &mut ops).is_empty());
     assert!(ops.is_empty());
-    s.write(0, 1, 5, &vec![7; WRITE_AHEAD]);
+    s.write(0, 1, 5, &varied(WRITE_AHEAD));
     assert!(s.next(&mut disk, &mut ops).is_empty());
     assert!(matches!(ops[..], [IoOp::WriteAt { .. }]));
     assert_eq!(s.buffered(), 0);
@@ -596,7 +612,7 @@ fn the_bound_outlives_the_files_that_go() {
     let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
     s.allow_tidying();
     s.offer_bound(9_000);
-    let block = vec![7u8; 8000];
+    let block = varied(8000);
     for w in 1..40u64 {
         s.create(0, w, 0);
         for k in 0..3 {
@@ -611,4 +627,388 @@ fn the_bound_outlives_the_files_that_go() {
     assert!(files(&mut disk).len() <= KEPT_FILES + 2);
     let s = LogState::recover(&mut disk, file_bytes).unwrap();
     assert_eq!(s.durable_bound(), 9_000);
+}
+
+/// A batch of a core's WAL as it writes one: its records and the padding to 4 KiB.
+fn batch(records: &[u8]) -> Vec<u8> {
+    let mut b = records.to_vec();
+    b.resize(4096, 0x5a);
+    b
+}
+
+/// The padding of a WAL batch goes as a `FILL` frame: the record takes one block instead of two,
+/// and the segment reads back byte for byte, also after a restart and after an overwrite inside the
+/// padding.
+#[test]
+fn the_padding_of_a_wal_batch_goes_as_a_fill_and_reads_back() {
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    let first = batch(&varied(600));
+    s.create(0, 1, 8192);
+    s.write(0, 1, 0, &first);
+    s.sync(0, sync_op(1));
+    assert_eq!(s.flush(&mut disk).len(), 1);
+    let st = s.stats();
+    assert_eq!((st.records, st.record_bytes), (1, 4096));
+    assert_eq!(st.filled_bytes, 4096 - 600);
+    // Head, `CREATE`, `WRITE` of the 600 bytes and `FILL`; the rest of the block is padding.
+    assert_eq!(st.padding_bytes, 4096 - (32 + 24 + (24 + 600) + 24));
+    let mut want = first.clone();
+    want.resize(8192, 0);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    // A write over part of the padding: the rest of the run stays.
+    s.write(0, 1, 1000, b"inside");
+    want[1000..1006].copy_from_slice(b"inside");
+    // A run too short for a `FILL` goes as data.
+    let short = [9u8; 10];
+    s.write(0, 1, 4096, &short);
+    want[4096..4106].copy_from_slice(&short);
+    s.sync(0, sync_op(2));
+    s.flush(&mut disk);
+    assert_eq!(s.stats().filled_bytes, 4096 - 600);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    // Truncated inside the run, then removed.
+    s.truncate(0, 1, 2000);
+    s.sync(0, sync_op(3));
+    s.flush(&mut disk);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want[..2000].to_vec());
+    s.remove(0, 1);
+    s.sync(0, sync_op(4));
+    s.flush(&mut disk);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1), Err(IoErrno::NotFound));
+}
+
+/// A quiet core whose batches are mostly padding keeps them across the copies forward of the
+/// oldest file: its `FILL` frames are copied with its bytes, and they keep their file until then.
+#[test]
+fn a_quiet_core_keeps_its_padding_across_copies_forward() {
+    let mut disk = MemDisk::new();
+    let file_bytes = 32 << 10;
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    let quiet = batch(b"quiet");
+    s.create(1, 1, 0);
+    s.write(1, 1, 0, &quiet);
+    s.sync(1, sync_op(1));
+    s.flush(&mut disk);
+    let block = varied(8000);
+    for w in 1..60u64 {
+        s.create(0, w, 0);
+        for k in 0..3 {
+            s.write(0, w, k * 8000, &block);
+            s.sync(0, sync_op(w));
+            s.flush(&mut disk);
+        }
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+    }
+    assert!(s.stats().copied_bytes > 0, "{:?}", s.stats());
+    assert!(files(&mut disk).len() <= KEPT_FILES + 2);
+    assert_eq!(s.read(&mut disk, 1, 1).unwrap(), quiet);
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    assert_eq!(s.read(&mut disk, 1, 1).unwrap(), quiet);
+}
+
+/// Rewrites the version of the header and of every record of `path` to 1, as a log written before
+/// `FILL` frames has them, with their CRCs.
+fn as_version_1(disk: &mut MemDisk, path: &Path) {
+    use teseladb_devlog::format::{BLOCK, read_record};
+    use teseladb_hash::crc32c;
+    let mut data = disk.read_all(path).unwrap();
+    data[8] = 1;
+    let crc = crc32c(&data[..24]);
+    data[24..28].copy_from_slice(&crc.to_le_bytes());
+    let mut at = BLOCK as usize;
+    while let Some(len) = read_record(&data[at..]).map(|r| r.len) {
+        data[at + 4] = 1;
+        let crc = crc32c(&data[at..at + 24]);
+        data[at + 24..at + 28].copy_from_slice(&crc.to_le_bytes());
+        at += len;
+    }
+    assert!(at > BLOCK as usize);
+    assert!(matches!(
+        disk.execute(IoOp::Open { file: FileId(901), path: path.into() }),
+        IoDone::Ok(_)
+    ));
+    let data = teseladb_types::Bytes::from_vec(data);
+    let wrote = disk.execute(IoOp::WriteAt { file: FileId(901), offset: 0, data, batch: 0 });
+    assert!(matches!(wrote, IoDone::Ok(_)));
+}
+
+/// A log of version 1 reads as before, and the log goes on after it in a file of version 2.
+#[test]
+fn a_log_of_version_1_reads_and_goes_on() {
+    let mut disk = two_records();
+    let path = files(&mut disk)[0].clone();
+    as_version_1(&mut disk, &path);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"one");
+    assert_eq!(s.read(&mut disk, 0, 2).unwrap(), b"two");
+    s.write(0, 2, 3, &batch(b"more"));
+    s.sync(0, sync_op(3));
+    assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Ok(_))]));
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    let mut want = b"two".to_vec();
+    want.extend_from_slice(&batch(b"more"));
+    assert_eq!(s.read(&mut disk, 0, 2).unwrap(), want);
+    assert_eq!(files(&mut disk).len(), 2);
+}
+
+/// Runs a file's [`SpareJob`] on `disk`: its outcome.
+fn run_job(disk: &mut dyn Disk, job: SpareJob) -> Result<(), IoErrno> {
+    job.ops.into_iter().try_for_each(|op| match disk.execute(op) {
+        IoDone::Err { errno, .. } => Err(errno),
+        _ => Ok(()),
+    })
+}
+
+/// Writes `n` records of 5000 bytes for segment 1 of core 0 from `from`, each synced.
+fn records(s: &mut LogState, disk: &mut dyn Disk, from: u64, n: u64) {
+    for i in from..from + n {
+        s.write(0, 1, i * 5000, &varied(5000));
+        s.sync(0, sync_op(i));
+        assert!(s.flush(disk).iter().all(|(_, d)| matches!(d, IoDone::Ok(_))));
+    }
+}
+
+/// The next file is made ahead once the active one is half full, and the record that does not fit
+/// goes into it without making a file; a job not finished in time, or one that failed, leaves the
+/// record to make its file as before, and the file whose turn passed holds nothing.
+#[test]
+fn the_next_file_is_made_ahead_and_a_late_or_failed_one_changes_nothing() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.create(0, 1, 0);
+    records(&mut s, &mut disk, 0, 1);
+    assert!(s.spare_job().is_none(), "the first file is not half full");
+    records(&mut s, &mut disk, 1, 2);
+    let job = s.spare_job().expect("half full");
+    assert!(s.spare_job().is_none(), "one at a time");
+    let seq = job.seq;
+    s.spare_done(seq, run_job(&mut disk, job));
+    let made = s.stats();
+    // Each record takes two blocks: three fill a file after its header.
+    records(&mut s, &mut disk, 3, 3);
+    let st = s.stats();
+    assert_eq!(st.files_made, made.files_made + 1);
+    assert_eq!(st.files_made_waiting, made.files_made_waiting, "nobody waited for it");
+    // A job still running when a record needs its file: the record makes the next one, and the
+    // late file, once made, holds nothing.
+    let late = s.spare_job().expect("half full again");
+    records(&mut s, &mut disk, 6, 1);
+    assert_eq!(s.stats().files_made_waiting, st.files_made_waiting + 1);
+    let late_seq = late.seq;
+    s.spare_done(late_seq, run_job(&mut disk, late));
+    // A job that fails: the record makes its file.
+    records(&mut s, &mut disk, 7, 2);
+    let failed = s.spare_job().expect("half full again");
+    s.spare_done(failed.seq, Err(IoErrno::Io));
+    assert_eq!(s.failed(), None);
+    records(&mut s, &mut disk, 9, 1);
+    assert_eq!(s.stats().files_made_waiting, st.files_made_waiting + 2);
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let got = again.read(&mut disk, 0, 1).unwrap();
+    assert_eq!(got.len(), 10 * 5000);
+    for i in 0..10 {
+        assert_eq!(got[i * 5000..(i + 1) * 5000], varied(5000)[..], "record {i}");
+    }
+    // The empty file goes with the old ones once the segment does.
+    again.allow_tidying();
+    again.remove(0, 1);
+    again.create(0, 2, 0);
+    records(&mut again, &mut disk, 0, 1);
+    let left = files(&mut disk);
+    assert!(
+        !left.iter().any(|p| p == &teseladb_devlog::format::segment_path(late_seq)),
+        "{left:?}"
+    );
+}
+
+/// A crash at any operation, the file made ahead included, keeps every answered write.
+#[test]
+fn a_crash_while_a_file_is_made_ahead_keeps_every_answered_write() {
+    let file_bytes = 16 << 10;
+    let run = |disk: &mut dyn Disk, acked: &mut Vec<u8>| {
+        let Ok(mut s) = LogState::recover(disk, file_bytes) else { return };
+        s.allow_tidying();
+        s.create(0, 1, 0);
+        for i in 0..12u64 {
+            let data = varied(3000);
+            s.write(0, 1, i * 3000, &data);
+            s.sync(0, sync_op(i));
+            let answers = s.flush(disk);
+            if answers.is_empty() || answers.iter().any(|(_, d)| !matches!(d, IoDone::Ok(_))) {
+                return;
+            }
+            acked.extend_from_slice(&data);
+            if let Some(job) = s.spare_job() {
+                let seq = job.seq;
+                let made = run_job(disk, job);
+                s.spare_done(seq, made);
+            }
+        }
+    };
+    let mut counter = Cut { disk: sim(), left: usize::MAX };
+    run(&mut counter, &mut Vec::new());
+    let total = usize::MAX - counter.left;
+    for cut in 0..total {
+        for seed in 0..3u64 {
+            let mut acked = Vec::new();
+            let mut disk = Cut { disk: sim(), left: cut };
+            run(&mut disk, &mut acked);
+            disk.disk.crash(&mut Rng::new(seed));
+            let mut disk = disk.disk;
+            let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+            if acked.is_empty() {
+                continue;
+            }
+            let got = s.read(&mut disk, 0, 1).unwrap();
+            assert_eq!(&got[..acked.len()], &acked[..], "cut {cut} seed {seed}");
+            s.allow_tidying();
+            s.write(0, 1, got.len() as u64, b"after");
+            s.sync(0, sync_op(99));
+            assert!(matches!(s.flush(&mut disk)[0].1, IoDone::Ok(_)), "cut {cut}");
+        }
+    }
+}
+
+/// Runs the reads of a [`CopyJob`] on `disk`: what they read at each offset.
+fn run_copy(
+    disk: &mut dyn Disk,
+    job: CopyJob,
+) -> Result<Vec<(u64, teseladb_types::Bytes)>, IoErrno> {
+    let mut out = Vec::new();
+    for op in job.reads {
+        let IoOp::ReadAt { offset, .. } = op else { panic!("a copy only reads") };
+        match disk.execute(op) {
+            IoDone::Read { data: Ok(d), .. } => out.push((offset, d)),
+            IoDone::Read { data: Err(e), .. } | IoDone::Err { errno: e, .. } => return Err(e),
+            IoDone::Ok(_) => panic!("a read gives its data"),
+        }
+    }
+    Ok(out)
+}
+
+/// A sync of `core` driven as the node's writer drives it, with `next` and the results of its
+/// operations: no copy forward runs inside it.
+fn pipeline_sync(s: &mut LogState, disk: &mut dyn Disk, core: u16, n: u64) {
+    s.sync(core, sync_op(n));
+    let mut answers = Vec::new();
+    let mut ops = Vec::new();
+    loop {
+        answers.extend(s.next(disk, &mut ops));
+        if ops.is_empty() {
+            break;
+        }
+        for op in ops.drain(..) {
+            answers.extend(s.on_done(&disk.execute(op)));
+        }
+    }
+    assert!(answers.iter().all(|(_, d)| matches!(d, IoDone::Ok(_))), "{answers:?}");
+}
+
+/// A copy forward reads the pieces the oldest file still holds in few long reads, apart from the
+/// writer; what the cores write, cut or remove while those reads run wins over the copy.
+#[test]
+fn a_copy_forward_reads_apart_and_what_comes_meanwhile_wins() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    let mut model = Model::new();
+    // Core 1: twenty small pieces of segment 1 and a padded batch of segment 2, in one record of
+    // the first file.
+    s.create(1, 1, 0);
+    s.create(1, 2, 0);
+    model.insert((1, 1), Vec::new());
+    for i in 0..20u64 {
+        let piece: Vec<u8> = (0..100).map(|b| (b + i) as u8).collect();
+        s.write(1, 1, i * 100, &piece);
+        put(&mut model, (1, 1), i * 100, &piece);
+    }
+    s.write(1, 2, 0, &batch(b"padded"));
+    model.insert((1, 2), batch(b"padded"));
+    pipeline_sync(&mut s, &mut disk, 1, 0);
+    // Core 0 writes until the oldest file is due for a copy.
+    let block = varied(8000);
+    let mut job = None;
+    let mut last = 0;
+    for w in 1..40u64 {
+        s.create(0, w, 0);
+        s.write(0, w, 0, &block);
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+        pipeline_sync(&mut s, &mut disk, 0, w);
+        job = s.copy_job();
+        if job.is_some() {
+            model.insert((0, w), block.clone());
+            last = w;
+            break;
+        }
+    }
+    let job = job.expect("the oldest file is due for a copy");
+    assert_eq!(job.reads.len(), 1, "{:?}", job.reads);
+    assert!(s.copy_job().is_none(), "one copy at a time");
+    // Meanwhile core 1 overwrites a piece, cuts the segment in the middle of another and removes
+    // its second segment.
+    s.write(1, 1, 300, b"newer");
+    put(&mut model, (1, 1), 300, b"newer");
+    s.truncate(1, 1, 1250);
+    model.get_mut(&(1, 1)).unwrap().truncate(1250);
+    s.remove(1, 2);
+    model.remove(&(1, 2));
+    pipeline_sync(&mut s, &mut disk, 1, 50);
+    let file = job.file;
+    let read = run_copy(&mut disk, job);
+    assert!(s.copy_done(file, read).is_empty());
+    pipeline_sync(&mut s, &mut disk, 1, 51);
+    assert!(s.stats().copied_bytes > 0 && s.stats().copied_bytes < 2000, "{:?}", s.stats());
+    // The copied file goes, and everything reads as the cores left it.
+    for k in 1..5u64 {
+        s.write(0, last, 8000 * k, &block);
+        put(&mut model, (0, last), 8000 * k, &block);
+        pipeline_sync(&mut s, &mut disk, 0, 100 + k);
+    }
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let w0: Vec<u64> = model.keys().filter(|k| k.0 == 0).map(|k| k.1).collect();
+    assert_eq!(again.segments_of(0), w0);
+    for (key, want) in &model {
+        assert_eq!(&again.read(&mut disk, key.0, key.1).unwrap(), want, "{key:?}");
+    }
+    assert!(!files(&mut disk).iter().any(|p| p == &teseladb_devlog::format::segment_path(file)));
+}
+
+/// A read of a copy forward that fails stops the log, as the read did when it ran in the writer.
+#[test]
+fn a_failed_read_of_a_copy_forward_stops_the_log() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.create(1, 1, 0);
+    s.write(1, 1, 0, b"held");
+    pipeline_sync(&mut s, &mut disk, 1, 0);
+    let block = varied(8000);
+    let job = (1..40u64)
+        .find_map(|w| {
+            s.create(0, w, 0);
+            s.write(0, w, 0, &block);
+            if w > 1 {
+                s.remove(0, w - 1);
+            }
+            pipeline_sync(&mut s, &mut disk, 0, w);
+            s.copy_job()
+        })
+        .expect("due");
+    s.sync(0, sync_op(77));
+    let answers = s.copy_done(job.file, Err(IoErrno::Io));
+    assert!(matches!(answers[..], [(0, IoDone::Err { errno: IoErrno::Io, .. })]), "{answers:?}");
+    assert_eq!(s.failed(), Some(IoErrno::Io));
 }
