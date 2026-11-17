@@ -237,11 +237,14 @@ impl<T> CircularBuffer<T> {
             }
             i = i.wrapping_add(1);
         }
+        // The elements moved, counted from the indices rather than from `p`: a pointer
+        // difference is not defined for zero-sized elements (`offset_from` panics), whose
+        // storage is dangling and whose pointers never advance.
+        let size = self.end.wrapping_sub(self.begin);
         let old_storage = mem::replace(&mut self.storage, new_storage);
         let old_cap = mem::replace(&mut self.capacity, new_cap);
         self.begin = 0;
-        // SAFETY: p points into the new allocation.
-        self.end = unsafe { p.offset_from(new_storage.as_ptr()) } as usize;
+        self.end = size;
         if old_cap != 0 {
             Self::deallocate(old_storage, old_cap);
         }

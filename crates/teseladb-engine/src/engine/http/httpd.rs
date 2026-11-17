@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::engine::util::log::Logger;
 
-static HLOGGER: LazyLock<std::pin::Pin<Box<Logger>>> =
+pub(crate) static HLOGGER: LazyLock<std::pin::Pin<Box<Logger>>> =
     LazyLock::new(|| Logger::new("httpd").expect("logger registered once"));
 
 /// The server, its connections, metrics and the sharded control object.

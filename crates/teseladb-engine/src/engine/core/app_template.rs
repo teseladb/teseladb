@@ -197,6 +197,26 @@ fn engine_options_from_config(cfg: Config) -> EngineOptions {
     opts
 }
 
+/// Registers the engine's own loggers. Each one is a static created on first use, where the
+/// original's are global objects registered before `main`: without this, the logging options
+/// (`--logger-log-level engine=debug`) and `--help-loggers` would not know a logger that has
+/// not logged yet.
+fn register_engine_loggers() {
+    use std::sync::LazyLock;
+    let _ = crate::engine::core::reactor::engine_logger();
+    LazyLock::force(&crate::engine::core::memory::ENGINE_MEMORY_LOGGER);
+    LazyLock::force(&crate::engine::core::io_queue::IO_LOG);
+    LazyLock::force(&scollectd::LOGGER);
+    #[cfg(not(no_exception_intercept))]
+    LazyLock::force(&crate::engine::core::exception_hacks::EXCEPTION_LOGGER);
+    LazyLock::force(&crate::engine::util::alloc_failure_injector::memory::LOG);
+    LazyLock::force(&crate::engine::http::httpd::HLOGGER);
+    LazyLock::force(&crate::engine::http::client::HTTP_LOG);
+    LazyLock::force(&crate::engine::websocket::common::websocket::WEBSOCKET_LOGGER);
+    #[cfg(feature = "dns")]
+    let _ = crate::engine::net::dns::dns_log();
+}
+
 /// Runs an engine application: parses the command line and the configuration files, starts the
 /// reactors and runs the application's function.
 ///
@@ -444,6 +464,7 @@ impl AppTemplate {
             println!("{}", self._engine_opts);
             return 0;
         }
+        register_engine_loggers();
         if configuration.count("help-loggers") != 0 {
             let _ = log_cli::print_available_loggers(&mut StdoutWriter(std::io::stdout().lock()));
             return 0;

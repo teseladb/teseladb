@@ -447,7 +447,7 @@ unsafe extern "C" {
 use crate::engine::core::reactor_backend::set_errno;
 
 /// The `dns_resolver` logger, created on first use.
-fn dns_log() -> &'static Logger {
+pub(crate) fn dns_log() -> &'static Logger {
     // Creating a logger fails only if its name is taken; "dns_resolver" is registered only
     // here.
     static L: std::sync::LazyLock<std::pin::Pin<Box<Logger>>> = std::sync::LazyLock::new(|| {

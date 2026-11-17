@@ -1019,9 +1019,15 @@ impl<CharType: ByteType> OutputStream<CharType> {
     /// Intended for custom [`DataSinkImpl`] implementations that wrap an existing output
     /// stream, so it should not be called on a stream that was already used.
     ///
+    /// The stream is borrowed, not consumed, as the original's `detach() &&` leaves it with
+    /// its caller: on success it is left with an empty sink (and nothing buffered, so it can be
+    /// dropped); on failure it is left as it was, and its buffered data can still be flushed
+    /// and the stream closed (dropping an unclosed stream with buffered data is a fatal
+    /// assertion).
+    ///
     /// # Errors
     /// A [`LogicError`] when the stream holds buffered data (it was already used).
-    pub fn detach(mut self) -> Result<DataSink, ExceptionPtr> {
+    pub fn detach(&mut self) -> Result<DataSink, ExceptionPtr> {
         if self._buf.is_nonempty() {
             return Err(ExceptionPtr::from(LogicError(
                 "detach() called on a used output_stream".into(),

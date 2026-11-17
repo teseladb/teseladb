@@ -100,6 +100,12 @@ name = "cov_reactor_options_test"
 path = "tests/entry/cov_reactor_options_test.rs"
 harness = false
 
+# Starts the engine once per group of logging and core options, each in a process of its own.
+[[test]]
+name = "cov3_core_startup_options_test"
+path = "tests/entry/cov3_core_startup_options_test.rs"
+harness = false
+
 # The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints
 # its results table.
 [[bench]]

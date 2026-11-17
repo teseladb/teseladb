@@ -243,6 +243,6 @@ pub mod memory {
     }
 
     /// The `failure_injector` logger; traces each injected failure with its backtrace.
-    static LOG: LazyLock<std::pin::Pin<Box<Logger>>> =
+    pub(crate) static LOG: LazyLock<std::pin::Pin<Box<Logger>>> =
         LazyLock::new(|| Logger::new("failure_injector").expect("logger registered once"));
 }

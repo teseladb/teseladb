@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 
 use crate::engine::util::log::Logger;
 
-static HTTP_LOG: LazyLock<std::pin::Pin<Box<Logger>>> =
+pub(crate) static HTTP_LOG: LazyLock<std::pin::Pin<Box<Logger>>> =
     LazyLock::new(|| Logger::new("http").expect("logger registered once"));
 
 /// Bookkeeping shared between the client and its connections.
