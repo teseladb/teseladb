@@ -505,9 +505,14 @@ impl<'c> Interp<'c> {
         self.string(s)
     }
 
-    /// Whether a string of `len` bytes may be made.
+    /// Whether a joined string of `len` bytes may be made, before it is built. The reference
+    /// router's engine joins strings without copying them, so there a join only fails when it
+    /// passes the longest string. This interpreter copies them: a join whose bytes do not fit in
+    /// what the call has left of this process gives that same catchable error, and nothing is
+    /// built (a shard's memory is a pool that a failed allocation ends the node on).
     pub fn check_length(&self, len: usize) -> R<()> {
-        if len > self.max_string() {
+        let too_long = len > self.max_string();
+        if too_long || self.budget.room(Cost::string(len)) == Err(Exhausted::Memory) {
             return Err(self.error("InternalError", "allocation size overflow"));
         }
         Ok(())
