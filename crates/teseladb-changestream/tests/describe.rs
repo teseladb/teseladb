@@ -2,8 +2,8 @@
 //! them (measured on 31-10-2026 through a change stream with `showExpandedEvents`): each case is
 //! the document before, the operators' touches, and the `updateDescription` of its event.
 
-use teseladb_bson::{Document, extjson};
-use teseladb_changestream::describe::{Touch, describe};
+use teseladb_bson::{Document, RawDoc, extjson};
+use teseladb_changestream::describe::{Touch, describe, describe_raw};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap()
@@ -17,6 +17,11 @@ fn s(p: &str) -> String {
 fn check(old: &str, new: &str, touches: &[Touch], position: Option<usize>, want: &str) {
     let got = describe(&doc(old), &doc(new), touches, position).to_document(true);
     assert_eq!(got, doc(want), "{old} -> {new} with {touches:?}");
+    // The document before read in place in its BSON gives the same description.
+    let bytes = doc(old).to_bytes().unwrap();
+    let raw = RawDoc::from_bytes(&bytes).unwrap();
+    let in_place = describe_raw(raw, &doc(new), touches, position).to_document(true);
+    assert_eq!(in_place, doc(want), "in place: {old} -> {new} with {touches:?}");
 }
 
 const NONE: &str = r#"{"updatedFields": {}, "removedFields": [], "truncatedArrays": [], "disambiguatedPaths": {}}"#;

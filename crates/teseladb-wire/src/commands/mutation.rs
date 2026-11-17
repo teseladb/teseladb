@@ -8,7 +8,7 @@
 //! the range keeps in the idempotence record of a retryable write (005 FR-011).
 
 use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
-use teseladb_changestream::describe::{Touch, describe};
+use teseladb_changestream::describe::{Touch, describe_raw};
 use teseladb_changestream::meta::RetryInfo;
 use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::update_desc::UpdateDescription;
@@ -1883,7 +1883,7 @@ fn modify(
                     let at = target.clone().unwrap_or_else(|| key.clone());
                     if let Some(changes) = u.path_changes(false) {
                         let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
-                        let d = describe(&Document::from(doc), &out.doc, &touches, position);
+                        let d = describe_raw(doc, &out.doc, &touches, position);
                         checker.changes.borrow_mut().push((at.clone(), d));
                     } else if u.is_pipeline() {
                         // A pipeline has no operators: its description compares the documents,
