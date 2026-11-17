@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
+use teseladb_meta::bootstrap::DATA_START;
+#[cfg(target_os = "linux")]
 use teseladb_range::ack::{W, WriteConcern};
 #[cfg(target_os = "linux")]
 use teseladb_server::node::NodeConfig;
@@ -82,9 +84,10 @@ impl Drop for Dir {
     }
 }
 
+/// A key of the data space (outside it the node writes nothing).
 #[cfg(target_os = "linux")]
 fn key(kind: &str, i: u32) -> Vec<u8> {
-    format!("stop-{kind}-{i:05}").into_bytes()
+    [&DATA_START[..], format!("stop-{kind}-{i:05}").as_bytes()].concat()
 }
 
 /// Writes until the node takes it (its range may not lead yet right after a start).
