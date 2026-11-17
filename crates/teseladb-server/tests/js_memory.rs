@@ -2,6 +2,8 @@
 //! (016 FR-007, 023 FR-014): the call ends with an error and the node goes on. A shard's memory is
 //! a pool of its own, and an allocation it cannot serve ends the process; a call bounded only by
 //! the interpreter's 2 GiB ended the node there (compatibility battery, `js-function` step 14).
+//! The call ends as on the reference router, whose engine joins strings without copying them:
+//! the catchable «allocation size overflow» at the join, not «out of memory».
 //! The node runs in a process of its own (`teseladb start`), with one core and the memory a shard
 //! had in the battery (1.6 GB: 4.8 GB between three shards).
 #![cfg(target_os = "linux")]
@@ -21,6 +23,9 @@ const READY_WAIT: Duration = Duration::from_secs(60);
 const MEMORY_LIMIT: &str = "1600M";
 /// Calls in a row: each one leaves the shard's free memory split as it left it.
 const CALLS: usize = 3;
+/// How the reference router 9.0.4 ends the call (measured, `teseladb-js/tests/measured`): the
+/// catchable «allocation size overflow» at the join, column 49 of this body.
+const OVERFLOW_TAIL: &str = ": e-runtime message : 'allocation size overflow', file : 'wasm:function', line : 1, column : 49\n@wasm:function:1:49\n";
 
 struct Node {
     child: Child,
@@ -93,6 +98,21 @@ fn connect(port: u16) -> TcpStream {
     sock
 }
 
+/// An `aggregate` on `c` that projects `r` with the `$function` of `body`.
+fn project_function(body: &str) -> Document {
+    let function =
+        Document::new().with("body", body).with("args", Value::Array(vec![])).with("lang", "js");
+    let project =
+        Document::new().with("r", Value::Document(Document::new().with("$function", function)));
+    Document::new()
+        .with("aggregate", "c")
+        .with(
+            "pipeline",
+            Value::Array(vec![Value::Document(Document::new().with("$project", project))]),
+        )
+        .with("cursor", Document::new())
+}
+
 #[test]
 fn a_string_that_grows_without_end_ends_its_call_and_not_the_node() {
     let (node, port) = start();
@@ -102,24 +122,39 @@ fn a_string_that_grows_without_end_ends_its_call_and_not_the_node() {
         .with("documents", Value::Array(vec![Value::Document(Document::new().with("_id", 1))]));
     let inserted = command(&mut sock, "js_memory", insert).expect("the insert answers");
     assert_eq!(inserted.get("ok"), Some(&Value::Double(1.0)), "{inserted:?}");
-    let function = Document::new()
-        .with("body", "function() { var s = 'x'; while (true) s = s + s }")
-        .with("args", Value::Array(vec![]))
-        .with("lang", "js");
-    let project =
-        Document::new().with("r", Value::Document(Document::new().with("$function", function)));
-    let aggregate = Document::new()
-        .with("aggregate", "c")
-        .with(
-            "pipeline",
-            Value::Array(vec![Value::Document(Document::new().with("$project", project))]),
-        )
-        .with("cursor", Document::new());
+    // The error is catchable, and the call goes on after it with the string it had: on this
+    // shard shorter than the reference's longest (divergence DV-109).
+    let caught = "function() { var s = 'x'; try { while (true) s = s + s } catch (e) { return e.name + ': ' + e.message + ' ' + s.length } }";
+    let reply = command(&mut sock, "js_memory", project_function(caught)).expect("it answers");
+    let result = match reply.get("cursor") {
+        Some(Value::Document(c)) => match c.get("firstBatch") {
+            Some(Value::Array(docs)) => match docs.as_slice() {
+                [Value::Document(d)] => d.get("r").cloned(),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(Value::String(r)) = result else { panic!("no result: {reply:?}") };
+    eprintln!("caught: {r}");
+    let length = r.strip_prefix("InternalError: allocation size overflow ").map(str::parse::<u64>);
+    assert!(matches!(length, Some(Ok(n)) if n.is_power_of_two() && n < 1 << 30), "{r}");
+    let aggregate = project_function("function() { var s = 'x'; while (true) s = s + s }");
     for call in 1..=CALLS {
         let Some(reply) = command(&mut sock, "js_memory", aggregate.clone()) else {
             panic!("the node closed the connection at call {call}: {}", read(&node, "node.out"));
         };
         assert_eq!(reply.get("ok"), Some(&Value::Double(0.0)), "call {call}: {reply:?}");
+        // The reference's answer: the string passes the longest one before any memory runs out.
+        let failure = teseladb_wire::commands::js::JS_INTERPRETER_FAILURE;
+        assert_eq!(reply.get("code"), Some(&Value::Int32(failure.code)), "call {call}: {reply:?}");
+        assert_eq!(reply.get("codeName"), Some(&Value::from(failure.name)), "call {call}");
+        let Some(Value::String(msg)) = reply.get("errmsg") else {
+            panic!("call {call} has no message: {reply:?}");
+        };
+        assert!(msg.contains("Failed to invoke JS function :: function id = "), "{msg}");
+        assert!(msg.ends_with(OVERFLOW_TAIL), "call {call}: {msg}");
     }
     // The node still answers, on a new connection.
     let mut again = connect(port);
