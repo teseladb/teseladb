@@ -147,6 +147,11 @@ pub fn metrics(out: &mut String) {
             crate::backend::scattered_parts_sent_away(),
         ),
         (
+            "teseladb_pushed_scattered_parts_outside_total",
+            "Parts of split aggregations read and folded on the client's thread from the views.",
+            crate::backend::scattered_parts_outside(),
+        ),
+        (
             "teseladb_pushed_filtered_parts_sent_total",
             "Parts of filtered scans sent with their filter to the leader of their range.",
             crate::backend::filtered_parts_sent(),

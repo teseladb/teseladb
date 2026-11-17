@@ -30,7 +30,7 @@ static TALLIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 pub fn tallied_from_counts() -> u64 {
     TALLIED.load(std::sync::atomic::Ordering::Relaxed)
 }
-pub use scatter::{scattered_groups, scattered_parts_sent_away};
+pub use scatter::{scattered_groups, scattered_parts_outside, scattered_parts_sent_away};
 pub use txn_reaper::Reapers;
 pub(crate) use txn_reaper::SCAN_EVERY;
 

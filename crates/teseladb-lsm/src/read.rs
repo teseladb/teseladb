@@ -1046,7 +1046,15 @@ impl Scan {
         lsm: &mut Lsm,
         prune: Option<&dyn Fn(&dyn Zones) -> bool>,
     ) -> ColumnStep {
-        let r = &mut lsm.reader;
+        self.next_columns_with(&mut lsm.reader, prune)
+    }
+
+    /// [`Scan::next_columns`] with the blocks from `r`.
+    pub(crate) fn next_columns_with<B: Blocks>(
+        &mut self,
+        r: &mut B,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> ColumnStep {
         r.begin();
         let step = self.step(r, prune);
         if !matches!(step, ColumnStep::Step(Step::Miss(_))) {

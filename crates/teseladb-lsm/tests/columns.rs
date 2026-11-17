@@ -191,6 +191,58 @@ fn a_scan_takes_the_blocks_a_flush_and_a_compaction_wrote_as_columns() {
     assert!(compacted > KEYS as usize / 2, "{compacted} after the compaction");
 }
 
+/// The documents a scan from another thread over the published view gives as column batches,
+/// reading from `disk` each block it names; the rows it gives one by one are checked against
+/// the core's scan.
+fn shared_batched(lsm: &mut Lsm, disk: &mut MemDisk, at: Hlc) -> usize {
+    use teseladb_lsm::{SharedColumnStep, SharedStep};
+    use teseladb_raftlog::Disk;
+    let all = rows(lsm, disk, at);
+    lsm.publish();
+    let shared = lsm.shared();
+    let view = shared.view();
+    let (start, end) = span();
+    let want: Arc<[String]> = FIELDS[..1].iter().map(|s| (*s).to_owned()).collect();
+    let mut s = view.scan(&start, &end, at).with_columns(want);
+    let (mut seen, mut batched) = (0, 0);
+    loop {
+        match s.next_columns(&shared, None) {
+            SharedColumnStep::Columns(c) => {
+                seen += c.docs;
+                batched += c.docs;
+                assert_eq!(c.last, all[seen - 1].0, "the batch's last key");
+            }
+            SharedColumnStep::Step(SharedStep::Item(i)) => {
+                assert_eq!(i.key, all[seen].0, "row {seen}");
+                seen += 1;
+            }
+            SharedColumnStep::Step(SharedStep::Need(need)) => {
+                let file = disk.read_all(std::path::Path::new(&need.path)).expect("the file");
+                let (at, len) = (need.offset as usize, need.len as usize);
+                shared.supply(&need, &file[at..at + len]).expect("a good block");
+            }
+            SharedColumnStep::Step(SharedStep::Done) => break,
+            SharedColumnStep::Step(SharedStep::Failed(e)) => panic!("{e}"),
+        }
+    }
+    assert_eq!(seen, all.len(), "every row");
+    batched
+}
+
+#[test]
+fn a_scan_from_another_thread_takes_the_blocks_as_columns() {
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 8 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut rng = Rng::new(11);
+    for i in 0..KEYS {
+        lsm.put(G, i + 1, &key(i), ts(10 + i, 0), &doc(&mut rng)).unwrap();
+    }
+    flush(&mut lsm, &mut disk);
+    let batched = shared_batched(&mut lsm, &mut disk, ts(1000, 0));
+    assert!(batched > KEYS as usize / 2, "{batched} documents in batches");
+}
+
 #[test]
 fn a_range_deletion_or_an_intent_keeps_the_blocks_it_touches_read_as_rows() {
     let mut disk = MemDisk::new();

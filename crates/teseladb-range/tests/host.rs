@@ -1068,6 +1068,83 @@ fn a_matching_scan_outside_the_core_stops_at_its_blocks_and_goes_on_from_there()
     assert!(parts >= 4, "{parts} parts");
 }
 
+/// An aggregation's part read outside the core with columns (010 FR-033, FR-034) over blocks
+/// that have no column block takes the documents the matching scan takes, piece by piece in key
+/// order, examines as many and goes on from the same keys, also when it stops at its blocks or
+/// at its number of documents. Each way reads its own node, whose cache starts empty.
+#[test]
+fn a_scan_of_pieces_outside_the_core_takes_the_rows_a_matching_scan_takes() {
+    use teseladb_range::push::Piece;
+    let end: &[u8] = b"\x01l";
+    let even = || each(|v| v[0].is_multiple_of(2));
+    let want: std::sync::Arc<[String]> = vec!["v".to_owned()].into();
+    // Every part's documents taken, documents examined and where it went on.
+    type Parts = Vec<(Vec<Row>, usize, Option<Vec<u8>>)>;
+    let by = |pieces: bool, (examine, blocks): (usize, usize)| -> Parts {
+        let mut n = node_with_a_file(40, 0);
+        let now = n.now;
+        let view = n.host.views().get(G).expect("the view of a range this node leads");
+        let mut cache = ViewCache::default();
+        let mut from = b"\x01k".to_vec();
+        let mut parts = Vec::new();
+        loop {
+            let mut read = 0;
+            let supply = |need: &_| supply_block(&mut n.disk, &view, need, &mut read);
+            let all: &dyn Fn(&dyn Zones) -> bool = &|_| true;
+            let keep = (even(), all);
+            let span = (from.as_slice(), end);
+            let part = match pieces {
+                false => {
+                    let r = view
+                        .scan_matching(
+                            &mut cache,
+                            span,
+                            (examine, blocks),
+                            || now,
+                            ReadConcern::Local,
+                            supply,
+                            keep,
+                        )
+                        .expect("served outside");
+                    (r.rows, r.examined, r.next)
+                }
+                true => {
+                    let most = (examine, blocks, &view.begin());
+                    let r = view
+                        .scan_pieces_begun(
+                            &mut cache,
+                            span,
+                            most,
+                            || now,
+                            ReadConcern::Local,
+                            supply,
+                            keep,
+                            want.clone(),
+                        )
+                        .expect("served outside");
+                    let rows = r.pieces.into_iter().map(|p| match p {
+                        Piece::Row(r) => r,
+                        Piece::Columns(_) => panic!("no block of this file has columns"),
+                    });
+                    (rows.collect(), r.examined, r.next)
+                }
+            };
+            let next = part.2.clone();
+            parts.push(part);
+            match next {
+                Some(next) => from = next,
+                None => break,
+            }
+        }
+        parts
+    };
+    for most in [(1_000, 4), (7, 64), (1_000, 64)] {
+        let rows = by(false, most);
+        assert_eq!(rows.iter().map(|p| p.0.len()).sum::<usize>(), 20, "{most:?}");
+        assert_eq!(by(true, most), rows, "{most:?}");
+    }
+}
+
 #[test]
 fn a_part_without_a_document_reads_on_and_too_many_blocks_send_the_scan_to_the_core() {
     // Forty documents deleted and one left after them: the deleted versions fill some twenty

@@ -16,6 +16,7 @@ use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
 
 use crate::cache::BlockCache;
+use crate::columnar::ColumnStep;
 use crate::error::LsmError;
 use crate::read::{self, Blocks, Fetch, Found, Item, Lookup, ReadToken, Scan, Step, corrupt};
 use crate::read_back::BackScan;
@@ -94,6 +95,15 @@ pub enum SharedStep {
     Need(BlockNeed),
     /// The scan failed.
     Failed(LsmError),
+}
+
+/// What a step of a scan from another thread that takes columns gives (010 FR-033).
+#[derive(Debug)]
+pub enum SharedColumnStep {
+    /// A step as [`SharedScan::next`] gives.
+    Step(SharedStep),
+    /// The next documents of the scan, in key order, as the columns of their block.
+    Columns(crate::columnar::Columns),
 }
 
 /// The view one reader thread keeps between its reads ([`SharedLsm::view_cached`]), with the LSM
@@ -281,23 +291,46 @@ struct Source<'a> {
     need: Option<BlockNeed>,
 }
 
-impl Blocks for Source<'_> {
-    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
-        let cached = self.inner.shard(table.number, i).try_with(|c| c.get(table.number, i as u32));
+impl Source<'_> {
+    /// The payload of slot `slot` of `table` from the shared cache, or `None` after naming the
+    /// read it needs (the first miss of the attempt).
+    fn payload(&mut self, table: &Arc<Table>, slot: usize) -> Option<Bytes> {
+        let cached =
+            self.inner.shard(table.number, slot).try_with(|c| c.get(table.number, slot as u32));
         if let Some(Some(payload)) = cached {
-            return Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i));
+            return Some(payload);
         }
         if self.need.is_none() {
-            let (offset, len) = table.pages(i);
+            let (offset, len) = table.pages(slot);
             self.need = Some(BlockNeed {
                 path: self.inner.dir.join(file_name(table.number)).display().to_string(),
                 offset,
                 len,
                 table: table.clone(),
-                block: i,
+                block: slot,
             });
         }
-        Ok(Fetch::Wait(ReadToken(0)))
+        None
+    }
+}
+
+impl Blocks for Source<'_> {
+    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
+        match self.payload(table, i) {
+            Some(payload) => Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i)),
+            None => Ok(Fetch::Wait(ReadToken(0))),
+        }
+    }
+
+    /// The column block of data block `i` (010 FR-033), from the shared cache or named as the
+    /// read the caller supplies: without it a scan from another thread never took columns.
+    fn columns(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+    ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
+        let slot = crate::sst::reader::COLUMN_SLOT + i;
+        Ok(Some(self.payload(table, slot).ok_or(ReadToken(0))))
     }
 
     fn failure(&self) -> Option<&LsmError> {
@@ -384,6 +417,32 @@ impl SharedScan {
     /// Data blocks the scan passed over by their zone maps so far (FR-039).
     pub fn skipped_blocks(&self) -> u64 {
         self.scan.skipped_blocks()
+    }
+
+    /// The scan taking each data block it may as its column block, with the columns of the
+    /// top-level fields `want` (010 FR-033), as the core's [`Scan::with_columns`]:
+    /// [`SharedScan::next_columns`] gives those batches in key order among the other documents.
+    pub fn with_columns(self, want: Arc<[String]>) -> SharedScan {
+        SharedScan { scan: self.scan.with_columns(want) }
+    }
+
+    /// [`SharedScan::next_pruned`] for a scan [`SharedScan::with_columns`]: the next document,
+    /// or the next batch of them as the columns of their block.
+    pub fn next_columns(
+        &mut self,
+        shared: &SharedLsm,
+        prune: Option<&dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool>,
+    ) -> SharedColumnStep {
+        let mut s = Source { inner: &shared.inner, need: None };
+        match self.scan.next_columns_with(&mut s, prune) {
+            ColumnStep::Columns(c) => SharedColumnStep::Columns(c),
+            ColumnStep::Step(Step::Item(i)) => SharedColumnStep::Step(SharedStep::Item(i)),
+            ColumnStep::Step(Step::Done) => SharedColumnStep::Step(SharedStep::Done),
+            ColumnStep::Step(Step::Miss(_)) => {
+                SharedColumnStep::Step(SharedStep::Need(s.need.expect("a miss names its block")))
+            }
+            ColumnStep::Step(Step::Failed(e)) => SharedColumnStep::Step(SharedStep::Failed(e)),
+        }
     }
 
     fn step(

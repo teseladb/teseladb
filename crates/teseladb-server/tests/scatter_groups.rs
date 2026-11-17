@@ -10,7 +10,7 @@ mod common;
 use common::{Client, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_io::engine::disk::DiskPlace;
-use teseladb_server::backend::scattered_groups;
+use teseladb_server::backend::{scattered_groups, scattered_parts_outside};
 use teseladb_server::node::{Node, NodeConfig};
 
 const DOCS: i32 = 3000;
@@ -95,6 +95,9 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         vec![matches, group(Value::Null)],
         vec![fractions],
     ];
+    // The ranges are all led here: each part is read from its range's view and folded on the
+    // client's thread, not on the cores (005 FR-028).
+    let outside = scattered_parts_outside();
     for pipeline in &pipelines {
         let one_place = aggregate(&mut c, pipeline, true);
         // Ranges that just split may still be moving: the answer is the same in any case, and
@@ -107,6 +110,7 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         });
         assert_eq!(split, one_place, "{pipeline:?}");
     }
+    assert!(scattered_parts_outside() > outside);
     // The sum is the one of the values the `$match` keeps.
     let scattered = teseladb_stages::count(teseladb_stages::Stage::AggScattered);
     let whole = aggregate(&mut c, &pipelines[2], false);

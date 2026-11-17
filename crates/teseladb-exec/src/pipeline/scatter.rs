@@ -223,13 +223,10 @@ impl Program {
         group.partial(docs, &PlainEnv, self.sbe, self.limit).ok()?
     }
 
-    /// The documents of `inputs` (stored documents only) that the program's `$match`es keep, in
-    /// their order: the `$match`es, one after the other, are the conjunction of their filters,
-    /// evaluated on the stored bytes a batch at a time on the register machine (010 FR-028,
-    /// FR-031) with the environment of a core, no collation and no extensions. `None` when a
-    /// document does not read or the filter fails; the coordinator then runs the pipeline over
-    /// the whole input, which gives that error.
-    fn matching_rows(&self, inputs: &[Input<'_>]) -> Option<Vec<Document>> {
+    /// The filter of the program's `$match`es: the `$match`es, one after the other, are the
+    /// conjunction of their filters. `None` when a stage is not a `$match` of a document or the
+    /// filter does not parse.
+    fn filter(&self) -> Option<teseladb_mql::Filter> {
         // Each of `matches` is a whole `$match` stage: its filter is the stage's value.
         let filters = self
             .matches
@@ -246,7 +243,27 @@ impl Program {
         };
         let bytes = spec.to_bytes().ok()?;
         let raw = RawDoc::from_bytes(&bytes).ok()?;
-        let filter = teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).ok()?;
+        teseladb_mql::Filter::parse(raw, teseladb_mql::FilterUse::Query).ok()
+    }
+
+    /// What decides, where the documents are read, which of them the program needs (010
+    /// FR-027): the filter of its `$match`es on the stored bytes, and the data blocks it rules
+    /// out by their zone maps (004 FR-039). `None` when the filter does not parse; the reader
+    /// then hands over every document.
+    pub fn row_filter(&self) -> Option<RowFilter> {
+        match self.matches.is_empty() {
+            true => Some(RowFilter { filter: None }),
+            false => Some(RowFilter { filter: Some(self.filter()?) }),
+        }
+    }
+
+    /// The documents of `inputs` (stored documents only) that the program's `$match`es keep, in
+    /// their order, evaluated on the stored bytes a batch at a time on the register machine (010
+    /// FR-028, FR-031) with the environment of a core, no collation and no extensions. `None`
+    /// when a document does not read or the filter fails; the coordinator then runs the pipeline
+    /// over the whole input, which gives that error.
+    fn matching_rows(&self, inputs: &[Input<'_>]) -> Option<Vec<Document>> {
+        let filter = self.filter()?;
         let ctx = teseladb_mql::MatchContext { collation: None, ext: &NoExtensions, vars: None };
         let rows: Vec<&[u8]> = inputs
             .iter()
@@ -269,6 +286,40 @@ impl Program {
             }
         }
         Some(docs)
+    }
+}
+
+/// The part of a [`Program`] that runs where its documents are read (010 FR-027): its
+/// `$match`es' filter on the stored bytes and on the zone maps of the data blocks.
+pub struct RowFilter {
+    /// `None`: the program has no `$match`, every document goes to it.
+    filter: Option<teseladb_mql::Filter>,
+}
+
+impl RowFilter {
+    /// Which of the stored documents of `batch` (at most 64) the program may keep, a bit per
+    /// document from the lowest. A batch with a document whose frame does not read keeps them
+    /// all, as does a filter that fails on it: the program reads them again and declines,
+    /// and the coordinator runs the pipeline over the whole input, which gives that error.
+    pub fn keep(&self, batch: &[&[u8]]) -> u64 {
+        let all = match batch.len() {
+            n if n >= 64 => u64::MAX,
+            n => (1u64 << n) - 1,
+        };
+        let Some(filter) = &self.filter else { return all };
+        let Some(stored) =
+            batch.iter().map(|b| teseladb_keys::stored::split(b).ok()).collect::<Option<Vec<_>>>()
+        else {
+            return all;
+        };
+        let ctx = teseladb_mql::MatchContext { collation: None, ext: &NoExtensions, vars: None };
+        filter.matches_batch(&stored, &ctx).unwrap_or(all)
+    }
+
+    /// Whether a data block whose zone maps are `zones` may hold a document the program keeps
+    /// (004 FR-039); a program runs with no collation.
+    pub fn block_may_match(&self, zones: &dyn teseladb_keys::zone::Zones) -> bool {
+        self.filter.as_ref().is_none_or(|f| crate::zone::block_may_match(f.expr(), false, zones))
     }
 }
 

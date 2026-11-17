@@ -37,8 +37,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use teseladb_hlc::{Hlc, Next};
 use teseladb_keys::zone::Zones;
 use teseladb_lsm::{
-    BlockNeed, Kind, Published, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep,
-    ViewCache,
+    BlockNeed, Kind, Published, SharedBackScan, SharedColumnStep, SharedLsm, SharedRead,
+    SharedScan, SharedStep, ViewCache,
 };
 use teseladb_multiraft::NodeClock;
 use teseladb_types::{GroupId, Nanos};
@@ -48,6 +48,7 @@ use crate::command::DedupKey;
 use crate::doc_count::{Coll, Counts};
 use crate::host::Mutation;
 use crate::latch::{KeySlots, SpanKeys};
+use crate::push::Piece;
 use crate::read::ReadConcern;
 use crate::sm::{dedup_key, split_value};
 use crate::tscache::word;
@@ -441,6 +442,20 @@ pub struct Matched {
     pub next: Option<Vec<u8>>,
 }
 
+/// What [`RangeView::scan_pieces_begun`] read.
+#[derive(Debug)]
+pub struct Pieces {
+    /// The mark it read at.
+    pub ts: Hlc,
+    /// The documents its filter accepted and the column blocks it took, in key order.
+    pub pieces: Vec<Piece>,
+    /// Documents examined, those of the column blocks included.
+    pub examined: usize,
+    /// Where the scan goes on when it stopped at its number of documents or of blocks; `None`
+    /// at the span's end.
+    pub next: Option<Vec<u8>>,
+}
+
 /// The most documents [`RangeView::scan_matching_begun`] hands its filter at once: a batch of
 /// the register machine (010 FR-028).
 pub const MATCH_BATCH: usize = 64;
@@ -689,6 +704,99 @@ impl RangeView {
             keep_batch(&mut batch, &mut keep, &mut out);
         }
         Some(out)
+    }
+
+    /// As [`RangeView::scan_matching_begun`], for an aggregation's part that takes columns (010
+    /// FR-033, FR-034): the data blocks the storage may give as the columns `want` of their
+    /// column block come whole as one piece each, all their documents examined; the other
+    /// documents go through `keep` and only those it accepts are copied. The pieces come in key
+    /// order.
+    pub fn scan_pieces_begun(
+        &self,
+        cache: &mut ViewCache,
+        (start, end): (&[u8], &[u8]),
+        (examine, blocks, begun): (usize, usize, &Begun),
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+        mut supply: impl FnMut(&BlockNeed) -> bool,
+        (mut keep, block): (impl FnMut(&[&[u8]]) -> u64, &dyn Fn(&dyn Zones) -> bool),
+        want: Arc<[String]>,
+    ) -> Option<Pieces> {
+        let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
+        let view = self.lsm.view_cached(cache);
+        let mut scan = view.scan(start, end, ts).with_columns(want);
+        let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut blocks = Blocks::new(blocks);
+        let mut batch: Vec<(Vec<u8>, teseladb_types::Bytes)> = Vec::with_capacity(MATCH_BATCH);
+        // The key of the last document examined, when the filter left it out.
+        let mut left_out: Option<Vec<u8>> = None;
+        // The documents `keep` accepted, as pieces after those before them.
+        let mut flush = |batch: &mut Vec<_>, out: &mut Matched, pieces: &mut Vec<Piece>| {
+            let left = keep_batch(batch, &mut keep, out);
+            out.seen.clear();
+            pieces.extend(out.rows.drain(..).map(Piece::Row));
+            left
+        };
+        while out.examined < examine {
+            if batch.len() == MATCH_BATCH {
+                left_out = flush(&mut batch, &mut out, &mut pieces);
+            }
+            match scan.next_columns(&self.lsm, Some(block)) {
+                SharedColumnStep::Columns(c) => {
+                    if !batch.is_empty() {
+                        flush(&mut batch, &mut out, &mut pieces);
+                    }
+                    left_out = None;
+                    out.examined += c.docs;
+                    if out.examined >= examine {
+                        out.next = Some([c.last.as_slice(), &[0]].concat());
+                    }
+                    pieces.push(Piece::Columns(c));
+                }
+                SharedColumnStep::Step(SharedStep::Item(i)) if i.kind == Kind::Intent => {
+                    Decline::Intent.count();
+                    return None;
+                }
+                SharedColumnStep::Step(SharedStep::Item(i)) => {
+                    let Some((t, _)) = split_value(&i.value) else { continue };
+                    if t == crate::HISTORY_VALUE {
+                        continue;
+                    }
+                    out.examined += 1;
+                    if out.examined == examine {
+                        out.next = Some([i.key.as_slice(), &[0]].concat());
+                    }
+                    batch.push((i.key, i.value));
+                }
+                SharedColumnStep::Step(SharedStep::Done) => break,
+                SharedColumnStep::Step(SharedStep::Need(_)) if blocks.spent(out.examined > 0) => {
+                    if !batch.is_empty() {
+                        left_out = flush(&mut batch, &mut out, &mut pieces);
+                    }
+                    // The scan goes on after the last document it examined.
+                    let last = left_out.as_deref().or(pieces.last().map(|p| match p {
+                        Piece::Row((k, _)) => k.as_slice(),
+                        Piece::Columns(c) => c.last.as_slice(),
+                    }));
+                    let next = last.map(|k| [k, &[0]].concat());
+                    return Some(Pieces { ts, pieces, examined: out.examined, next });
+                }
+                SharedColumnStep::Step(SharedStep::Need(need))
+                    if !blocks.exhausted() && supply(&need) =>
+                {
+                    blocks.read += 1;
+                }
+                SharedColumnStep::Step(SharedStep::Need(_) | SharedStep::Failed(_)) => {
+                    Decline::Other.count();
+                    return None;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            flush(&mut batch, &mut out, &mut pieces);
+        }
+        Some(Pieces { ts, pieces, examined: out.examined, next: out.next })
     }
 
     /// Whether a write holds a key of `read` or a write with a key of it was released since the
