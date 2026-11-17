@@ -168,11 +168,14 @@ pub fn spawn_background(shard: u32, body: Box<dyn FnOnce(&TaskStop) + Send>) -> 
 
 /// Runs `job` in an engine thread of its own in `group`: the pooled engine threads keep the group
 /// they were made in, so a job of another group gets a thread made for it. A thread that cannot
-/// be made drops `job`, whose task then reads as ended.
+/// be made drops `job`, whose task then reads as ended. The engine thread has the engine's small
+/// stack and `job` runs on a stack of its own with a guard below ([`stacks::deep`]): a stack of
+/// [`stacks::stack_size`] taken from the shard's memory, as before, cost that much of it per task
+/// and had no guard page in a release build.
 fn in_group(group: SchedulingGroup, job: Box<dyn FnOnce()>) -> Future<()> {
-    let attr = ThreadAttributes { sched_group: Some(group), stack_size: stacks::stack_size() };
+    let attr = ThreadAttributes { sched_group: Some(group), stack_size: stacks::ENGINE_STACK };
     match Thread::with_attributes(attr, move || {
-        job();
+        stacks::deep(job);
         Ok(())
     }) {
         Ok(mut th) => {
