@@ -1581,7 +1581,7 @@ impl<S: 'static, Out: MarshallArgs<S> + 'static> SinkImpl<Out> for RpcSinkImpl<S
         let seq_num = self._next_seq_num.0;
         self._next_seq_num.0 += 1;
         let this: *mut Self = self;
-        let data = make_foreign(Box::new(data));
+        let mut data = Box::new(data);
         // SAFETY: the sink, and so its semaphore, outlives its sends (its user waits for close(),
         // which takes all the units back), and does not move.
         unsafe { get_units(&mut self.base._sem, size) }.then(move |su| -> Future<()> {
@@ -1596,7 +1596,10 @@ impl<S: 'static, Out: MarshallArgs<S> + 'static> SinkImpl<Out> for RpcSinkImpl<S
             }
             // SAFETY: as above; the connection pointer is not written after construction.
             let owner = unsafe { (*core::ptr::addr_of!((*this).base._con)).get_owner_shard() };
-            let mut data = Some(data);
+            // The frame holds the units until it is freed: on another shard, the copy that is
+            // sent keeps it alive until its bytes are written out, after the send returns.
+            data.su = Some(su);
+            let mut data = Some(make_foreign(data));
             // It is OK to discard this future. The user is required to
             // wait for it when closing.
             // SAFETY: see the note on the `this` of a stream, above `impl SinkImpl for RpcSinkImpl`.
@@ -1663,7 +1666,6 @@ impl<S: 'static, Out: MarshallArgs<S> + 'static> SinkImpl<Out> for RpcSinkImpl<S
                 ret_fut
             })
             .then_wrapped(move |mut f: Future<()>| {
-                let _su = su;
                 // SAFETY: as above: on the owner shard, through the `_ex` field alone.
                 let ex = unsafe { &mut *core::ptr::addr_of_mut!((*this).base._ex) };
                 if f.failed() && ex.is_none() {
