@@ -108,7 +108,38 @@ impl Signal {
 #[derive(Default)]
 struct Inbox {
     reqs: RefCell<Vec<(u16, Req)>>,
+    /// The outcomes of the files made ahead, by number.
+    spares: RefCell<Vec<(u64, Result<(), IoErrno>)>>,
+    /// Files being made ahead.
+    making: Cell<usize>,
     signal: Signal,
+}
+
+/// Runs the operations of a file made ahead on `disk`, one after another in the background class
+/// apart from the log's, and hands the outcome to the writer's `inbox`.
+fn make_spare(
+    disk: ShardDisk,
+    seq: u64,
+    mut ops: std::collections::VecDeque<IoOp>,
+    inbox: Rc<Inbox>,
+) {
+    let Some(op) = ops.pop_front() else {
+        return spare_made(&inbox, seq, Ok(()));
+    };
+    let next = disk.clone();
+    drop(disk.call(op, IoClass::Background).then(move |done: IoDone| {
+        match done {
+            IoDone::Err { errno, .. } => spare_made(&inbox, seq, Err(errno)),
+            _ => make_spare(next, seq, ops, inbox),
+        }
+        make_ready_future(())
+    }));
+}
+
+fn spare_made(inbox: &Inbox, seq: u64, made: Result<(), IoErrno>) {
+    inbox.spares.borrow_mut().push((seq, made));
+    inbox.making.set(inbox.making.get().saturating_sub(1));
+    inbox.signal.notify();
 }
 
 thread_local! {
@@ -365,6 +396,9 @@ fn run(
         state.offer_bound(bound.offered());
         reqs.append(&mut inbox.reqs.borrow_mut());
         let took = !reqs.is_empty();
+        for (seq, made) in inbox.spares.borrow_mut().drain(..) {
+            state.spare_done(seq, made);
+        }
         for (core, req) in reqs.drain(..) {
             match req {
                 Req::Log(r, asked) => {
@@ -415,6 +449,10 @@ fn run(
                 flight.in_flight += 1;
                 disk.submit(op, IoClass::Log);
             }
+            if let Some(job) = state.spare_job() {
+                inbox.making.set(inbox.making.get() + 1);
+                make_spare(disk.clone(), job.seq, job.ops.into(), inbox.clone());
+            }
         }
         shared.syncs.store(state.syncs(), Ordering::Relaxed);
         bound.set_durable(state.durable_bound());
@@ -426,6 +464,7 @@ fn run(
         }
         if shared.stop.load(Ordering::Acquire)
             && flight.in_flight == 0
+            && inbox.making.get() == 0
             && inbox.reqs.borrow().is_empty()
         {
             break;
@@ -441,6 +480,9 @@ fn run(
         }
         let wait = if state.disk_full() { DISK_FULL_RETRY } else { IDLE };
         woke_by_timer = inbox.signal.wait(wait);
+    }
+    for (seq, made) in inbox.spares.borrow_mut().drain(..) {
+        state.spare_done(seq, made);
     }
     // What was written without a sync (a removal, the copy of old files) is made durable.
     state.sync(0, IoOp::SyncDir { path: super::format::DIR.into() });

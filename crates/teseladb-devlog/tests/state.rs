@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use teseladb_devlog::state::{KEPT_FILES, LogState};
+use teseladb_devlog::state::{KEPT_FILES, LogState, SpareJob};
 use teseladb_raftlog::{
     Disk, FileId, IoDone, IoErrno, IoOp, MemDisk, SimDisk, SimDiskConfig, StorageError,
 };
@@ -756,4 +756,124 @@ fn a_log_of_version_1_reads_and_goes_on() {
     want.extend_from_slice(&batch(b"more"));
     assert_eq!(s.read(&mut disk, 0, 2).unwrap(), want);
     assert_eq!(files(&mut disk).len(), 2);
+}
+
+/// Runs a file's [`SpareJob`] on `disk`: its outcome.
+fn run_job(disk: &mut dyn Disk, job: SpareJob) -> Result<(), IoErrno> {
+    job.ops.into_iter().try_for_each(|op| match disk.execute(op) {
+        IoDone::Err { errno, .. } => Err(errno),
+        _ => Ok(()),
+    })
+}
+
+/// Writes `n` records of 5000 bytes for segment 1 of core 0 from `from`, each synced.
+fn records(s: &mut LogState, disk: &mut dyn Disk, from: u64, n: u64) {
+    for i in from..from + n {
+        s.write(0, 1, i * 5000, &varied(5000));
+        s.sync(0, sync_op(i));
+        assert!(s.flush(disk).iter().all(|(_, d)| matches!(d, IoDone::Ok(_))));
+    }
+}
+
+/// The next file is made ahead once the active one is half full, and the record that does not fit
+/// goes into it without making a file; a job not finished in time, or one that failed, leaves the
+/// record to make its file as before, and the file whose turn passed holds nothing.
+#[test]
+fn the_next_file_is_made_ahead_and_a_late_or_failed_one_changes_nothing() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.create(0, 1, 0);
+    records(&mut s, &mut disk, 0, 1);
+    assert!(s.spare_job().is_none(), "the first file is not half full");
+    records(&mut s, &mut disk, 1, 2);
+    let job = s.spare_job().expect("half full");
+    assert!(s.spare_job().is_none(), "one at a time");
+    let seq = job.seq;
+    s.spare_done(seq, run_job(&mut disk, job));
+    let made = s.stats();
+    // Each record takes two blocks: three fill a file after its header.
+    records(&mut s, &mut disk, 3, 3);
+    let st = s.stats();
+    assert_eq!(st.files_made, made.files_made + 1);
+    assert_eq!(st.files_made_waiting, made.files_made_waiting, "nobody waited for it");
+    // A job still running when a record needs its file: the record makes the next one, and the
+    // late file, once made, holds nothing.
+    let late = s.spare_job().expect("half full again");
+    records(&mut s, &mut disk, 6, 1);
+    assert_eq!(s.stats().files_made_waiting, st.files_made_waiting + 1);
+    let late_seq = late.seq;
+    s.spare_done(late_seq, run_job(&mut disk, late));
+    // A job that fails: the record makes its file.
+    records(&mut s, &mut disk, 7, 2);
+    let failed = s.spare_job().expect("half full again");
+    s.spare_done(failed.seq, Err(IoErrno::Io));
+    assert_eq!(s.failed(), None);
+    records(&mut s, &mut disk, 9, 1);
+    assert_eq!(s.stats().files_made_waiting, st.files_made_waiting + 2);
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let got = again.read(&mut disk, 0, 1).unwrap();
+    assert_eq!(got.len(), 10 * 5000);
+    for i in 0..10 {
+        assert_eq!(got[i * 5000..(i + 1) * 5000], varied(5000)[..], "record {i}");
+    }
+    // The empty file goes with the old ones once the segment does.
+    again.allow_tidying();
+    again.remove(0, 1);
+    again.create(0, 2, 0);
+    records(&mut again, &mut disk, 0, 1);
+    let left = files(&mut disk);
+    assert!(
+        !left.iter().any(|p| p == &teseladb_devlog::format::segment_path(late_seq)),
+        "{left:?}"
+    );
+}
+
+/// A crash at any operation, the file made ahead included, keeps every answered write.
+#[test]
+fn a_crash_while_a_file_is_made_ahead_keeps_every_answered_write() {
+    let file_bytes = 16 << 10;
+    let run = |disk: &mut dyn Disk, acked: &mut Vec<u8>| {
+        let Ok(mut s) = LogState::recover(disk, file_bytes) else { return };
+        s.allow_tidying();
+        s.create(0, 1, 0);
+        for i in 0..12u64 {
+            let data = varied(3000);
+            s.write(0, 1, i * 3000, &data);
+            s.sync(0, sync_op(i));
+            let answers = s.flush(disk);
+            if answers.is_empty() || answers.iter().any(|(_, d)| !matches!(d, IoDone::Ok(_))) {
+                return;
+            }
+            acked.extend_from_slice(&data);
+            if let Some(job) = s.spare_job() {
+                let seq = job.seq;
+                let made = run_job(disk, job);
+                s.spare_done(seq, made);
+            }
+        }
+    };
+    let mut counter = Cut { disk: sim(), left: usize::MAX };
+    run(&mut counter, &mut Vec::new());
+    let total = usize::MAX - counter.left;
+    for cut in 0..total {
+        for seed in 0..3u64 {
+            let mut acked = Vec::new();
+            let mut disk = Cut { disk: sim(), left: cut };
+            run(&mut disk, &mut acked);
+            disk.disk.crash(&mut Rng::new(seed));
+            let mut disk = disk.disk;
+            let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+            if acked.is_empty() {
+                continue;
+            }
+            let got = s.read(&mut disk, 0, 1).unwrap();
+            assert_eq!(&got[..acked.len()], &acked[..], "cut {cut} seed {seed}");
+            s.allow_tidying();
+            s.write(0, 1, got.len() as u64, b"after");
+            s.sync(0, sync_op(99));
+            assert!(matches!(s.flush(&mut disk)[0].1, IoDone::Ok(_)), "cut {cut}");
+        }
+    }
 }

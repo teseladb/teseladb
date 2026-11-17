@@ -57,6 +57,15 @@ impl World {
         }
         let mut ops = Vec::new();
         answers.extend(log.next(&mut n.log_disk, &mut ops));
+        // The next file, made ahead as the node's writer makes it apart from its records: here at
+        // once, on the same disk, whose failures and full space it meets as the records do.
+        if let Some(job) = log.spare_job() {
+            let made = job.ops.into_iter().try_for_each(|op| match n.log_disk.execute(op) {
+                IoDone::Err { errno, .. } => Err(errno),
+                _ => Ok(()),
+            });
+            log.spare_done(job.seq, made);
+        }
         for op in ops {
             if matches!(op, IoOp::Sync { .. }) {
                 n.log_syncs.push(op);

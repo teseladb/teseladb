@@ -168,6 +168,29 @@ pub struct LogState {
     /// The highest bound in a durable record, or found on recovery.
     durable_bound: u64,
     stats: LogStats,
+    /// The next file, made ahead of the record that needs it ([`LogState::spare_job`]).
+    spare: Option<Spare>,
+    /// Files made ahead whose turn passed while they were being made: once made, they hold
+    /// nothing and go as any empty file.
+    passed: Vec<(u64, FileId)>,
+}
+
+/// A file made ahead, off the writer's path: its header and its name are durable once `ready`.
+#[derive(Clone, Copy, Debug)]
+struct Spare {
+    seq: u64,
+    id: FileId,
+    ready: bool,
+}
+
+/// The operations that make the next file of the log ahead of time, to run in order apart from
+/// the writer's; their outcome goes to [`LogState::spare_done`].
+#[derive(Debug)]
+pub struct SpareJob {
+    /// The file's number.
+    pub seq: u64,
+    /// Its creation, its header's write, its sync and its directory's.
+    pub ops: Vec<IoOp>,
 }
 
 fn ok(done: IoDone) -> Result<Option<Bytes>, IoErrno> {
@@ -212,6 +235,8 @@ impl LogState {
             stamped: std::collections::VecDeque::new(),
             durable_bound: 0,
             stats: LogStats::default(),
+            spare: None,
+            passed: Vec::new(),
         };
         let mut paths: Vec<(u64, std::path::PathBuf)> = match disk.list(Path::new(format::DIR)) {
             Ok(v) => {
@@ -583,6 +608,10 @@ impl LogState {
     /// Makes file `seq` for a record of `need` bytes, with its header and its name durable before
     /// any record goes into it: a file without a valid header then holds nothing.
     fn new_file(&mut self, disk: &mut dyn Disk, need: u64) -> Result<u64, IoErrno> {
+        // A file still being made ahead comes before this one: it holds nothing.
+        if let Some(sp) = self.spare.take() {
+            self.pass(sp);
+        }
         let seq = self.next_file;
         let size = self.file_bytes.max(BLOCK + need);
         let id = self.new_id();
@@ -607,6 +636,88 @@ impl LogState {
         Ok(seq)
     }
 
+    /// The operations that make the next file ahead, once the active one is half full and no file
+    /// is being made ahead: the record that opens it then neither creates a file nor syncs the
+    /// log's directory while the cores wait. `None` when it is not time to.
+    pub fn spare_job(&mut self) -> Option<SpareJob> {
+        if self.failed.is_some() || self.spare.is_some() || self.disk_full {
+            return None;
+        }
+        let f = &self.files[&self.active?];
+        if f.used * 2 < f.size {
+            return None;
+        }
+        let seq = self.next_file;
+        self.next_file += 1;
+        let id = self.new_id();
+        self.spare = Some(Spare { seq, id, ready: false });
+        let path = format::segment_path(seq);
+        let header = Bytes::from_vec(format::segment_header(seq));
+        let ops = vec![
+            IoOp::Create { file: id, path, prealloc: self.file_bytes },
+            IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 },
+            IoOp::Sync { file: id, batch: 0 },
+            IoOp::SyncDir { path: format::DIR.into() },
+        ];
+        Some(SpareJob { seq, ops })
+    }
+
+    /// The outcome of the [`SpareJob`] of file `seq`: `Ok` once all its operations succeeded, or
+    /// the first error. A file that could not be made is made when a record needs it, as without
+    /// one made ahead; one whose turn passed meanwhile holds nothing and goes in its turn.
+    pub fn spare_done(&mut self, seq: u64, made: Result<(), IoErrno>) {
+        if let Some(sp) = self.spare.as_mut().filter(|sp| sp.seq == seq) {
+            match made {
+                Ok(()) => sp.ready = true,
+                Err(_) => self.spare = None,
+            }
+            return;
+        }
+        let Some(at) = self.passed.iter().position(|(s, _)| *s == seq) else { return };
+        let (seq, id) = self.passed.swap_remove(at);
+        if made.is_ok() {
+            self.insert_empty(seq, id);
+        }
+    }
+
+    /// A file made ahead whose turn passed: it goes once made, or now if it is.
+    fn pass(&mut self, sp: Spare) {
+        if sp.ready {
+            self.insert_empty(sp.seq, sp.id);
+        } else {
+            self.passed.push((sp.seq, sp.id));
+        }
+    }
+
+    /// Keeps file `seq`, made with its header and nothing else, until the oldest files go.
+    fn insert_empty(&mut self, seq: u64, id: FileId) {
+        let size = self.file_bytes;
+        let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: Some(0) };
+        self.files.insert(seq, file);
+    }
+
+    /// The file made ahead, as the active one, if it is made and the record of `need` bytes fits.
+    fn take_spare(&mut self, need: u64) -> Option<u64> {
+        let sp = self.spare.filter(|sp| sp.ready)?;
+        self.spare = None;
+        if BLOCK + need > self.file_bytes {
+            self.pass(sp);
+            return None;
+        }
+        let file = LogFile {
+            id: sp.id,
+            size: self.file_bytes,
+            used: BLOCK,
+            refs: 0,
+            live: 0,
+            freed_at: None,
+        };
+        self.files.insert(sp.seq, file);
+        self.active = Some(sp.seq);
+        self.stats.files_made += 1;
+        Some(sp.seq)
+    }
+
     /// Writes the flush being built as one record, unsynced.
     fn write_out(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
         let write = self.place(disk)?;
@@ -618,18 +729,33 @@ impl LogState {
     fn place(&mut self, disk: &mut dyn Disk) -> Result<IoOp, IoErrno> {
         // Every record carries the bound in force (D-172): the newest record has it even when the
         // files that had it went.
+        let unbound = self.body.len();
         if self.bound > 0 {
             format::push_frame(&mut self.body, FrameKind::Bound, 0, 0, self.bound, &[]);
-            self.stamped.push_back((self.next_flush, self.bound));
         }
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
+        let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
+        let seq = if fits {
+            self.active.expect("an active file")
+        } else if let Some(seq) = self.take_spare(need) {
+            seq
+        } else {
+            match self.new_file(disk, need) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    // The record waits for the next try, which stamps it again.
+                    self.body.truncate(unbound);
+                    return Err(e);
+                }
+            }
+        };
+        if self.bound > 0 {
+            self.stamped.push_back((self.next_flush, self.bound));
+        }
         self.stats.records += 1;
         self.stats.record_bytes += need;
         self.stats.padding_bytes += need - (HEAD + self.body.len()) as u64;
-        let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
-        let seq =
-            if fits { self.active.expect("an active file") } else { self.new_file(disk, need)? };
         let (id, at) = {
             let f = &self.files[&seq];
             (f.id, f.used)
