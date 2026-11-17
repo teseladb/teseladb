@@ -173,6 +173,8 @@ pub struct ServerBackend {
     statements: Option<barrier::Statements>,
     /// The parts of a filtered scan asked for ahead from the leaders of their ranges (010 FR-027).
     ahead: pushed_scan::ReadAhead,
+    /// Whether it yields before each part of a scan ([`ServerBackend::yielding_reads`]).
+    yield_reads: bool,
 }
 
 impl ServerBackend {
@@ -209,6 +211,7 @@ impl ServerBackend {
             outside: outside::Outside::default(),
             statements: None,
             ahead: pushed_scan::ReadAhead::default(),
+            yield_reads: false,
         }
     }
 
@@ -217,6 +220,23 @@ impl ServerBackend {
         let mut b = self;
         b.diag = Some(diag);
         b
+    }
+
+    /// The backend that gives its shard back, when the reactor asks for it, before each part of
+    /// a scan (023 FR-012): a part read on this thread from the range's view waits for no core,
+    /// so a long read of a background task (the statistics of a range, 010 FR-029) would hold
+    /// the shard from one end to the other.
+    pub fn yielding_reads(self) -> ServerBackend {
+        let mut b = self;
+        b.yield_reads = true;
+        b
+    }
+
+    fn yield_between_reads(&self) {
+        use teseladb::engine::core::thread::Thread;
+        if self.yield_reads && Thread::running_in_thread() {
+            Thread::maybe_yield();
+        }
     }
 
     /// The backend with the identity providers `oidc` (the HTTP port's, 019 FR-015).
@@ -289,6 +309,7 @@ impl ServerBackend {
         let outside = self.read_mark.is_none()
             && self.read_pref.as_ref().is_none_or(|p| p.mode == Mode::Primary);
         while from.as_slice() < end && rows.len() < limit {
+            self.yield_between_reads();
             let began = Instant::now();
             let want = limit - rows.len();
             if outside

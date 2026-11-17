@@ -55,17 +55,32 @@ pub struct RangeStats {
 
 impl FieldStats {
     /// The statistics of `values` (in any order), in at most [`HISTOGRAM_BUCKETS`] buckets.
-    pub fn build(mut values: Vec<Value>) -> FieldStats {
-        values.sort_by(compare_values);
+    pub fn build(values: Vec<Value>) -> FieldStats {
+        FieldStats::build_pausing(values, &mut || {})
+    }
+
+    /// [`FieldStats::build`], calling `pause` every [`crate::ordered::PAUSE_EVERY`] steps of
+    /// the work, where the caller may give the CPU to other work.
+    pub fn build_pausing(mut values: Vec<Value>, pause: &mut dyn FnMut()) -> FieldStats {
         let count = values.len() as u64;
         // Runs of equal values: a bucket never splits one.
-        let mut runs: Vec<(Value, u64)> = Vec::new();
-        for v in values {
-            match runs.last_mut() {
-                Some((last, n)) if compare_values(last, &v) == Ordering::Equal => *n += 1,
-                _ => runs.push((v, 1)),
+        let runs: Vec<(Value, u64)> = match crate::ordered::runs(&values, pause) {
+            Some(found) => found
+                .into_iter()
+                .map(|(first, n)| (std::mem::replace(&mut values[first], Value::Null), n))
+                .collect(),
+            None => {
+                values.sort_by(compare_values);
+                let mut runs: Vec<(Value, u64)> = Vec::new();
+                for v in values {
+                    match runs.last_mut() {
+                        Some((last, n)) if compare_values(last, &v) == Ordering::Equal => *n += 1,
+                        _ => runs.push((v, 1)),
+                    }
+                }
+                runs
             }
-        }
+        };
         let distinct = runs.len() as u64;
         let depth = count.div_ceil(HISTOGRAM_BUCKETS as u64).max(1);
         let mut buckets: Vec<Bucket> = Vec::new();
@@ -400,8 +415,22 @@ pub fn recompute_range(
     documents: u64,
     fields: Vec<(String, Vec<Value>)>,
 ) {
-    let fields =
-        fields.into_iter().map(|(path, values)| (path, FieldStats::build(values))).collect();
+    recompute_range_pausing(collection, (range, span), documents, fields, &mut || {});
+}
+
+/// [`recompute_range`], calling `pause` while it builds the statistics
+/// ([`FieldStats::build_pausing`]).
+pub fn recompute_range_pausing(
+    collection: &[u8],
+    (range, span): (u64, Span),
+    documents: u64,
+    fields: Vec<(String, Vec<Value>)>,
+    pause: &mut dyn FnMut(),
+) {
+    let fields = fields
+        .into_iter()
+        .map(|(path, values)| (path, FieldStats::build_pausing(values, pause)))
+        .collect();
     let stats = RangeStats { documents, fields };
     let mut map = locked();
     let entry = map.entry(collection.to_vec()).or_default();
