@@ -1406,11 +1406,10 @@ fn resolve_outgoing_address(a: &mut SocketAddress) -> Result<(), ExceptionPtr> {
     // SAFETY: both arguments are valid C strings.
     let f: *mut FILE = unsafe { fopen(c"/proc/net/ipv6_route".as_ptr(), c"r".as_ptr()) };
     if f.is_null() {
-        let e = std::io::Error::last_os_error();
-        return Err(ExceptionPtr::from(std::io::Error::new(
-            e.kind(),
-            format!("resolve_address: {}", e),
-        )));
+        // A system error with the errno of fopen, as the reference throws
+        // (std::system_error(errno, std::system_category(), "resolve_address")).
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return Err(ExceptionPtr::from(SystemError::new(code, "resolve_address")));
     }
 
     struct Holder(*mut FILE);
