@@ -615,6 +615,9 @@ fn check_memory(
 struct Groups {
     index: HashMap<Vec<u8>, usize>,
     list: Vec<(Value, Vec<State>)>,
+    /// The canonical key of the document being placed: one buffer for all of them, copied into
+    /// the index only for a new group.
+    scratch: Vec<u8>,
 }
 
 impl Groups {
@@ -635,15 +638,14 @@ impl Groups {
         outputs: &Outputs,
         col: Option<&dyn teseladb_bson::Collator>,
     ) -> usize {
-        let canon = canonical(&key, col);
-        match self.index.get(&canon) {
-            Some(i) => *i,
-            None => {
-                self.list.push((key, outputs.iter().map(|(_, a)| a.start()).collect()));
-                self.index.insert(canon, self.list.len() - 1);
-                self.list.len() - 1
-            }
+        self.scratch.clear();
+        encode(&key, col, &mut self.scratch);
+        if let Some(i) = self.index.get(self.scratch.as_slice()) {
+            return *i;
         }
+        self.list.push((key, outputs.iter().map(|(_, a)| a.start()).collect()));
+        self.index.insert(self.scratch.clone(), self.list.len() - 1);
+        self.list.len() - 1
     }
 
     fn finish(

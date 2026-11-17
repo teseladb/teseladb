@@ -105,7 +105,9 @@ struct Kept {
 /// read from the same message ([`crate::read_message_in`]).
 #[derive(Clone)]
 enum KeptBytes {
-    Own(Box<[u8]>),
+    /// Its own bytes; a stored document keeps the buffer it was read into, whose capacity may
+    /// pass its length, rather than copying it into one of the exact size.
+    Own(Vec<u8>),
     Shared(teseladb_types::Bytes),
 }
 
@@ -184,7 +186,7 @@ impl Document {
     /// [`Document::from_canonical`] for bytes a pass of the reader found canonical already
     /// ([`crate::read_message`]): they are not decoded and written again to check it.
     pub(crate) fn kept(raw: RawDoc<'_>) -> Document {
-        Document::keep(KeptBytes::Own(raw.as_bytes().into()))
+        Document::keep(KeptBytes::Own(raw.as_bytes().to_vec()))
     }
 
     /// [`Document::kept`] over a part of a shared buffer, without a copy.
@@ -216,8 +218,7 @@ impl Document {
             }),
             "a stored document that is not canonical BSON"
         );
-        let kept =
-            Kept { bytes: KeptBytes::Own(bytes.into_boxed_slice()), fields: OnceLock::new() };
+        let kept = Kept { bytes: KeptBytes::Own(bytes), fields: OnceLock::new() };
         Ok(Document { repr: Repr::Kept(Box::new(kept)) })
     }
 

@@ -101,6 +101,15 @@ impl<K> ContentCache<K> {
         Some(s.data.clone())
     }
 
+    /// Bytes a slot holds, without marking its reference (0 for a free slot).
+    #[must_use]
+    pub fn len_of(&self, slot: u32) -> u64 {
+        match self.slots.get(slot as usize) {
+            Some(Some(s)) => s.data.len() as u64,
+            _ => 0,
+        }
+    }
+
     /// Pins or unpins a slot.
     pub fn set_pinned(&mut self, slot: u32, pinned: bool) {
         if let Some(Some(s)) = self.slots.get_mut(slot as usize) {
@@ -156,6 +165,16 @@ mod tests {
         c.set_pinned(999, true);
         assert!(c.get(999).is_none());
         c.remove(999);
+    }
+
+    #[test]
+    fn gives_the_length_of_a_slot() {
+        let mut c = ContentCache::new(200);
+        let (a, _) = c.insert(owner(1), Bytes::from_vec(vec![0; 100]), false);
+        let (b, _) = c.insert(owner(2), Bytes::from_vec(vec![0; 60]), false);
+        assert_eq!((c.len_of(a), c.len_of(b), c.len_of(77)), (100, 60, 0));
+        c.remove(a);
+        assert_eq!((c.len_of(a), c.used()), (0, 60));
     }
 
     #[test]

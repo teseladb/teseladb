@@ -39,25 +39,67 @@ pub struct LambdaTask<Func: FnOnce() -> R, R: Futurize> {
 const _: () = assert!(mem::size_of::<TaskBase>() + mem::size_of::<PromiseNode<()>>() == 64);
 
 impl<Func: FnOnce() -> R + 'static, R: Futurize> LambdaTask<Func, R> {
+    /// Whether tasks of this type go through the thread's [`task_block_cache`]: those of
+    /// exactly one cache block (the task of `yield()`, and any task whose closure captures
+    /// nothing and returns `()`).
+    const CACHED: bool = task_block_cache::ENABLED
+        && mem::size_of::<Self>() == task_block_cache::BLOCK_SIZE
+        && mem::align_of::<Self>() <= task_block_cache::BLOCK_ALIGN;
+
     /// Allocates a task that runs `func` in scheduling group `sg`, built in place in a new
     /// allocation (the node points into itself, so the task is constructed at its final
     /// address).
     #[inline]
     fn alloc(sg: SchedulingGroup, func: Func) -> *mut Self {
-        let mut b = Box::<Self>::new_uninit();
-        let p = b.as_mut_ptr();
+        let p = Self::alloc_uninit();
         // SAFETY: p is the uninitialized allocation of a Self, uniquely owned here; every
-        // field is written once before the box is given up as initialized, and the node's
-        // state pointer is derived from the pointer to the whole task.
+        // field is written once before the task is used, and the node's state pointer is
+        // derived from the pointer to the whole task.
         unsafe {
             ptr::addr_of_mut!((*p).base).write(TaskBase::new::<Self>(sg));
             ptr::addr_of_mut!((*p)._result)
                 .write(PromiseNode::new_detached(false, Self::release_node));
             ptr::addr_of_mut!((*p)._func).write(ManuallyDrop::new(func));
-            let p = Box::into_raw(b).cast::<Self>();
             let n = Self::node_ptr(p);
             (*n).state = ptr::addr_of_mut!((*n).local_state);
             p
+        }
+    }
+
+    /// Memory for one task: a block of the thread's cache when the type is cached and the
+    /// cache has one, otherwise a new allocation (as a `Box`, which [`LambdaTask::free`]
+    /// gives back).
+    #[inline(always)]
+    fn alloc_uninit() -> *mut Self {
+        if Self::CACHED {
+            let b = task_block_cache::pop();
+            if !b.is_null() {
+                return b.cast::<Self>();
+            }
+        }
+        Box::into_raw(new_uninit_box::<Self>()).cast::<Self>()
+    }
+
+    /// Destroys the task and gives its memory back: to the thread's cache when the type is
+    /// cached and the cache has room, otherwise to the allocator.
+    ///
+    /// # Safety
+    /// `me` comes from [`LambdaTask::alloc`], is fully initialized and is not used after the
+    /// call.
+    #[inline(always)]
+    unsafe fn free(me: *mut Self) {
+        // SAFETY: guaranteed by the caller; the block of a cached type is exactly one cache
+        // block, allocated with this type's layout (alloc_uninit, or a block of the same
+        // size and size class taken from the cache).
+        unsafe {
+            if Self::CACHED {
+                ptr::drop_in_place(me);
+                if !task_block_cache::push(me.cast::<u8>()) {
+                    drop(Box::from_raw(me.cast::<mem::MaybeUninit<Self>>()));
+                }
+            } else {
+                drop(Box::from_raw(me));
+            }
         }
     }
 
@@ -84,7 +126,7 @@ impl<Func: FnOnce() -> R + 'static, R: Futurize> LambdaTask<Func, R> {
             let me = n.byte_sub(mem::offset_of!(Self, _result)).cast::<Self>();
             (*n).holder_node_live = false;
             if (*n).holder_done {
-                drop(Box::from_raw(me));
+                Self::free(me);
             }
         }
     }
@@ -115,6 +157,35 @@ impl<Func: FnOnce() -> R + 'static, R: Futurize> LambdaTask<Func, R> {
     pub unsafe fn as_task_ptr(this: *mut Self) -> TaskPtr {
         // SAFETY: guaranteed by the caller (a live heap task, so non-null).
         task_ptr(unsafe { NonNull::new_unchecked(this) })
+    }
+}
+
+/// `Box::<T>::new_uninit()`, allocated by calling the engine allocator directly when it is the
+/// global allocator: `alloc::alloc::alloc` first calls an out-of-line no-op symbol
+/// (`__rust_no_alloc_shim_is_unstable_v2`), a call on the path of every task that the
+/// allocator's inlined fast path does not need. The box is freed by the global allocator,
+/// which is the same allocator.
+#[inline(always)]
+fn new_uninit_box<T>() -> Box<mem::MaybeUninit<T>> {
+    #[cfg(not(engine_default_allocator))]
+    {
+        use std::alloc::{GlobalAlloc, Layout};
+        const { assert!(mem::size_of::<T>() != 0) };
+        let layout = Layout::new::<T>();
+        // SAFETY: the layout is not zero-sized; the block is allocated by the global allocator
+        // (`EngineAllocator`, installed by the crate unless `engine_default_allocator`) for
+        // `layout`, as `Box` requires of a pointer it frees.
+        unsafe {
+            let p = crate::engine::core::memory::EngineAllocator.alloc(layout);
+            if p.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            Box::from_raw(p.cast::<mem::MaybeUninit<T>>())
+        }
+    }
+    #[cfg(engine_default_allocator)]
+    {
+        Box::<T>::new_uninit()
     }
 }
 
@@ -168,8 +239,8 @@ unsafe impl<Func: FnOnce() -> R + 'static, R: Futurize> Task for LambdaTask<Func
             }
             if !(*n).holder_node_live {
                 // Nothing refers to the node any more and `me` is not used after this
-                // point (the box came from alloc()).
-                drop(Box::from_raw(me));
+                // point (it came from alloc()).
+                Self::free(me);
             }
         }
     }
@@ -216,4 +287,91 @@ pub fn make_task_ptr<Func: FnOnce() -> R + 'static, R: Futurize>(
 ) -> TaskPtr {
     // SAFETY: a fresh task from make_task.
     unsafe { LambdaTask::as_task_ptr(make_task(sg, func)) }
+}
+
+/// A per-thread cache of the memory of 64-byte tasks (an improvement beyond the original,
+/// which allocates and frees every task).
+///
+/// `yield()` allocates a task, which is freed once it has run: a loop that yields allocates
+/// and frees one block per iteration. The allocator's fast paths for that block reach the
+/// small pool through the thread's pool pointer and count the allocation and the free; this
+/// cache keeps up to [`CAP`] freed task blocks on a list of its own, one load away from the
+/// thread pointer, and hands them back to the next task of the same size. A task taken from
+/// the cache is not counted as an allocation by the allocator's statistics.
+///
+/// The cache is per thread, so a block is only reused on the thread that freed it (a task
+/// freed on another shard than the one that allocated it keeps its owner, and goes back to
+/// it when the cache gives it to the allocator). The blocks a thread holds when it exits are
+/// not freed: at most `CAP` blocks of 64 bytes, which on a shard thread belong to the
+/// shard's memory, released with it. It is off in the builds that check allocations
+/// (`engine_default_allocator`, failure injection, the address sanitizer).
+pub(crate) mod task_block_cache {
+    use std::cell::Cell;
+
+    /// Whether the cache is used in this build.
+    pub(crate) const ENABLED: bool = cfg!(not(any(
+        engine_default_allocator,
+        engine_enable_alloc_failure_injection,
+        feature = "alloc_failure_injection",
+        engine_asan_enabled,
+        engine_debug_allocations
+    )));
+    /// The size of a cached block: the 64-byte size class of the task of `yield()`.
+    pub(crate) const BLOCK_SIZE: usize = 64;
+    /// The largest alignment of a cached block's type (the allocator aligns a 64-byte block
+    /// to at least 16 bytes, so any type of that size and alignment can reuse it).
+    pub(crate) const BLOCK_ALIGN: usize = 16;
+    /// The most blocks one thread keeps.
+    const CAP: u32 = 32;
+
+    #[repr(C)]
+    struct FreeBlock {
+        next: *mut FreeBlock,
+    }
+
+    /// The list of free blocks and its length.
+    #[repr(C)]
+    struct Cache {
+        head: Cell<*mut FreeBlock>,
+        len: Cell<u32>,
+    }
+
+    crate::engine::util::initial_exec_tls::initial_exec_thread_local! {
+        fn cache() -> Cache, symbol = "__engine_rs_task_block_cache";
+    }
+
+    /// A free block, or null when the cache is empty.
+    #[inline(always)]
+    pub(crate) fn pop() -> *mut u8 {
+        // SAFETY: the calling thread's cache (all zero bits: an empty list), reached for this
+        // call only.
+        let c = unsafe { &*cache() };
+        let b = c.head.get();
+        if b.is_null() {
+            return b.cast::<u8>();
+        }
+        // SAFETY: a block on the list is a free block of BLOCK_SIZE bytes whose first word is
+        // the link written by push().
+        c.head.set(unsafe { (*b).next });
+        c.len.set(c.len.get() - 1);
+        b.cast::<u8>()
+    }
+
+    /// Keeps `p`, a free block of [`BLOCK_SIZE`] bytes (aligned to at least 8), unless the
+    /// cache is full; returns whether it was kept.
+    #[inline(always)]
+    pub(crate) fn push(p: *mut u8) -> bool {
+        // SAFETY: as in pop().
+        let c = unsafe { &*cache() };
+        let len = c.len.get();
+        if len >= CAP {
+            return false;
+        }
+        let b = p.cast::<FreeBlock>();
+        // SAFETY: by the caller, `p` is a free block large and aligned enough for the link.
+        unsafe { (*b).next = c.head.get() };
+        c.head.set(b);
+        c.len.set(len + 1);
+        true
+    }
 }

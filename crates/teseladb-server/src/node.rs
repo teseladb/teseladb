@@ -95,8 +95,10 @@ pub const DATA_FORMAT_FILE: &str = "data.format";
 /// device log, `raftlog/` (012 FR-035, D-154); a directory of format 7 has its cores' WAL segments
 /// moved there when it starts. 9: the device log's records carry the HLC bound in a `BOUND`
 /// frame (005 FR-003, D-172), which a node of format 8 would take for the end of its log; a
-/// directory of format 8 has none and starts as it is.
-pub const DATA_FORMAT: u32 = 9;
+/// directory of format 8 has none and starts as it is. 10: the device log's records of version 2,
+/// whose `FILL` frames stand for the padding of the cores' WAL batches, which a node of format 9
+/// would take for the end of its log; a directory of format 8 or 9 has none and starts as it is.
+pub const DATA_FORMAT: u32 = 10;
 
 /// The format before the device log, which a node moves to [`DATA_FORMAT`] when it starts.
 const PER_CORE_LOG_FORMAT: u32 = 7;
@@ -104,6 +106,10 @@ const PER_CORE_LOG_FORMAT: u32 = 7;
 /// The device log without the HLC bound in its records, which a node moves to [`DATA_FORMAT`]
 /// when it starts by writing the format.
 const DEVICE_LOG_FORMAT: u32 = 8;
+
+/// The device log of version 1, without `FILL` frames, which a node moves to [`DATA_FORMAT`] when
+/// it starts by writing the format.
+const BOUND_LOG_FORMAT: u32 = 9;
 
 /// Bytes of system randomness that seed the generator of the `$clusterTime` signing keys.
 const KEY_ENTROPY: usize = 48;
@@ -306,6 +312,9 @@ pub struct NodeConfig {
     pub placement: teseladb_io::engine::Placement,
     /// The mode of the engine's files (`--direct-io`, 012 FR-003, 023 FR-010, FR-033).
     pub files: teseladb_io::engine::DirectIo,
+    /// How long an idle shard polls before it sleeps, in microseconds (`--idle-poll-us`);
+    /// `None`: the node's default.
+    pub idle_poll_us: Option<u32>,
     /// The disks of the node's cores are one file system (the data directory): a range that
     /// changes core hands over its whole files as hard links (004 FR-033). A disk per core,
     /// as in memory, does not share its files.
@@ -355,6 +364,7 @@ impl Default for NodeConfig {
             memory_limit: None,
             placement: teseladb_io::engine::Placement::Unpinned,
             files: teseladb_io::engine::DirectIo::Off,
+            idle_poll_us: None,
             shared_files: false,
             client_hooks: crate::client_listener::Hooks::default(),
             startup_log: StartupLog::default(),
@@ -440,8 +450,8 @@ fn check_data_format(disk: &mut dyn Disk, existing: bool) -> Result<bool, NodeEr
     match found {
         DATA_FORMAT => Ok(false),
         PER_CORE_LOG_FORMAT => Ok(true),
-        // Before its log writes a `BOUND` frame (D-172).
-        DEVICE_LOG_FORMAT => {
+        // Before its log writes a `BOUND` frame (D-172) or a `FILL` frame.
+        DEVICE_LOG_FORMAT | BOUND_LOG_FORMAT => {
             let text = DATA_FORMAT.to_string().into_bytes();
             write_atomic(disk, Path::new(DATA_FORMAT_FILE), text, FileId(u32::MAX - 2))?;
             Ok(false)
@@ -950,13 +960,14 @@ struct StartedEngine {
 /// FR-015, T055): a shard per core where `--cpu-list` says, the node's memory split evenly between
 /// the shards, on huge pages when the system has them (023 FR-027, FR-028, FR-014).
 fn start_engine(cfg: &NodeConfig, cores: u16, at: SocketAddr) -> Result<StartedEngine, NodeError> {
-    let (engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
+    let (mut engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
         cores,
         &cfg.placement,
         cfg.memory_limit,
         cfg.files,
     )
     .map_err(NodeError::Config)?;
+    engine_cfg.idle_poll_us = cfg.idle_poll_us;
     let engine = NodeEngine::start(&engine_cfg)?;
     // A port that cannot be opened names itself and its address, as before the engine started.
     let peer_addr = engine

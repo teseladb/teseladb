@@ -15,6 +15,10 @@ use crate::jobs::{Outcome, Script};
 use crate::sst::reader::Table;
 use crate::version::Version;
 
+/// Nodes and values of flushed memtables [`Lsm::bury`] frees per call: a few hundred
+/// microseconds of work.
+pub(crate) const BURY_BUDGET: usize = 4096;
+
 impl Lsm {
     pub(super) fn schedule(&mut self) -> Option<Job> {
         let (free, held): (Vec<_>, Vec<_>) =
@@ -86,6 +90,29 @@ impl Lsm {
         None
     }
 
+    /// Frees part of the flushed memtables nothing reads any more: those of the graveyard that
+    /// only it holds begin their teardown, and the teardowns free up to [`BURY_BUDGET`] nodes
+    /// and values in all. Dropping the last view of a large memtable freed it whole on the
+    /// shard that dropped it (a stall of 170 ms on the one-node load).
+    pub(super) fn bury(&mut self) {
+        if self.graveyard.is_empty() && self.tearing.is_empty() {
+            return;
+        }
+        let mut kept = Vec::with_capacity(self.graveyard.len());
+        for m in std::mem::take(&mut self.graveyard) {
+            match Arc::try_unwrap(m) {
+                Ok(table) => self.tearing.push(crate::memtable::MemTeardown::new(table)),
+                Err(held) => kept.push(held),
+            }
+        }
+        self.graveyard = kept;
+        if let Some(t) = self.tearing.last_mut()
+            && t.step(BURY_BUDGET)
+        {
+            self.tearing.pop();
+        }
+    }
+
     /// Bytes of every file of the current version, its value files included (FR-034).
     pub(super) fn files_bytes(&self) -> u64 {
         let values: u64 = self.version.value_files().values().map(|v| v.size).sum();
@@ -103,7 +130,21 @@ impl Lsm {
                 self.counters.note_codes(v);
             }
         }
-        self.obsolete.extend(old.into_iter().filter(|(n, _)| !new.contains_key(n)).map(|(_, v)| v));
+        for (_, v) in old.into_iter().filter(|(n, _)| !new.contains_key(n)) {
+            self.retire(v);
+        }
+    }
+
+    /// Leaves `t`, which left the current version, to go from the disk once nothing holds it,
+    /// and drops its blocks, and those of its history file, from both caches now: the views that
+    /// still hold it are those of reads under way, which read what they still need from the
+    /// disk, and its blocks would otherwise hold memory of the caches until it goes.
+    fn retire(&mut self, t: Arc<Table>) {
+        for f in std::iter::once(&t).chain(t.history.as_ref()) {
+            self.reader.cache.retire(f.number, f.blocks(), true);
+            self.shared.retire(f.number, f.blocks());
+        }
+        self.obsolete.push(t);
     }
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
@@ -150,7 +191,9 @@ impl Lsm {
             Outcome::Flushed { table, edit } => {
                 self.state.apply(&edit);
                 let mut v = self.version.clone_shallow();
-                v.memtables.pop();
+                if let Some(flushed) = v.memtables.pop() {
+                    self.graveyard.push(flushed);
+                }
                 if let Some(t) = table {
                     self.adopt(&t);
                     v.levels[0].insert(0, Arc::new(*t));
@@ -240,7 +283,9 @@ impl Lsm {
             let (gone, kept): (Vec<_>, Vec<_>) =
                 std::mem::take(level).into_iter().partition(|t| removed.contains(&t.number));
             *level = kept;
-            self.obsolete.extend(gone);
+            for t in gone {
+                self.retire(t);
+            }
         }
         for (level, t) in added {
             self.adopt(&t);

@@ -523,7 +523,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     }
     // The Raft log of each core, on disk and in memory, and what its LSM writes (012 FR-016).
     type Gauge = (&'static str, &'static str, fn(&crate::data::LsmSizes) -> f64);
-    let per_core: [Gauge; 8] = [
+    let per_core: [Gauge; 11] = [
         (
             "teseladb_lsm_history_bytes",
             "Bytes of each core's history files, which its levels count too.",
@@ -563,6 +563,21 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "teseladb_lsm_rejects_total",
             "Writes that came while each core's LSM rejected proposals.",
             |s| s.rejects as f64,
+        ),
+        (
+            "teseladb_lsm_shared_cache_bytes",
+            "Bytes in the block cache each core shares with the reads on other threads.",
+            |s| s.shared_cache_bytes as f64,
+        ),
+        (
+            "teseladb_lsm_retired_cache_bytes",
+            "Bytes of blocks in either cache of each core whose files left its current version.",
+            |s| s.retired_cache_bytes as f64,
+        ),
+        (
+            "teseladb_lsm_unused_file_bytes",
+            "Bytes of each core's files no version uses that stay until their readers let them go.",
+            |s| s.unused_file_bytes as f64,
         ),
     ];
     for (name, help, value) in per_core {
@@ -665,6 +680,33 @@ fn log_metrics(out: &mut String, log_syncs: u64) {
          waiting (012 FR-035)."
     );
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {log_syncs}");
+}
+
+/// What the node's Raft log wrote (012 FR-035): its records and their bytes, the zeros after each
+/// record up to its block, the WAL bytes that `FILL` frames stood for, what it copied forward from
+/// its oldest file, the files it made (and those a record waited for), and the cores' syncs its
+/// syncs answered.
+fn log_write_metrics(out: &mut String, s: &teseladb_io::counters::LogStats) {
+    let rows = [
+        ("records", "Records the node's Raft log wrote.", s.records),
+        ("record_bytes", "Bytes of those records, with their padding.", s.record_bytes),
+        ("padding_bytes", "Zeros after each record up to its 4 KiB block.", s.padding_bytes),
+        ("filled_bytes", "Bytes of the cores' WAL that FILL frames stood for.", s.filled_bytes),
+        ("copied_bytes", "Bytes copied forward from the oldest file of the log.", s.copied_bytes),
+        ("copy_read_bytes", "Bytes read from the log to copy them forward.", s.copy_read_bytes),
+        ("files_made", "Files of the log made.", s.files_made),
+        (
+            "files_made_waiting",
+            "Files of the log made while a record waited.",
+            s.files_made_waiting,
+        ),
+        ("synced_requests", "Syncs of the cores answered by the log's syncs.", s.synced_requests),
+    ];
+    for (what, help, v) in rows {
+        let name = format!("teseladb_raftlog_{what}_total");
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {v}");
+    }
 }
 
 /// The links to other nodes: how many of this node's outbound links went down, whose queued
@@ -854,6 +896,7 @@ impl AdminBackend for NodeAdmin {
         ));
         txn_metrics(&mut out, &status.txn);
         log_metrics(&mut out, teseladb_io::counters::log_syncs());
+        log_write_metrics(&mut out, &teseladb_io::counters::log_stats());
         peer_metrics(&mut out, teseladb_io::counters::peer_links_failed());
         let outside = (
             crate::backend::served_outside(),
@@ -1732,6 +1775,31 @@ mod tests {
     }
 
     #[test]
+    fn the_log_write_metrics_give_each_counter_of_the_raft_log() {
+        let mut out = String::new();
+        let s = teseladb_io::counters::LogStats {
+            records: 3,
+            padding_bytes: 700,
+            filled_bytes: 9000,
+            copied_bytes: 11,
+            synced_requests: 8,
+            ..Default::default()
+        };
+        log_write_metrics(&mut out, &s);
+        for line in [
+            "teseladb_raftlog_records_total 3",
+            "teseladb_raftlog_padding_bytes_total 700",
+            "teseladb_raftlog_filled_bytes_total 9000",
+            "teseladb_raftlog_copied_bytes_total 11",
+            "teseladb_raftlog_synced_requests_total 8",
+            "teseladb_raftlog_files_made_total 0",
+            "# TYPE teseladb_raftlog_record_bytes_total counter",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line}: {out}");
+        }
+    }
+
+    #[test]
     fn the_lsm_metrics_give_the_block_cache_hits_and_misses() {
         let sizes =
             crate::data::LsmSizes { cache_hits: 90, cache_misses: 10, ..Default::default() };
@@ -1742,6 +1810,26 @@ mod tests {
             out.lines().any(|l| l == "teseladb_lsm_cache_misses_total{core=\"2\"} 10"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_lsm_metrics_give_the_shared_cache_and_what_left_the_version() {
+        let sizes = crate::data::LsmSizes {
+            shared_cache_bytes: 300,
+            retired_cache_bytes: 7,
+            unused_file_bytes: 4096,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        lsm_metrics(&mut out, &[(1, sizes)]);
+        for line in [
+            "teseladb_lsm_shared_cache_bytes{core=\"1\"} 300",
+            "teseladb_lsm_retired_cache_bytes{core=\"1\"} 7",
+            "teseladb_lsm_unused_file_bytes{core=\"1\"} 4096",
+            "# TYPE teseladb_lsm_shared_cache_bytes gauge",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in {out}");
+        }
     }
 
     #[test]

@@ -5,8 +5,9 @@
 //! sync starts as soon as that one ends; each group's cores are answered the moment its sync ends.
 //! The cores' requests come in one message per turn of each core ([`super::LogPort::pump`]); the
 //! answers go back to each core's shard. The writer runs in an engine thread of shard 0, as the
-//! log's rarer steps (a new file, copying the oldest one forward, a core's read of its segment)
-//! run on the executor synchronously.
+//! log's rarer steps (a new file nobody made ahead, removing old files, a core's read of its
+//! segment) run on the executor synchronously. The next file is made ahead, and the reads of a
+//! copy forward of the oldest file run, in the background class while the writer goes on.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -22,9 +23,10 @@ use teseladb::engine::core::thread::{ThreadAttributes, async_with_attributes as 
 use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint};
 use teseladb::engine::core::with_timeout::with_timeout;
 use teseladb_devlog::port::LogReq;
-use teseladb_devlog::state::LogState;
+use teseladb_devlog::state::{CopyJob, LogState};
 use teseladb_raftlog::{Disk, IoDone, IoErrno, IoOp};
 use teseladb_stages::Stage;
+use teseladb_types::Bytes;
 
 use super::bound::{DeviceLogConfig, LogBound, LogDisk, Sink};
 use super::port::LogPort;
@@ -108,7 +110,94 @@ impl Signal {
 #[derive(Default)]
 struct Inbox {
     reqs: RefCell<Vec<(u16, Req)>>,
+    /// The outcomes of the files made ahead, by number.
+    spares: RefCell<Vec<(u64, Result<(), IoErrno>)>>,
+    /// What the reads of a copy forward read, by file.
+    copies: RefCell<Vec<(u64, CopyRead)>>,
+    /// Files being made ahead and copies being read.
+    making: Cell<usize>,
     signal: Signal,
+}
+
+/// What the reads of a copy forward read, each at its offset, or their first error.
+type CopyRead = Result<Vec<(u64, Bytes)>, IoErrno>;
+
+/// Runs the reads of a copy forward on `disk` all at once, in the background class apart from the
+/// log's, and hands what they read to the writer's `inbox`.
+fn read_copy(disk: &ShardDisk, job: CopyJob, inbox: &Rc<Inbox>) {
+    let file = job.file;
+    let total = job.reads.len();
+    if total == 0 {
+        return copy_read(inbox, file, Ok(Vec::new()));
+    }
+    let got: Rc<RefCell<(usize, CopyRead)>> = Rc::new(RefCell::new((0, Ok(Vec::new()))));
+    for op in job.reads {
+        let (offset, len) = match &op {
+            IoOp::ReadAt { offset, len, .. } => (*offset, *len as usize),
+            _ => (0, 0),
+        };
+        let (got, inbox) = (got.clone(), inbox.clone());
+        drop(disk.call(op, IoClass::Background).then(move |done: IoDone| {
+            let piece = match done {
+                IoDone::Read { data: Ok(d), .. } if d.len() == len => Ok(d),
+                IoDone::Read { data: Err(errno), .. } | IoDone::Err { errno, .. } => Err(errno),
+                _ => Err(IoErrno::Io),
+            };
+            let mut g = got.borrow_mut();
+            g.0 += 1;
+            match piece {
+                Ok(d) => {
+                    if let Ok(v) = &mut g.1 {
+                        v.push((offset, d));
+                    }
+                }
+                Err(errno) => {
+                    if g.1.is_ok() {
+                        g.1 = Err(errno);
+                    }
+                }
+            }
+            if g.0 == total {
+                let read = std::mem::replace(&mut g.1, Ok(Vec::new()));
+                drop(g);
+                copy_read(&inbox, file, read);
+            }
+            make_ready_future(())
+        }));
+    }
+}
+
+fn copy_read(inbox: &Inbox, file: u64, read: CopyRead) {
+    inbox.copies.borrow_mut().push((file, read));
+    inbox.making.set(inbox.making.get().saturating_sub(1));
+    inbox.signal.notify();
+}
+
+/// Runs the operations of a file made ahead on `disk`, one after another in the background class
+/// apart from the log's, and hands the outcome to the writer's `inbox`.
+fn make_spare(
+    disk: ShardDisk,
+    seq: u64,
+    mut ops: std::collections::VecDeque<IoOp>,
+    inbox: Rc<Inbox>,
+) {
+    let Some(op) = ops.pop_front() else {
+        return spare_made(&inbox, seq, Ok(()));
+    };
+    let next = disk.clone();
+    drop(disk.call(op, IoClass::Background).then(move |done: IoDone| {
+        match done {
+            IoDone::Err { errno, .. } => spare_made(&inbox, seq, Err(errno)),
+            _ => make_spare(next, seq, ops, inbox),
+        }
+        make_ready_future(())
+    }));
+}
+
+fn spare_made(inbox: &Inbox, seq: u64, made: Result<(), IoErrno>) {
+    inbox.spares.borrow_mut().push((seq, made));
+    inbox.making.set(inbox.making.get().saturating_sub(1));
+    inbox.signal.notify();
 }
 
 thread_local! {
@@ -356,6 +445,8 @@ fn run(
     let mut results = Vec::new();
     let mut reqs = Vec::new();
     let mut woke_by_timer = false;
+    // What the writer counted into the node's metrics so far.
+    let mut published = state.stats();
     // Whether a wake-up on the disk's next result is armed.
     let armed = Rc::new(Cell::new(false));
     loop {
@@ -363,6 +454,13 @@ fn run(
         state.offer_bound(bound.offered());
         reqs.append(&mut inbox.reqs.borrow_mut());
         let took = !reqs.is_empty();
+        for (seq, made) in inbox.spares.borrow_mut().drain(..) {
+            state.spare_done(seq, made);
+        }
+        let copies: Vec<(u64, CopyRead)> = inbox.copies.borrow_mut().drain(..).collect();
+        for (file, read) in copies {
+            answer(&mut sinks, state.copy_done(file, read));
+        }
         for (core, req) in reqs.drain(..) {
             match req {
                 Req::Log(r, asked) => {
@@ -413,14 +511,26 @@ fn run(
                 flight.in_flight += 1;
                 disk.submit(op, IoClass::Log);
             }
+            if let Some(job) = state.spare_job() {
+                inbox.making.set(inbox.making.get() + 1);
+                make_spare(disk.clone(), job.seq, job.ops.into(), inbox.clone());
+            }
+            if let Some(job) = state.copy_job() {
+                inbox.making.set(inbox.making.get() + 1);
+                read_copy(&disk, job, &inbox);
+            }
         }
         shared.syncs.store(state.syncs(), Ordering::Relaxed);
         bound.set_durable(state.durable_bound());
+        let now = state.stats();
+        crate::counters::record_log_stats(&published, &now);
+        published = now;
         if worked {
             continue;
         }
         if shared.stop.load(Ordering::Acquire)
             && flight.in_flight == 0
+            && inbox.making.get() == 0
             && inbox.reqs.borrow().is_empty()
         {
             break;
@@ -437,6 +547,9 @@ fn run(
         let wait = if state.disk_full() { DISK_FULL_RETRY } else { IDLE };
         woke_by_timer = inbox.signal.wait(wait);
     }
+    for (seq, made) in inbox.spares.borrow_mut().drain(..) {
+        state.spare_done(seq, made);
+    }
     // What was written without a sync (a removal, the copy of old files) is made durable.
     state.sync(0, IoOp::SyncDir { path: super::format::DIR.into() });
     let before = state.syncs();
@@ -446,6 +559,7 @@ fn run(
     }
     shared.syncs.store(state.syncs(), Ordering::Relaxed);
     bound.set_durable(state.durable_bound());
+    crate::counters::record_log_stats(&published, &state.stats());
     WRITERS.with(|w| w.borrow_mut().remove(&log));
     let _ = stopped.send(disk.into_model());
 }

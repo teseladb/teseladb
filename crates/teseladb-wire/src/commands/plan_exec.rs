@@ -891,6 +891,9 @@ fn run_reading<B: Backend + ?Sized>(
     let limit = if blocking { None } else { read.limit };
     let unbucketed = unbucketed(coll)?;
     let mut seen = teseladb_index::docset::Seen::new();
+    // Only an `OR` of several scans can give a document twice: a scan gives each document once,
+    // and a multikey one drops its repeats itself (`own` below).
+    let several = scans.len() > 1;
     let mut ended = true;
     let mut cut = false;
     let mut last_past = false;
@@ -950,7 +953,7 @@ fn run_reading<B: Backend + ?Sized>(
             }
             // A scan without filter gives its entries to the `OR`, which drops those it has
             // seen; one with a filter fetches each document first.
-            let seen_before = seen.contains(&pk, local);
+            let seen_before = several && seen.contains(&pk, local);
             if residual.is_none() {
                 ran.child_given[child] += 1;
                 if seen_before {
@@ -988,7 +991,9 @@ fn run_reading<B: Backend + ?Sized>(
                 ran.child_given[child] += 1;
             }
             if keep && !seen_before {
-                seen.insert(&pk, local);
+                if several {
+                    seen.insert(&pk, local);
+                }
                 if read.index_keys {
                     let key = match index.id_index {
                         true => id_key(&bytes)?,
