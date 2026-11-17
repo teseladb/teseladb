@@ -45,6 +45,7 @@ mod cases {
             ("a_blocking_call_that_panics_fails_and_the_shard_goes_on", blocking_panic),
             ("a_shards_task_hands_a_blocking_call_off_without_waiting", spawned_off),
             ("a_block_read_in_an_engine_thread_leaves_its_shard_running", block_read_parks),
+            ("a_block_read_keeps_its_commands_state_while_it_waits", block_read_keeps_state),
             ("block_reads_in_an_engine_thread_share_the_shards_files", block_reads_share),
             ("a_shards_task_does_not_wait_for_a_block", block_read_from_a_task),
         ];
@@ -266,6 +267,57 @@ mod cases {
             ran.duration_since(asked)
         );
         assert_eq!(open, 0, "the reader let go of the file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    thread_local! {
+        /// The state of the command running on a shard's thread, as a command's context is.
+        static COMMAND: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    fn save_command() -> Box<dyn std::any::Any> {
+        Box::new(COMMAND.with(|c| c.replace(0)))
+    }
+
+    fn restore_command(state: Box<dyn std::any::Any>) {
+        if let Ok(v) = state.downcast::<u32>() {
+            COMMAND.with(|c| c.set(*v));
+        }
+    }
+
+    /// A command's thread-local state survives a block read that parks its engine thread while
+    /// another command runs on the shard (023 FR-018): the read saves it with the process's
+    /// switch hooks, as every other wait of an engine thread does.
+    fn block_read_keeps_state(_engine: &NodeEngine, _probe: &EngineProbe) {
+        assert!(wait::set_switch_hooks(wait::SwitchHooks {
+            save: save_command,
+            restore: restore_command
+        }));
+        let dir = scratch("state");
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+        assert!(made.success());
+        let at = dir.clone();
+        let first = on_engine_thread(move || {
+            COMMAND.with(|c| c.set(1));
+            let mut files = BlockFiles::default();
+            drop(files.read(&at, "fifo", 0, 4));
+            drop(files);
+            COMMAND.with(std::cell::Cell::get)
+        });
+        std::thread::sleep(SLOW / 3);
+        // Another command on the shard while the first waits.
+        let second = on_engine_thread(|| {
+            let before = COMMAND.with(std::cell::Cell::get);
+            COMMAND.with(|c| c.set(2));
+            before
+        });
+        let seen = within(&second, "a second command while the first waits");
+        let mut w = std::fs::OpenOptions::new().write(true).open(&fifo).expect("writer");
+        w.write_all(b"data").expect("write");
+        drop(w);
+        assert_eq!(seen, 0, "the second command does not see the first one's state");
+        assert_eq!(within(&first, "the block read"), 1, "the first command's state came back");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

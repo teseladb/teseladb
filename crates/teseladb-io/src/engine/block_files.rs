@@ -6,7 +6,8 @@
 //! their files do (and as the original engine's users read their sstables): the file is opened
 //! with `open_file_dma` (on the engine's syscall thread) and the block read with a DMA read on the
 //! shard's I/O queue (io_uring), and the engine thread parks until it ends, so the shard runs its
-//! other work meanwhile. Whether the reads bypass the kernel's page cache is the engine's mode of
+//! other work meanwhile; the command's thread-local state is saved while it is parked
+//! ([`wait::set_switch_hooks`]). Whether the reads bypass the kernel's page cache is the engine's mode of
 //! its files (`--direct-io`: `off` keeps the page cache, `on` and `auto` read directly where the
 //! file system takes it).
 //!
@@ -156,7 +157,8 @@ fn acquire(full: &str) -> io::Result<()> {
     if OPEN.with(|o| o.borrow_mut().get_mut(full).map(|s| s.holders += 1).is_some()) {
         return Ok(());
     }
-    let file = open_file_dma(full, OpenFlags::RO).get().map_err(|e| io_error(full, &e))?;
+    let file =
+        wait::get_saved(open_file_dma(full, OpenFlags::RO)).map_err(|e| io_error(full, &e))?;
     // Another engine thread of the shard may have opened it while this one waited: the first
     // open is kept and this one is closed as it drops.
     OPEN.with(|o| {
@@ -190,8 +192,7 @@ fn read_shared(full: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
     let Some(mut file) = OPEN.with(|o| o.borrow().get(full).map(|s| s.file.clone())) else {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("{full}: not open")));
     };
-    let buf = teseladb_sys::dma::read(&mut file, offset, len)
-        .get()
+    let buf = wait::get_saved(teseladb_sys::dma::read(&mut file, offset, len))
         .map_err(|e| io_error(full, &e))?;
     let got = buf.size().min(len);
     Ok(buf.as_slice()[..got].to_vec())
