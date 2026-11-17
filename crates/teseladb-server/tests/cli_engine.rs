@@ -70,8 +70,9 @@ fn the_fixed_rows_are_always_there() {
     assert_eq!(value(&a, "--network-stack").as_deref(), Some("posix"));
     assert_eq!(value(&a, "--blocked-reactor-notify-ms").as_deref(), Some("25"));
     assert_eq!(value(&a, "--task-quota-ms").as_deref(), Some("0.5"));
-    // The engine picks its backend (FR-033) and polls before sleeping: neither is set.
+    // The engine picks its backend (FR-033), and an idle shard sleeps without polling first.
     assert!(!a.iter().any(|x| x == "--reactor-backend" || x == "--poll-mode"));
+    assert_eq!(value(&a, "--idle-poll-time-us").as_deref(), Some("0"));
 }
 
 #[test]
@@ -80,4 +81,21 @@ fn a_cpu_list_with_fewer_cpus_than_cores_is_a_usage_error() {
         "start --insecure --cores 4 --cpu-list 0-1".split_whitespace().map(String::from).collect();
     let err = parse_with(&args, &|_| Ok(Vec::new())).expect_err("fewer CPUs").to_string();
     assert!(err.contains("--cpu-list names 2 CPUs for 4 cores"), "{err}");
+}
+
+#[test]
+fn idle_poll_us_reaches_the_node_s_configuration_and_is_bounded() {
+    assert_eq!(node_config(&start("start --insecure")).idle_poll_us, None);
+    let cfg = node_config(&start("start --insecure --idle-poll-us 0"));
+    assert_eq!(cfg.idle_poll_us, Some(0));
+    let cfg = node_config(&start("start --insecure --idle-poll-us 2000"));
+    assert_eq!(cfg.idle_poll_us, Some(2000));
+    for bad in ["x", "1.5", "1000001"] {
+        let args: Vec<String> = format!("start --insecure --idle-poll-us {bad}")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let err = parse_with(&args, &|_| Ok(Vec::new())).expect_err(bad).to_string();
+        assert!(err.contains("--idle-poll-us"), "{err}");
+    }
 }

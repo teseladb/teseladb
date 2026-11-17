@@ -91,8 +91,14 @@ pub fn engine_config(
         Ok(p) => (Some(p), None),
         Err(why) => (None, Some(why)),
     };
-    let cfg =
-        EngineConfig { shards: shards.max(1), cpus, memory: Some(memory), hugepages, direct_io };
+    let cfg = EngineConfig {
+        shards: shards.max(1),
+        cpus,
+        memory: Some(memory),
+        hugepages,
+        direct_io,
+        idle_poll_us: None,
+    };
     Ok((cfg, why_not))
 }
 

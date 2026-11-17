@@ -93,6 +93,9 @@ pub struct StartOpts {
     pub memory_limit: Option<u64>,
     /// The mode of the engine's files (`--direct-io`, 012 FR-003, 023 FR-033).
     pub direct_io: teseladb_io::engine::DirectIo,
+    /// How long an idle shard polls before it sleeps, in microseconds (`--idle-poll-us`,
+    /// `teseladb.idlePollUs`); `None`: the node's default.
+    pub idle_poll_us: Option<u32>,
     /// The interface whose IPv4 clients the port takes with AF_XDP and its own TCP stack
     /// (`--net-xdp`, 012 FR-033); `None`: the kernel's TCP only.
     pub net_xdp: Option<String>,
@@ -375,6 +378,10 @@ type Spec = (&'static str, bool);
 
 /// `--net-xdp <interface>` (012 FR-033).
 pub(crate) const NET_XDP: &str = "net-xdp";
+/// `--idle-poll-us <µs>`: how long an idle shard polls before it sleeps.
+pub(crate) const IDLE_POLL_US: &str = "idle-poll-us";
+/// The longest idle poll `--idle-poll-us` takes: one second.
+const MAX_IDLE_POLL_US: u32 = 1_000_000;
 const VALUE: bool = false;
 const FLAG: bool = true;
 
@@ -383,6 +390,7 @@ const START: &[Spec] = &[
     ("cores", VALUE),
     ("memory-limit", VALUE),
     ("direct-io", VALUE),
+    (IDLE_POLL_US, VALUE),
     (NET_XDP, VALUE),
     (BLOCK_COMPRESSOR, VALUE),
     ("cpu-list", VALUE),
@@ -990,6 +998,15 @@ fn no_positional(o: &Opts, sub: &str) -> Result<(), CliError> {
 
 /// The tags of `--tags`: `name=value` items, each name once, sorted by name.
 /// `--cpu-list` (012 FR-006): fewer CPUs than `--cores` is a usage error.
+/// `--idle-poll-us`: microseconds, 0 to [`MAX_IDLE_POLL_US`].
+fn idle_poll_us(v: Option<&str>) -> Result<Option<u32>, CliError> {
+    let Some(v) = v else { return Ok(None) };
+    match v.parse::<u32>() {
+        Ok(n) if n <= MAX_IDLE_POLL_US => Ok(Some(n)),
+        _ => err(format!("--{IDLE_POLL_US}: `{v}` (0 to {MAX_IDLE_POLL_US})")),
+    }
+}
+
 fn cpu_list(v: Option<&str>, cores: Option<u16>) -> Result<Option<Vec<usize>>, CliError> {
     let Some(v) = v else { return Ok(None) };
     let list = teseladb_io::engine::options::parse_cpu_list(v)
@@ -1147,6 +1164,7 @@ fn start(o: &Opts) -> Result<StartOpts, CliError> {
             Some(v) => teseladb_io::engine::DirectIo::parse(v)
                 .ok_or_else(|| CliError(format!("--direct-io: {v:?} is not auto, on or off")))?,
         },
+        idle_poll_us: idle_poll_us(o.get(IDLE_POLL_US))?,
         net_xdp: match o.get(NET_XDP) {
             Some("") => return Err(CliError("--net-xdp: no interface given".to_owned())),
             v => v.map(str::to_owned),
@@ -1286,6 +1304,7 @@ const USAGE_TEXT: &str = "\
 usage:
   teseladb start [--dbpath <dir>] [--cores <n>] [--memory-limit <bytes[K|M|G|T]>]
                  [--direct-io auto|on|off] [--cpu-list <cpus>] [--net-xdp <interface>]
+                 [--idle-poll-us <µs>]
                  [--${name:OPTION_BLOCK_COMPRESSOR} none|zlib|zstd|lz4]
                  [--bind_ip <addr>] [--port <n>] [--http-bind <addr>,...] [--http-port <n>]
                  [--peer-listen <ip:port>] [--advertise <ip|host>] [--admin-listen <ip:port>]

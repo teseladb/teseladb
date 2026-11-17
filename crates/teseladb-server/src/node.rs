@@ -312,6 +312,9 @@ pub struct NodeConfig {
     pub placement: teseladb_io::engine::Placement,
     /// The mode of the engine's files (`--direct-io`, 012 FR-003, 023 FR-010, FR-033).
     pub files: teseladb_io::engine::DirectIo,
+    /// How long an idle shard polls before it sleeps, in microseconds (`--idle-poll-us`);
+    /// `None`: the node's default.
+    pub idle_poll_us: Option<u32>,
     /// The disks of the node's cores are one file system (the data directory): a range that
     /// changes core hands over its whole files as hard links (004 FR-033). A disk per core,
     /// as in memory, does not share its files.
@@ -361,6 +364,7 @@ impl Default for NodeConfig {
             memory_limit: None,
             placement: teseladb_io::engine::Placement::Unpinned,
             files: teseladb_io::engine::DirectIo::Off,
+            idle_poll_us: None,
             shared_files: false,
             client_hooks: crate::client_listener::Hooks::default(),
             startup_log: StartupLog::default(),
@@ -956,13 +960,14 @@ struct StartedEngine {
 /// FR-015, T055): a shard per core where `--cpu-list` says, the node's memory split evenly between
 /// the shards, on huge pages when the system has them (023 FR-027, FR-028, FR-014).
 fn start_engine(cfg: &NodeConfig, cores: u16, at: SocketAddr) -> Result<StartedEngine, NodeError> {
-    let (engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
+    let (mut engine_cfg, ordinary_pages) = teseladb_io::engine::resources::engine_config(
         cores,
         &cfg.placement,
         cfg.memory_limit,
         cfg.files,
     )
     .map_err(NodeError::Config)?;
+    engine_cfg.idle_poll_us = cfg.idle_poll_us;
     let engine = NodeEngine::start(&engine_cfg)?;
     // A port that cannot be opened names itself and its address, as before the engine started.
     let peer_addr = engine

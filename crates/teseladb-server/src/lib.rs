@@ -265,6 +265,7 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
             None => teseladb_io::engine::Placement::Allowed,
         },
         files: o.direct_io,
+        idle_poll_us: o.idle_poll_us,
         // The block cache takes its whole part of the node's memory (012 FR-013), and the new
         // blocks go with the codec asked for or the default one (004 FR-023).
         lsm: teseladb_lsm::LsmConfig {

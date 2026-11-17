@@ -8,7 +8,7 @@
 //! the range keeps in the idempotence record of a retryable write (005 FR-011).
 
 use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
-use teseladb_changestream::describe::{Touch, describe};
+use teseladb_changestream::describe::{Touch, describe_raw};
 use teseladb_changestream::meta::RetryInfo;
 use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::update_desc::UpdateDescription;
@@ -1329,6 +1329,10 @@ impl Evaluation {
     }
 }
 
+/// The latched keys up to which a mutation finds a key by going through them in order; past it,
+/// by a map of their places.
+const LINEAR_LOOKUP: usize = 16;
+
 impl Bound {
     /// What the mutation writes and answers on the versions `current` of the keys `latch`, at
     /// mark `mark`. Without a mark (005 FR-035: an evaluation prepared ahead of the write) it
@@ -1340,8 +1344,21 @@ impl Bound {
         current: &[Option<(u8, &[u8])>],
         mark: Option<Hlc>,
     ) -> Result<Evaluation, MutationError> {
+        // The place of each latched key, its first one, so that a write of many documents finds
+        // each of them without going through all the others.
+        let places = (latch.len() > LINEAR_LOOKUP).then(|| {
+            let mut m = std::collections::HashMap::with_capacity(latch.len());
+            for (i, k) in latch.iter().enumerate() {
+                m.entry(k.as_slice()).or_insert(i);
+            }
+            m
+        });
         let lookup = |k: &[u8]| {
-            latch.iter().position(|x| x == k).and_then(|i| current.get(i).copied().flatten())
+            let i = match &places {
+                Some(m) => m.get(k).copied(),
+                None => latch.iter().position(|x| x == k),
+            };
+            i.and_then(|i| current.get(i).copied().flatten())
         };
         let enforce = !matches!(self.mutation, DocMutation::Backfill { .. });
         let checker = Checker::new(self.rules(), enforce);
@@ -1883,7 +1900,7 @@ fn modify(
                     let at = target.clone().unwrap_or_else(|| key.clone());
                     if let Some(changes) = u.path_changes(false) {
                         let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
-                        let d = describe(&Document::from(doc), &out.doc, &touches, position);
+                        let d = describe_raw(doc, &out.doc, &touches, position);
                         checker.changes.borrow_mut().push((at.clone(), d));
                     } else if u.is_pipeline() {
                         // A pipeline has no operators: its description compares the documents,

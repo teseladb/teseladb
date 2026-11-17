@@ -158,9 +158,49 @@ pub(crate) fn bytes_of(docs: &[Document]) -> usize {
     docs.iter().map(document_size).sum()
 }
 
-/// The bytes of document `d` in BSON.
+/// The bytes of document `d` in BSON. A document kept as its stored bytes is measured on them,
+/// with the same count as its fields give, without reading them into values.
 pub(crate) fn document_size(d: &Document) -> usize {
+    if let Some(raw) = d.canonical_bytes().and_then(|b| teseladb_bson::RawDoc::from_stored(b).ok())
+    {
+        return raw_document_size(raw);
+    }
     5 + d.iter().map(|(k, v)| 2 + k.len() + value_size(v)).sum::<usize>()
+}
+
+/// [`document_size`] of a document's bytes.
+fn raw_document_size(d: teseladb_bson::RawDoc<'_>) -> usize {
+    5 + d.iter().map(|(k, v)| 2 + k.len() + raw_value_size(v)).sum::<usize>()
+}
+
+/// [`value_size`] of a value read in place: what it gives for the value it reads into.
+fn raw_value_size(v: RawValue<'_>) -> usize {
+    match v {
+        RawValue::Double(_)
+        | RawValue::Int64(_)
+        | RawValue::DateTime(_)
+        | RawValue::Timestamp { .. } => 8,
+        RawValue::Int32(_) => 4,
+        RawValue::Decimal128(_) => 16,
+        RawValue::Boolean(_) => 1,
+        RawValue::ObjectId(_) => 12,
+        RawValue::String(s) | RawValue::Symbol(s) | RawValue::JavaScript(s) => 5 + s.len(),
+        RawValue::Binary { bytes, .. } => 5 + bytes.len(),
+        RawValue::Document(d) => raw_document_size(d),
+        RawValue::Array(items) => {
+            5 + items
+                .iter()
+                .enumerate()
+                .map(|(i, x)| 2 + decimal_digits(i) + raw_value_size(x))
+                .sum::<usize>()
+        }
+        _ => 16,
+    }
+}
+
+/// The digits of `i` written in decimal (an array's index as a field name).
+fn decimal_digits(i: usize) -> usize {
+    i.checked_ilog10().map_or(1, |l| l as usize + 1)
 }
 
 /// The bytes of value `v` in BSON (without its type byte and name).
@@ -179,7 +219,7 @@ pub(crate) fn value_size(v: &teseladb_bson::Value) -> usize {
             5 + items
                 .iter()
                 .enumerate()
-                .map(|(i, x)| 2 + i.to_string().len() + value_size(x))
+                .map(|(i, x)| 2 + decimal_digits(i) + value_size(x))
                 .sum::<usize>()
         }
         _ => 16,
@@ -237,4 +277,65 @@ pub fn missing_field(stage: &str, field: &str) -> MqlError {
 /// The `40415` of an argument `field` of `stage` it does not know.
 pub fn unknown_field(stage: &str, field: &str) -> MqlError {
     error(UNKNOWN_FIELD, format!("BSON field '{stage}.{field}' is an unknown field."))
+}
+
+#[cfg(test)]
+mod tests {
+    use teseladb_bson::{Document, Value};
+
+    use super::{decimal_digits, document_size, value_size};
+
+    /// The count of `d`'s fields, read into values, as before stored documents were measured
+    /// on their bytes.
+    fn by_fields(d: &Document) -> usize {
+        5 + d.iter().map(|(k, v)| 2 + k.len() + value_size(v)).sum::<usize>()
+    }
+
+    fn every_kind(n: usize) -> Document {
+        let inner = Document::new().with("x", Value::Int32(1)).with("s", "é".repeat(n));
+        let long: Vec<Value> = (0..n).map(|i| Value::Int64(i as i64)).collect();
+        Document::new()
+            .with("_id", Value::String(format!("c000-{n:08}")))
+            .with("d", Value::Double(1.5))
+            .with("i", Value::Int32(-3))
+            .with("l", Value::Int64(1 << 40))
+            .with("t", Value::DateTime(7))
+            .with("ts", Value::Timestamp { time: 1, increment: 2 })
+            .with("b", Value::Boolean(true))
+            .with("o", Value::ObjectId([3; 12]))
+            .with("n", Value::Null)
+            .with("u", Value::Undefined)
+            .with("bin", Value::Binary { subtype: 0, bytes: vec![1; n] })
+            .with("re", Value::Regex { pattern: "a.*".into(), options: "i".into() })
+            .with("js", Value::JavaScript("f()".into()))
+            .with("sym", Value::Symbol("s".into()))
+            .with("min", Value::MinKey)
+            .with("max", Value::MaxKey)
+            .with("doc", Value::Document(inner.clone()))
+            .with("arr", Value::Array(long))
+            .with("nested", Value::Array(vec![Value::Document(inner), Value::Array(vec![])]))
+            .with("pad", "x".repeat(n * 37))
+    }
+
+    #[test]
+    fn a_stored_document_measures_on_its_bytes_what_its_fields_give() {
+        for n in [0, 1, 9, 10, 11, 99, 100, 101, 1000] {
+            let fields = every_kind(n);
+            let bytes = fields.to_bytes().unwrap();
+            let stored = Document::from_stored(bytes).unwrap();
+            assert!(stored.canonical_bytes().is_some());
+            assert_eq!(document_size(&stored), by_fields(&fields), "n {n}");
+            assert_eq!(document_size(&fields), by_fields(&fields), "n {n}");
+            // The count read from the fields of the stored document is the same.
+            assert_eq!(by_fields(&stored), by_fields(&fields), "n {n}");
+        }
+        assert_eq!(document_size(&Document::new()), 5);
+    }
+
+    #[test]
+    fn decimal_digits_are_those_of_the_index_written() {
+        for i in [0usize, 1, 9, 10, 99, 100, 999, 1000, 123_456, usize::MAX] {
+            assert_eq!(decimal_digits(i), i.to_string().len(), "{i}");
+        }
+    }
 }
