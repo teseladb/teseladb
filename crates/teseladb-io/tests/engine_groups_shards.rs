@@ -1,4 +1,4 @@
-//! The disk classes' scheduling groups made once per process (023 FR-012) when every shard asks
+//! The disk classes' scheduling groups made once per engine (023 FR-012) when every shard asks
 //! for them at once: the node's cores, its log and its outlets open their disks together on start.
 //! Its own test binary, so that its case is the first to ask for the groups (`engine_groups.rs`
 //! covers two callers on one shard).
