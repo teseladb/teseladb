@@ -12,7 +12,7 @@ mod port_engine;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use port_engine::spawn_port;
@@ -92,6 +92,7 @@ fn hello() -> Document {
 
 #[test]
 fn handshake_and_ping_over_sockets() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut clients: Vec<TcpStream> = (0..6).map(|_| connect(&l)).collect();
     let mut ids = Vec::new();
@@ -125,6 +126,7 @@ fn handshake_and_ping_over_sockets() {
 
 #[test]
 fn compressed_requests_get_compressed_replies() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut c = connect(&l);
     let list = vec![Value::from("zstd"), Value::from("zlib")];
@@ -149,6 +151,7 @@ fn compressed_requests_get_compressed_replies() {
 
 #[test]
 fn awaitable_hello_and_exhaust() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let wait = hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 200);
@@ -177,6 +180,7 @@ fn awaitable_hello_and_exhaust() {
 
 #[test]
 fn connection_limit_closes_new_connections() {
+    let _turn = turn();
     let l = listener(2);
     let mut a = connect(&l);
     let mut b = connect(&l);
@@ -205,6 +209,7 @@ fn connection_limit_closes_new_connections() {
 
 #[test]
 fn faults_close_only_their_connection() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut good = connect(&l);
     let mut bad = connect(&l);
@@ -226,6 +231,7 @@ fn faults_close_only_their_connection() {
 
 #[test]
 fn spawn_fails_on_a_busy_address() {
+    let _turn = turn();
     let first = listener(1);
     let cfg = ClientConfig { addrs: first.addrs().to_vec(), ..config(1) };
     assert!(spawn_port(&cfg, Arc::new(Fixed)).is_err());
@@ -244,6 +250,7 @@ fn start(s: &str) -> teseladb_server::cli::StartOpts {
 
 #[test]
 fn client_options() {
+    let _turn = turn();
     let o = start("start --insecure");
     assert_eq!(
         (o.max_conns, o.compressors.clone()),
@@ -291,6 +298,7 @@ fn client_options() {
 
 #[test]
 fn a_slow_reader_gets_every_reply() {
+    let _turn = turn();
     // Thousands of pipelined pings without reading: the replies fill the socket, the worker
     // waits until it can write, and every reply arrives in order.
     let l = listener(DEFAULT_MAX_CONNECTIONS);
@@ -314,6 +322,7 @@ fn a_slow_reader_gets_every_reply() {
 
 #[test]
 fn clients_that_vanish_are_closed() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let wait = hello().with("topologyVersion", tv).with("maxAwaitTimeMS", 100);
@@ -348,6 +357,7 @@ fn clients_that_vanish_are_closed() {
 
 #[test]
 fn dev_cluster_with_a_busy_clients_port_fails() {
+    let _turn = turn();
     use teseladb_server::cli::DevOpts;
     // Node 2 of a cluster on base port P takes P + 1, which is already in use.
     let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -362,6 +372,7 @@ fn dev_cluster_with_a_busy_clients_port_fails() {
 
 #[test]
 fn dev_cluster_with_test_commands_answers_configure_fail_point() {
+    let _turn = turn();
     use teseladb_server::cli::DevOpts;
     // The drivers' specification tests need the failpoints (002 T043).
     let fail_point = Document::new()
@@ -387,6 +398,7 @@ fn dev_cluster_with_test_commands_answers_configure_fail_point() {
 
 #[test]
 fn a_waiting_client_that_hangs_up_is_closed_before_its_deadline() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let mut w = connect(&l);
@@ -408,6 +420,7 @@ fn a_waiting_client_that_hangs_up_is_closed_before_its_deadline() {
 
 #[test]
 fn a_client_that_closes_with_replies_unread_is_closed() {
+    let _turn = turn();
     // The client pipelines requests and closes without reading: the worker's writes fail
     // (connection reset) and it closes the connection.
     let l = listener(DEFAULT_MAX_CONNECTIONS);
@@ -431,6 +444,7 @@ fn a_client_that_closes_with_replies_unread_is_closed() {
 
 #[test]
 fn configuration_file_keys_of_the_clients_port() {
+    let _turn = turn();
     use teseladb_server::config::yaml_args;
     let args = yaml_args(b"net:\n  port: 0\n  maxIncomingConnections: 7\n  compression:\n    compressors: snappy,zlib\n").unwrap();
     assert_eq!(args, ["--port=0", "--maxConns=7", "--networkMessageCompressors=snappy,zlib"]);
@@ -441,6 +455,7 @@ fn configuration_file_keys_of_the_clients_port() {
 
 #[test]
 fn a_fault_behind_a_waiting_hello_closes_the_connection_after_the_answer() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let tv = Document::new().with("processId", Value::ObjectId(PID)).with("counter", 0i64);
     let mut w = connect(&l);
@@ -459,6 +474,7 @@ fn a_fault_behind_a_waiting_hello_closes_the_connection_after_the_answer() {
 
 #[test]
 fn the_replies_before_a_fault_reach_the_client() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut c = connect(&l);
     let mut both = OpMsg::encode(1, 0, 0, &hello().to_bytes().unwrap());
@@ -474,6 +490,7 @@ fn the_replies_before_a_fault_reach_the_client() {
 /// get `ShutdownInProgress` and close, and new ones are dropped.
 #[test]
 fn a_drained_node_closes_its_clients_port() {
+    let _turn = turn();
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
@@ -512,6 +529,7 @@ fn a_drained_node_closes_its_clients_port() {
 /// during a resize); a statement of a transaction gets `TransientTransactionError`.
 #[test]
 fn a_drained_node_labels_its_shutdown_as_the_driver_retries_it() {
+    let _turn = turn();
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = NodeClockState::new(clock, 7).with_presence(presence.clone());
@@ -560,6 +578,7 @@ fn a_drained_node_labels_its_shutdown_as_the_driver_retries_it() {
 /// list as it is.
 #[test]
 fn a_stopped_port_is_no_longer_woken() {
+    let _turn = turn();
     let presence = Arc::new(NodePresence::default());
     let clock = teseladb_multiraft::NodeClock::for_node(teseladb_types::NodeId(1));
     let state = Arc::new(NodeClockState::new(clock, 7).with_presence(presence.clone()));
@@ -596,6 +615,7 @@ fn a_stopped_port_is_no_longer_woken() {
 /// A connection that has sent nothing has taken no token, and is answered when it greets.
 #[test]
 fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_bucket() {
+    let _turn = turn();
     use teseladb_wire::ingress::Setting;
     let mut cfg = config(DEFAULT_MAX_CONNECTIONS);
     cfg.ingress = vec![
@@ -634,6 +654,15 @@ fn the_limiter_of_new_connections_queues_then_closes_the_greetings_past_its_buck
     l.stop();
 }
 
+/// The tests of this file run side by side, but for the one that counts the process's threads,
+/// which runs alone.
+static TURNS: RwLock<()> = RwLock::new(());
+
+/// The turn of a test that runs beside the others.
+fn turn() -> RwLockReadGuard<'static, ()> {
+    TURNS.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The threads of this process.
 fn threads() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, Iterator::count)
@@ -644,6 +673,8 @@ fn threads() -> usize {
 /// them, open or answering.
 #[test]
 fn connections_spread_over_the_shards_without_a_thread_each() {
+    // Alone: it counts the threads of the process.
+    let _alone = TURNS.write().unwrap_or_else(PoisonError::into_inner);
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     assert_eq!(l.shards(), 2, "the shards of the process's engine");
     // A first command warms the shards' pools of stacks.
@@ -674,6 +705,7 @@ fn connections_spread_over_the_shards_without_a_thread_each() {
 /// while the port holds its replies, and every reply arrives, in order, once it reads them.
 #[test]
 fn replies_not_read_stop_the_reading_until_they_go() {
+    let _turn = turn();
     let l = listener(DEFAULT_MAX_CONNECTIONS);
     let mut c = connect(&l);
     // Each request names an unknown command of 256 KiB, which its reply names again: without

@@ -3,8 +3,9 @@
 //! administration ports of the server build on it and keep only their protocol.
 //!
 //! [`Acceptor::start`] runs on shard 0, which owns the listening sockets: it listens on each
-//! address with the engine's POSIX stack, then every other shard listens on the address the
-//! kernel gave (a port 0 becomes a real one), so that the engine spreads the accepted connections
+//! address with the engine's POSIX stack, always on a concrete port ([`listen_concrete`]: a port
+//! 0 is resolved first), then every other shard listens on that same address, so that the engine
+//! spreads the accepted connections
 //! over all shards (no `SO_REUSEPORT`). Each shard runs one accept loop per address; each
 //! connection is a task of the shard that took it: its first bytes are taken the way the port's
 //! [`Side::sniff`] says (in clear, TLS, or chosen by the first byte) within the handshake
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{
-    ExceptionPtr, Future, make_exception_future, make_ready_future,
+    ExceptionPtr, Future, SystemError, make_exception_future, make_ready_future,
 };
 use teseladb::engine::core::gate::Gate;
 use teseladb::engine::core::reactor::internal_misc::run_in_background;
@@ -234,14 +235,59 @@ fn listen_all(
     let mut listeners = Vec::with_capacity(addrs.len());
     let mut bound = Vec::with_capacity(addrs.len());
     for a in addrs {
-        let l = listen_with(socket_address(*a), options.clone()).map_err(|e| {
+        let (l, at) = listen_concrete(*a, &options).map_err(|e| {
             let kind = e.downcast_ref::<io::Error>().map_or(io::ErrorKind::Other, io::Error::kind);
             ExceptionPtr::from(io::Error::new(kind, format!("{name} {a}: {e}")))
         })?;
-        bound.push(l.local_address().ok().as_ref().and_then(std_addr).unwrap_or(*a));
+        bound.push(at);
         listeners.push(Rc::new(RefCell::new(l)));
     }
     Ok((listeners, bound))
+}
+
+/// Tries at a free port for an address with port 0 before the listen fails.
+const FREE_PORT_TRIES: usize = 16;
+
+/// Listens on `at` with `opts` on this shard, always on a concrete port: the listener and its
+/// address. A port 0 is first resolved to a free port the system picks, and the engine listens
+/// there.
+///
+/// The engine's listener on the shard that accepts hands every connection meant for another
+/// shard to that shard's listener by the address it was *asked* to listen on (as the reference
+/// does: `posix_server_socket_impl::accept` sends its `_sa`), while the other shards listen on
+/// the address the kernel gave. Asked for port 0, the two keys would differ and every handed-over
+/// connection would wait forever in a queue nobody reads; asked for the concrete port, they match.
+pub(crate) fn listen_concrete(
+    at: SocketAddr,
+    opts: &ListenOptions,
+) -> Result<(ServerSocket, SocketAddr), ExceptionPtr> {
+    if at.port() != 0 {
+        let l = listen_with(socket_address(at), opts.clone())?;
+        let bound = l.local_address().ok().as_ref().and_then(std_addr).unwrap_or(at);
+        return Ok((l, bound));
+    }
+    let mut last = None;
+    for _ in 0..FREE_PORT_TRIES {
+        // The probe closes at once (std's listener sets SO_REUSEADDR, as the engine's does), so
+        // its port is free again unless another socket took it meanwhile: then a new one.
+        let free = std::net::TcpListener::bind(at)
+            .and_then(|p| p.local_addr())
+            .map_err(ExceptionPtr::from)?;
+        match listen_with(socket_address(free), opts.clone()) {
+            Ok(l) => return Ok((l, free)),
+            Err(e) if is_addr_in_use(&e) => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| ExceptionPtr::from(io::Error::from(io::ErrorKind::AddrInUse))))
+}
+
+/// Whether a failed listen failed because the address is in use.
+fn is_addr_in_use(e: &ExceptionPtr) -> bool {
+    e.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::AddrInUse)
+        || e.downcast_ref::<SystemError>().is_some_and(|s| {
+            io::Error::from_raw_os_error(s.code()).kind() == io::ErrorKind::AddrInUse
+        })
 }
 
 /// Stops port `id` on this shard.

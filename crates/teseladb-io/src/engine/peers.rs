@@ -33,8 +33,9 @@ use teseladb::engine::net::socket_defs::{SocketAddress, Transport};
 use teseladb_tls::ClientConfig;
 use teseladb_types::{Nanos, NodeId, Rng};
 
+use super::accept::listen_concrete;
 use super::blocking;
-use super::connect::{socket_address, std_addr};
+use super::connect::socket_address;
 use super::core_loop::{BACKOFF_MAX_MS, BACKOFF_MIN_MS, CoreLogic, MAX_PENDING};
 use super::post::{CoreIo, Gate, ShardPost, Wake};
 use super::tls_stream::{self, TlsSession};
@@ -332,7 +333,10 @@ fn listen_error(e: &ExceptionPtr) -> std::io::Error {
             let kind = std::io::Error::from_raw_os_error(s.code()).kind();
             std::io::Error::new(kind, s.to_string())
         }
-        None => std::io::Error::other(e.to_string()),
+        None => match e.downcast_ref::<std::io::Error>() {
+            Some(io) => std::io::Error::new(io.kind(), io.to_string()),
+            None => std::io::Error::other(e.to_string()),
+        },
     }
 }
 
@@ -342,13 +346,9 @@ fn listen_error(e: &ExceptionPtr) -> std::io::Error {
 /// [`listen_here`] takes it; a peer that calls meanwhile waits in the backlog. Returns the
 /// address it took.
 pub(crate) fn reserve_here(at: SocketAddr, cores: u16, base: u32) -> std::io::Result<SocketAddr> {
-    let ss = listen_with(socket_address(at), peer_listen_options(cores, base))
-        .map_err(|e| listen_error(&e))?;
-    let addr = ss
-        .local_address()
-        .ok()
-        .and_then(|a| std_addr(&a))
-        .ok_or_else(|| std::io::Error::other("the listening socket has no address"))?;
+    // On a concrete port: the shard that accepts hands connections over by that address.
+    let (ss, addr) =
+        listen_concrete(at, &peer_listen_options(cores, base)).map_err(|e| listen_error(&e))?;
     RESERVED.with(|r| r.borrow_mut().push((addr, ss)));
     Ok(addr)
 }
@@ -364,28 +364,32 @@ pub(crate) fn release_here() {
 /// Listens for the node's peers on this shard: the shard that owns the listening socket (the
 /// first, `owner`) accepts and the engine hands each connection to a shard of the node's cores;
 /// every one of them accepts its own. The owner takes the socket it reserved at `at`
-/// ([`reserve_here`]) if it did. Returns the address listened on (the owner's).
+/// ([`reserve_here`]) if it did, or listens on `at` on a concrete port ([`listen_concrete`]);
+/// the others listen on `on`, the address the owner listens on, which is the one it hands their
+/// connections over by. The listeners are known by `at`. Returns the address listened on (the
+/// owner's).
 pub(crate) fn listen_here(
     at: SocketAddr,
-    owner: bool,
+    on: Option<SocketAddr>,
     cores: u16,
     ctx: AcceptCtx,
 ) -> std::io::Result<Option<SocketAddr>> {
-    let reserved = owner
-        .then(|| {
-            RESERVED.with(|r| {
+    let opts = peer_listen_options(cores, ctx.base);
+    let (ss, addr) = match on {
+        Some(on) => (listen_with(socket_address(on), opts).map_err(|e| listen_error(&e))?, None),
+        None => {
+            let reserved = RESERVED.with(|r| {
                 let mut r = r.borrow_mut();
                 let i = r.iter().position(|(a, _)| *a == at)?;
-                Some(r.swap_remove(i).1)
-            })
-        })
-        .flatten();
-    let ss = match reserved {
-        Some(ss) => ss,
-        None => listen_with(socket_address(at), peer_listen_options(cores, ctx.base))
-            .map_err(|e| listen_error(&e))?,
+                Some(r.swap_remove(i))
+            });
+            let (ss, addr) = match reserved {
+                Some((addr, ss)) => (ss, addr),
+                None => listen_concrete(at, &opts).map_err(|e| listen_error(&e))?,
+            };
+            (ss, Some(addr))
+        }
     };
-    let addr = owner.then(|| ss.local_address().ok().and_then(|a| std_addr(&a))).flatten();
     let ss = Rc::new(RefCell::new(ss));
     LISTENERS.with(|l| l.borrow_mut().push((at, ss.clone())));
     drop(make_coroutine(accept_loop(ss, Rc::new(ctx))));

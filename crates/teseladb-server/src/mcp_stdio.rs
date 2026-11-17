@@ -343,6 +343,8 @@ mod tests {
 
     #[test]
     fn answers_the_relay_cannot_use_stop_it_with_a_message() {
+        // Its exchanges run on an engine of its own, in its turn.
+        let _engine = crate::outbound::test_engine::scoped();
         let failed =
             |answer: &'static [u8]| relay_with(&opts(canned(answer)), LINE, &mut Vec::new());
         let (code, err) =

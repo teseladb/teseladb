@@ -1888,6 +1888,8 @@ mod tests {
 
     #[test]
     fn a_join_nobody_answers_logs_its_failed_attempts() {
+        // In its turn: a node's start-up takes the pending log lines of the whole process.
+        let _turn = crate::outbound::test_engine::exclusive();
         // A port nothing listens on: bound, then released.
         let dead =
             std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();

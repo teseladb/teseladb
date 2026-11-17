@@ -4,13 +4,22 @@
 //! ahead, the data's (the clients' reads) behind it and the background's (flushes and compactions)
 //! with the least, so the log does not wait behind the data nor a client's read behind a
 //! compaction. The groups also account the CPU time of the operations' continuations.
+//!
+//! The groups belong to the engine that runs: a scheduling group exists on the shards of the
+//! engine that created it. They are made once per engine and forgotten when it stops
+//! ([`IoGroups::release`], which the node's engine does), so that the next engine of the process
+//! makes its own. They are not destroyed: tasks of a stopping node (an engine thread parked on a
+//! timer) may still run in them, and a destroyed group's tasks have no queue. Their numbers stay
+//! taken, as in a process of the reference, which runs one engine; a process that starts more
+//! engines than the engine has groups for runs the disk classes of the later ones in the default
+//! group.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future, make_ready_future};
 use teseladb::engine::core::reactor::create_scheduling_group;
-use teseladb::engine::core::scheduling::SchedulingGroup;
+use teseladb::engine::core::scheduling::{SchedulingGroup, default_scheduling_group};
 use teseladb::engine::core::shared_future::SharedPromise;
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
@@ -32,8 +41,9 @@ pub struct IoGroups {
     background: SchedulingGroup,
 }
 
-/// The groups of the process, made once: the engine has a fixed number of scheduling groups.
-static GROUPS: OnceLock<IoGroups> = OnceLock::new();
+/// The groups of the running engine, made once: the engine has a fixed number of scheduling
+/// groups.
+static GROUPS: Mutex<Option<IoGroups>> = Mutex::new(None);
 
 /// The shard that makes the groups, so that callers on several shards share one creation.
 const CREATOR_SHARD: u32 = 0;
@@ -43,17 +53,32 @@ thread_local! {
     static CREATING: RefCell<Option<SharedPromise<IoGroups>>> = const { RefCell::new(None) };
 }
 
+fn current() -> Option<IoGroups> {
+    *GROUPS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keeps `g` as the groups of the running engine, unless some were kept first.
+fn keep(g: IoGroups) -> IoGroups {
+    *GROUPS.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert(g)
+}
+
 impl IoGroups {
-    /// The groups of the process, creating them on every shard the first time. Callers that
-    /// come while they are being made, from any shard, wait for that one creation: a node's
+    /// The groups of the running engine, creating them on every shard the first time. Callers
+    /// that come while they are being made, from any shard, wait for that one creation: a node's
     /// start asks from several tasks at once (the clock's keeper, the device log's writer and
     /// the cores' disks), and a second creation would make each group again under the same name,
-    /// which the engine refuses when it registers the group's metrics a second time.
+    /// which the engine refuses when it registers the group's metrics a second time. When the
+    /// engine has no scheduling groups left, every class runs in the default group.
     pub fn get_or_create() -> Future<IoGroups> {
-        if let Some(g) = GROUPS.get() {
-            return make_ready_future(*g);
+        if let Some(g) = current() {
+            return make_ready_future(g);
         }
         Smp::submit_to(CREATOR_SHARD, create_once)
+    }
+
+    /// Forgets the groups of the running engine, before it stops: the next engine makes its own.
+    pub fn release() {
+        GROUPS.lock().unwrap_or_else(PoisonError::into_inner).take();
     }
 
     /// The scheduling group of `class`.
@@ -68,10 +93,10 @@ impl IoGroups {
 }
 
 /// On [`CREATOR_SHARD`]: the groups once made, the creation under way, or a new one that the
-/// callers until it ends share. A creation that fails is not kept: the next caller tries again.
+/// callers until it ends share.
 fn create_once() -> Future<IoGroups> {
-    if let Some(g) = GROUPS.get() {
-        return make_ready_future(*g);
+    if let Some(g) = current() {
+        return make_ready_future(g);
     }
     if let Some(waiting) =
         CREATING.with(|c| c.borrow().as_ref().map(SharedPromise::get_shared_future))
@@ -84,10 +109,11 @@ fn create_once() -> Future<IoGroups> {
     drop(create().then_wrapped(|done: Future<IoGroups>| {
         let ended = CREATING.with(|c| c.borrow_mut().take());
         let mut promise = ended.expect("the creation under way has its promise");
-        match done.get() {
-            Ok(g) => promise.set_value(*GROUPS.get_or_init(|| g)),
-            Err(e) => promise.set_exception(e),
-        }
+        let g = done.get().unwrap_or_else(|_| {
+            let d = default_scheduling_group();
+            IoGroups { log: d, data: d, background: d }
+        });
+        promise.set_value(keep(g));
         make_ready_future(())
     }));
     made
