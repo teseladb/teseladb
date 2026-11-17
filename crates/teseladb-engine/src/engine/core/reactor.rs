@@ -4941,7 +4941,8 @@ impl Reactor {
             // SAFETY: `desc` was just allocated; it deletes itself when it completes.
             let fut = unsafe { (*desc)._pr.get_future() };
             let req = IoRequest::make_fdatasync(fd);
-            self._io_sink.submit(desc.cast::<IoCompletion>(), req);
+            // SAFETY: `desc` was just allocated and only the reactor completes it.
+            unsafe { self._io_sink.submit(desc.cast::<IoCompletion>(), req) };
             return fut;
         }
         self.thread_pool()
