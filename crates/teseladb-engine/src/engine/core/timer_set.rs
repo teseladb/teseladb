@@ -344,6 +344,12 @@ where
         <A::Value as TimerSetEntry>::from_timestamp(self.last.max(self.next))
     }
 
+    /// Whether [`get_next_timeout`](Self::get_next_timeout) is the maximal time point (the
+    /// original's `get_next_timeout() == time_point::max()`): no timeout is expected.
+    pub fn next_timeout_is_max(&self) -> bool {
+        self.last.max(self.next) == MAX_TIMESTAMP
+    }
+
     /// Removes every timer from the active set.
     pub fn clear(&mut self) {
         let mut bits = self.non_empty_buckets;

@@ -2335,17 +2335,11 @@ mod engine_allocator {
             }
         }
 
+        // Only the heap profiler's allocation fast path asks (see `allocate`).
+        #[cfg(engine_heapprof)]
         #[inline(always)]
         fn maybe_sample(&mut self, size: usize) -> bool {
-            #[cfg(engine_heapprof)]
-            {
-                self.heap_prof_sampler().maybe_sample(size)
-            }
-            #[cfg(not(engine_heapprof))]
-            {
-                let _ = size;
-                false
-            }
+            self.heap_prof_sampler().maybe_sample(size)
         }
 
         #[inline(always)]
@@ -3397,7 +3391,8 @@ mod engine_allocator {
     /// The small-pool fast path of `allocate` (unaligned request, then the allocation's
     /// bookkeeping), with the refill of an empty pool (and the rest of that
     /// allocation) in a function of its own that it tail-calls: no call on the fast path
-    /// returns to it, so it needs no frame.
+    /// returns to it, so it needs no frame. With the heap profiler only (see `allocate`).
+    #[cfg(engine_heapprof)]
     #[inline(always)]
     fn allocate_from_small_pool_and_finish(size: usize) -> *mut c_void {
         let idx = SmallPool::size_to_idx(size as u32);
@@ -3420,6 +3415,7 @@ mod engine_allocator {
     /// `pool` is a pool of the calling thread's cpu_pages whose size class holds `size`.
     ///
     /// `extern "C"` (it cannot unwind), as `allocate_slowpath`.
+    #[cfg(engine_heapprof)]
     #[cold]
     #[inline(never)]
     unsafe extern "C" fn refill_small_pool_and_finish(
@@ -3544,6 +3540,31 @@ mod engine_allocator {
     #[inline(always)]
     pub fn allocate(mut size: usize) -> *mut c_void {
         size = size.max(size_of::<FreeObject>());
+        // Without the heap profiler the fast path does not ask whether the thread is a shard:
+        // it speaks only to the small pool's free list, and a thread without a pool (a null
+        // cpu_mem) or with an empty list takes the slow path, which asks (the upstream change
+        // "core/memory: don't check is_reactor_thread on the allocation fast path"). The
+        // pointer test is on the value the free-list load needs anyway, where the thread-local
+        // flag was a load of its own.
+        #[cfg(not(engine_heapprof))]
+        if likely(size <= MAX_SMALL_ALLOCATION) {
+            let mem = get_cpu_mem();
+            if likely(!mem.is_null()) {
+                // SAFETY: the thread's cpu_mem; `idx` is in range since size <=
+                // max_small_allocation, and the pool is used through its pointer.
+                unsafe {
+                    let pool = SmallPoolArray::get(
+                        &raw mut (*mem).small_pools,
+                        SmallPool::size_to_idx(size as u32),
+                    );
+                    if likely(!(*pool)._free.is_null()) {
+                        return finish_allocation(SmallPool::pop_free(pool), size);
+                    }
+                }
+            }
+            return allocate_slowpath(size);
+        }
+        #[cfg(engine_heapprof)]
         if likely(
             is_reactor_thread()
             // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem).

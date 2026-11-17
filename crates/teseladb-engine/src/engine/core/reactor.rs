@@ -6117,6 +6117,7 @@ impl Reactor {
     }
 
     /// Queues `t` at the front of its scheduling group's task queue.
+    #[inline]
     pub fn add_urgent_task(&mut self, t: TaskPtr) {
         let _section =
             crate::engine::util::critical_alloc_section::memory::ScopedCriticalAllocSection::new();
@@ -6251,13 +6252,29 @@ impl Reactor {
         unsafe { self._cpu_stall_detector.as_deref_mut().unwrap_unchecked() }
     }
 
+    /// Queues `tq` for activation unless it is active already.
+    ///
+    /// The test is inlined into `add_task` and `add_urgent_task`; the activation itself (a clock
+    /// read among others) is out of line, so that queuing a task into an active queue (the
+    /// common case: a task that schedules another into its own group) is a leaf function with
+    /// no stack frame.
+    #[inline(always)]
     fn activate(&mut self, tq: *mut TaskQueue) {
         // SAFETY: `tq` points to a task queue owned by `_task_queues`, with no other
         // reference to it live.
-        let tq = unsafe { &mut *tq };
-        if tq._active {
+        if unsafe { (*tq)._active } {
             return;
         }
+        self.activate_inactive(tq);
+    }
+
+    /// The out-of-line part of [`Reactor::activate`], for a queue that is not active.
+    #[cold]
+    #[inline(never)]
+    fn activate_inactive(&mut self, tq: *mut TaskQueue) {
+        // SAFETY: `tq` points to a task queue owned by `_task_queues`, with no other
+        // reference to it live.
+        let tq = unsafe { &mut *tq };
         // If activate() was called, the task queue is likely network-bound or I/O bound, not CPU-bound. As
         // such its vruntime will be low, and it will have a large advantage over other task queues. Limit
         // the advantage so it doesn't dominate scheduling for a long time, in case it _does_ become CPU
@@ -6283,7 +6300,12 @@ impl Reactor {
                 std::ptr::addr_of_mut!((*this)._expired_timers),
                 || {
                     // The callback runs inside `complete`, after the last timer callback.
-                    if !(*this)._timers.empty() {
+                    // The descriptor is armed from the next timeout, not from whether a
+                    // timer is queued: a timer cancelled while it ran leaves the set empty
+                    // with its next timeout set, and the set would then take the descriptor
+                    // for armed and not arm it for the next timer (upstream "timer: Enable
+                    // highres timer based on next timeout value", anotherproduct#3013).
+                    if !(*this)._timers.next_timeout_is_max() {
                         let next = (*this)._timers.get_next_timeout();
                         (*this).enable_timer(next);
                     }
