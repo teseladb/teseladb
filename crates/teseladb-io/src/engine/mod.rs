@@ -78,7 +78,7 @@ pub use core_loop::{
 #[cfg(target_os = "linux")]
 pub use disk_port::{CoreDisk, DiskWaker};
 #[cfg(target_os = "linux")]
-pub use node_engine::{CoreConfig, CoreHandle, EnginePost, NodeEngine};
+pub use node_engine::{CoreConfig, CoreHandle, EngineLease, EnginePost, NodeEngine, lease_engine};
 pub use options::{DirectIo, EngineConfig, Placement};
 #[cfg(target_os = "linux")]
 pub use stats::EngineProbe;

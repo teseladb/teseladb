@@ -12,11 +12,9 @@
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use teseladb::engine::core::alien;
-use teseladb::engine::core::app_template::{AppTemplate, Config};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::{ExceptionPtr, Future};
 use teseladb::engine::core::reactor::engine_is_ready;
@@ -109,43 +107,9 @@ pub fn exchange(target: Target, request: Vec<u8>) -> Future<Response> {
     })
 }
 
-/// The memory of a command-line process's engine, in bytes.
-#[cfg_attr(test, allow(dead_code))]
-const CLIENT_MEMORY: &str = "268435456";
-
-/// The engine of a command-line process, once started.
-#[cfg_attr(test, allow(dead_code))]
-static CLIENT_ENGINE: OnceLock<Result<(), String>> = OnceLock::new();
-
-/// Starts an engine of one shard on a thread of its own, which runs until the process ends.
-#[cfg_attr(test, allow(dead_code))]
-fn start_client_engine() -> Result<(), String> {
-    let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(1);
-    let spawned = std::thread::Builder::new().name("engine".into()).spawn(move || {
-        let config = Config {
-            name: "teseladb".into(),
-            auto_handle_sigint_sigterm: false,
-            ..Config::default()
-        };
-        let mut app = AppTemplate::new(config);
-        let args = ["teseladb", "--smp", "1", "--thread-affinity", "0"];
-        // A client needs little: the engine does not take the machine's memory for it.
-        let args = args.iter().chain(&["--memory", CLIENT_MEMORY, "--default-log-level", "error"]);
-        app.run(args.map(ToString::to_string).collect(), move || {
-            let _ = ready_tx.send(());
-            // The engine serves the process's requests until it ends.
-            make_coroutine(async {
-                std::future::pending::<()>().await;
-                Ok(())
-            })
-        })
-    });
-    spawned.map_err(|e| format!("the engine did not start: {e}"))?;
-    ready_rx.recv().map_err(|_| "the engine did not start".to_owned())
-}
-
 /// Runs `f` on shard 0 of the process's engine from a thread that is not a shard, and waits for
-/// its result. Without an engine in the process it starts one of a single shard. In an engine
+/// its result. Without an engine in the process it starts the client engine of one shard
+/// ([`teseladb_io::engine::lease_engine`]), which gives its turn up to a node engine. In an engine
 /// thread (a handler of the node's ports) `f` runs on its own shard and the thread parks until
 /// its future resolves (023 FR-018).
 ///
@@ -171,18 +135,24 @@ pub fn block_on<T: Send + 'static>(
     if engine_is_ready() {
         return Err(io::Error::other("a shard cannot wait for an exchange"));
     }
-    if alien::internal::default_instance().is_null() {
-        // A unit test runs its exchanges on an engine of its own (`test_engine::scoped`): a
-        // client engine, which never stops, would stay for the tests that need no engine or
-        // start a node's.
-        #[cfg(test)]
-        return Err(io::Error::other("a unit test runs its exchanges on test_engine::scoped"));
-        #[cfg(not(test))]
-        CLIENT_ENGINE.get_or_init(start_client_engine).clone().map_err(io::Error::other)?;
+    // A unit test runs its exchanges on an engine of its own (`test_engine::scoped`), never on
+    // a client engine. Elsewhere the client engine takes its turn with the process's node
+    // engines (D4): a node engine that starts waits for the exchanges under way on it, and one
+    // that stops makes the exchanges posted to it fail instead of reaching no engine.
+    let lease = teseladb_io::engine::lease_engine(cfg!(not(test)))?;
+    let (tx, rx) = mpsc::sync_channel::<Result<T, ExceptionPtr>>(1);
+    let posted = lease.post(move || {
+        run_in_background(f().then_wrapped(move |r: Future<T>| {
+            let _ = tx.send(r.get());
+            teseladb::engine::core::future::make_ready_future(())
+        }));
+    });
+    if !posted {
+        return Err(io::Error::other("the engine stopped"));
     }
-    #[allow(deprecated, reason = "the process has one engine (D4): its default instance")]
-    let answer = alien::submit_to_default(0, f);
-    match answer.recv() {
+    let answer = rx.recv();
+    drop(lease);
+    match answer {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(to_io(&e)),
         Err(_) => Err(io::Error::other("the engine stopped")),
