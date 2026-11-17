@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Shared-pointer behaviour not reached by shared_ptr_test: the counts seen from the object
 //! (`EnableLwSharedFromThis::use_count`, `EnableSharedFromThis::use_count`), `owned`, the
 //! orderings, hashing and printing (`null` for a null pointer, as the original's operator<<),

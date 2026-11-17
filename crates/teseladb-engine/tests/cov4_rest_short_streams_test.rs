@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The deprecated whole-stream readers of `http::short_streams::httpd` forward to the ones in
 //! `util::short_streams`: all the chunks, one contiguous string, or nothing (skipped).
 #![cfg(target_os = "linux")]

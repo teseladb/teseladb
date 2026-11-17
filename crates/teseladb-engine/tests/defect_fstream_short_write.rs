@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! A file output stream whose `dma_write` completes only part of a request resumes the write
 //! from an aligned position. For `O_DIRECT` files the completed amount is always a multiple of

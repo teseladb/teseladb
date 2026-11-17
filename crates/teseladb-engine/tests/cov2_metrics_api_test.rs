@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The data model of the metrics layer (the original's metrics_api.hh): metric ids compare and
 //! order by (group, shard, name, labels) and hash by group and shard; a series without a shard
 //! label is a bug; label sets hash by their values in name order; interned label holders order

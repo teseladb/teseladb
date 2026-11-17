@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! The HTTP server bounds the request line and headers together (32 KiB by default): once a
 //! request head goes past it, the server answers 431 Request Header Fields Too Large (or 414

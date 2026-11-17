@@ -881,9 +881,12 @@ fn node_with_a_file(docs: u32, deleted: u32) -> Node {
 /// 8 KiB go to value files by default (004 FR-034), and a key file of references holds a hundred
 /// versions a block.
 fn node_with_a_file_of_documents(docs: u32, deleted: u32) -> Node {
+    // No block cache: the core would otherwise leave the flushed file's blocks in the cache the
+    // views share, and the scans below would read them without asking for a single block.
     let lcfg = LsmConfig {
         dir: "core-00/lsm".into(),
         value_separation_bytes: 16 << 10,
+        cache_bytes: 0,
         ..LsmConfig::default()
     };
     fill_a_file(Node::with_lsm(lcfg), docs, deleted)

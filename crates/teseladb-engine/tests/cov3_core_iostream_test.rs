@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Stream entry points not reached elsewhere (the original's iostream.hh): the default `close`
 //! of a data source and the default `put(vector)` and `can_batch_flushes` of a data sink, the
 //! deprecated boolean constructor of an output stream (batched flushes only when the sink can),

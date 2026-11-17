@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Upgrade requests the WebSocket server refuses (the original's websocket/server.cc,
 //! `connection::read_http_upgrade_request`): a request the HTTP parser rejects, one without
 //! the `Upgrade: websocket` header, and one asking for a subprotocol no handler serves. Each

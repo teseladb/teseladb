@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The support of the table-driven parsers (the original's ragel.hh): a token split across
 //! buffers is collected by the builder and its guards, the state stack grows by doubling from
 //! 16 entries, and `StateMachineParser::call` hands back the unparsed rest of a buffer, or

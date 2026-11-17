@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(all(target_os = "linux", not(engine_default_allocator)))]
 //! An aligned allocation whose page count does not fit a span fails (null, `ENOMEM`, an
 //! allocation error) and is counted as a failed allocation, as an unaligned one does, instead

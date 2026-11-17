@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Tests of `ChunkedFifo`: pushes and pops within and across chunks, `pop_n`, constructor
 //! and destructor calls, copies and moves, failing constructors, equality, iterators, and
 //! optional benchmarks. Plain `#[test]` cases, with no reactor.

@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! The I/O class of a scheduling group is destroyed with the group. Before, it stayed in the
 //! I/O queue, and a group created later under the same index reused it: its requests were

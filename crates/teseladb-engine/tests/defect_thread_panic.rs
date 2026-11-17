@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! A panic raised in an engine thread unwinds to the thread's entry and fails the thread's
 //! future with the panic message, as an exception thrown in the thread's function fails

@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! The shard-to-NUMA-node table has one entry per shard, in shard order.
 

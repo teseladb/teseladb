@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! A periodic high resolution timer that cancels itself in its callback must not leave the
 //! timer descriptor off for the timers armed afterwards.

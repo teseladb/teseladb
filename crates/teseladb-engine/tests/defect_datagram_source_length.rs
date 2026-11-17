@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! A received datagram's source address has the length the kernel returned, not the size of
 //! a whole `sockaddr_storage`. Before, a received `AF_UNIX` source never compared equal to the

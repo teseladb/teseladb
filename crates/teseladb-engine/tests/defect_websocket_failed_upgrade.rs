@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 // The WebSocket server exists only with the tls feature (its handshake key uses gnutls).
 #![cfg(all(target_os = "linux", feature = "tls"))]
 //! A WebSocket connection whose upgrade request is refused (here, a plain HTTP request

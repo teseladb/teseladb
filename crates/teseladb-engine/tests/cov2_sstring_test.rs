@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! String behaviour not reached by sstring_test: the representation without a terminating NUL
 //! (the original's `basic_sstring<char, uint32_t, 15, false>`), shrinking an external string
 //! back inline, releasing external and inline strings into buffers, the comparisons, the

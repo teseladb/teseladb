@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Round trip of one operation through the shard's syscall thread.
 //!
 //! Runs `--total-ops` `stat` calls of `/` one after the other (each one handed to the syscall

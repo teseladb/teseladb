@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The blocks of stand-alone promise nodes that a thread keeps for reuse go back to the
 //! allocator when the thread exits.
 //!

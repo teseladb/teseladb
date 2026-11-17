@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(target_os = "linux")]
 //! A datagram received on an IPv6 channel reports the address it was sent to. The channel
 //! asked for `IP_PKTINFO`, which the kernel attaches to IPv4 datagrams only, so an IPv6

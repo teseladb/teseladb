@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! The application template beyond its plain start (the original's app_template.cc): the
 //! `--help` text with the application's description, a positional option and a custom
 //! configuration reader, the `io.conf` file of `$HOME/.config/engine`, a required option that

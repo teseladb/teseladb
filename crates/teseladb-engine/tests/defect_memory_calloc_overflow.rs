@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 #![cfg(all(target_os = "linux", not(engine_default_allocator)))]
 //! `calloc` whose `nmemb * size` overflows returns null, as the C standard requires, instead
 //! of aborting the process.
