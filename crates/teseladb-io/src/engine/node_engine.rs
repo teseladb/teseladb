@@ -59,35 +59,139 @@ thread_local! {
 /// How long a start waits for the node engine running in the process to stop.
 const TURN_WAIT: Duration = Duration::from_secs(600);
 
-/// Whether a node engine runs in the process (D4: one at a time).
-static RUNNING: Mutex<bool> = Mutex::new(false);
-/// Signalled when the node engine of the process stops.
-static STOPPED: Condvar = Condvar::new();
+/// How long an engine that stops waits for the exchanges of its leases ([`EngineLease`]).
+const LEASE_WAIT: Duration = Duration::from_secs(60);
 
-/// The process's turn to run a node engine, from its start until its thread ended. Starts in
+/// The memory of the client engine, in bytes: a client needs little.
+const CLIENT_MEMORY: u64 = 256 << 20;
+
+/// The engine of the process (D4: one at a time) as the threads that are not shards see it.
+struct Process {
+    /// Whether an engine holds the turn, from its start until its thread ended.
+    running: bool,
+    /// The gate of the engine that runs and is ready, until its stop begins.
+    gate: Option<Arc<Gate>>,
+    /// The client engine, when the engine that runs is one ([`lease_engine`]).
+    client: Option<NodeEngine>,
+    /// The leases of the engine that runs not yet dropped.
+    busy: usize,
+}
+
+static PROCESS: Mutex<Process> =
+    Mutex::new(Process { running: false, gate: None, client: None, busy: 0 });
+/// Signalled when the turn, the gate, the client engine or its leases change.
+static CHANGED: Condvar = Condvar::new();
+
+fn process() -> std::sync::MutexGuard<'static, Process> {
+    PROCESS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The process's turn to run an engine, from its start until its thread ended. Starts in
 /// threads of their own (the tests of one binary) take turns instead of racing for the
-/// process's single `alien` instance.
+/// process's single `alien` instance. A client engine ([`lease_engine`]) gives its turn up to a
+/// start once its leases are gone.
 struct Turn;
 
 impl Turn {
-    /// Waits up to [`TURN_WAIT`] for the node engine running in the process to stop.
+    /// Waits up to [`TURN_WAIT`] for the engine running in the process to stop; an idle client
+    /// engine is stopped for it.
     fn take() -> io::Result<Turn> {
-        let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-        let (mut running, _) = STOPPED
-            .wait_timeout_while(running, TURN_WAIT, |r| *r)
-            .unwrap_or_else(PoisonError::into_inner);
-        if *running {
-            return Err(io::Error::other("an engine already runs in this process"));
+        let deadline = Instant::now() + TURN_WAIT;
+        let mut p = process();
+        loop {
+            if !p.running {
+                p.running = true;
+                return Ok(Turn);
+            }
+            if p.client.is_some() && p.busy == 0 {
+                let client = p.client.take();
+                p.gate = None;
+                drop(p);
+                // Its stop gives the turn back (and signals it).
+                drop(client);
+                p = process();
+                continue;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::other("an engine already runs in this process"));
+            }
+            p = CHANGED.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
         }
-        *running = true;
-        Ok(Turn)
     }
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        *RUNNING.lock().unwrap_or_else(PoisonError::into_inner) = false;
-        STOPPED.notify_one();
+        process().running = false;
+        CHANGED.notify_all();
+    }
+}
+
+/// A way into the engine of the process for a thread that is not a shard (a command of the
+/// command line, a node's own threads): the engine of the node that runs, or else a client
+/// engine of one shard started for it, which runs until a node engine wants the turn and no
+/// lease of it is left. While a lease lives, its engine does not stop: a node engine stopped
+/// meanwhile waits for it (at most [`LEASE_WAIT`]), and what is posted after the stop fails.
+#[derive(Debug)]
+pub struct EngineLease {
+    gate: Arc<Gate>,
+}
+
+impl EngineLease {
+    /// Runs `f` on shard 0; `false` (and `f` dropped) once the engine stopped.
+    pub fn post(&self, f: impl FnOnce() + Send + 'static) -> bool {
+        ShardPost::new(0, self.gate.clone()).post(f)
+    }
+
+    /// Runs the future `f` makes on shard 0 and gives the channel of its result, as
+    /// `alien::submit_to` does; `None` (and `f` dropped) once the engine stopped.
+    pub fn submit<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> teseladb::engine::core::future::Future<T> + Send + 'static,
+    ) -> Option<alien::StdFuture<T>> {
+        ShardPost::new(0, self.gate.clone()).submit(f)
+    }
+}
+
+impl Drop for EngineLease {
+    fn drop(&mut self) {
+        process().busy -= 1;
+        CHANGED.notify_all();
+    }
+}
+
+/// A lease of the engine of the process: the one that runs, or a client engine started now when
+/// none does and `start_client` allows it. Waits while an engine starts or stops.
+///
+/// # Errors
+///
+/// When no engine runs and none may start, or the client engine cannot start.
+pub fn lease_engine(start_client: bool) -> io::Result<EngineLease> {
+    let mut p = process();
+    loop {
+        if let Some(gate) = &p.gate {
+            let gate = gate.clone();
+            p.busy += 1;
+            return Ok(EngineLease { gate });
+        }
+        if !p.running {
+            if !start_client {
+                return Err(io::Error::other("no engine runs in this process"));
+            }
+            p.running = true;
+            drop(p);
+            let cfg =
+                EngineConfig { shards: 1, memory: Some(CLIENT_MEMORY), ..EngineConfig::default() };
+            // On failure the turn goes back with the dropped `Turn`.
+            let engine = NodeEngine::start_with(&cfg, Turn, false)?;
+            p = process();
+            p.gate = Some(engine.gate.clone());
+            p.client = Some(engine);
+            CHANGED.notify_all();
+            continue;
+        }
+        p = CHANGED.wait(p).unwrap_or_else(PoisonError::into_inner);
     }
 }
 
@@ -150,7 +254,13 @@ impl NodeEngine {
     /// When another engine runs in the process, or the engine cannot start (its options, its
     /// memory or its CPUs).
     pub fn start(cfg: &EngineConfig) -> io::Result<NodeEngine> {
-        let turn = Turn::take()?;
+        NodeEngine::start_with(cfg, Turn::take()?, true)
+    }
+
+    /// Starts the engine in `turn`: a node's (`node`, which handles SIGINT and SIGTERM and is
+    /// the process's engine once ready) or the client engine of [`lease_engine`], which leaves the
+    /// signals to the process.
+    fn start_with(cfg: &EngineConfig, turn: Turn, node: bool) -> io::Result<NodeEngine> {
         if !alien::internal::default_instance().is_null() {
             return Err(io::Error::other("an engine already runs in this process"));
         }
@@ -167,7 +277,7 @@ impl NodeEngine {
                 let wake = Rc::new(Wake::default());
                 EXIT.with(|e| *e.borrow_mut() = Some(wake.clone()));
                 // SIGINT and SIGTERM through shard 0's reactor (023 FR-031).
-                let _ = ready_tx.send(super::signals::install_here());
+                let _ = ready_tx.send(if node { super::signals::install_here() } else { Ok(()) });
                 make_coroutine(async move {
                     wake.wait().await;
                     Ok(())
@@ -179,12 +289,19 @@ impl NodeEngine {
             code
         })?;
         match ready_rx.recv_timeout(START_LIMIT) {
-            Ok(Ok(())) => Ok(NodeEngine {
-                thread: Some(thread),
-                gate: Arc::default(),
-                shards: cfg.shards.max(1),
-                turn: Some(turn),
-            }),
+            Ok(Ok(())) => {
+                let engine = NodeEngine {
+                    thread: Some(thread),
+                    gate: Arc::default(),
+                    shards: cfg.shards.max(1),
+                    turn: Some(turn),
+                };
+                if node {
+                    process().gate = Some(engine.gate.clone());
+                    CHANGED.notify_all();
+                }
+                Ok(engine)
+            }
             Ok(Err(e)) => {
                 // The engine runs: it is stopped like any other before the error goes back.
                 let failed = NodeEngine {
@@ -398,7 +515,23 @@ impl NodeEngine {
         // A peer port reserved and never listened on goes while shard 0 still runs: queued
         // before the stop below, it runs first.
         let _ = self.post(0).post(peers::release_here);
-        // No thread that is not a shard enters the engine any more.
+        // No new lease reaches it, and the exchanges of the leases taken end first: one left
+        // waiting on a stopped engine would never get its answer. Then no thread that is not a
+        // shard enters it.
+        {
+            let mut p = process();
+            if p.gate.as_ref().is_some_and(|g| Arc::ptr_eq(g, &self.gate)) {
+                p.gate = None;
+                let until = Instant::now() + LEASE_WAIT;
+                while p.busy > 0 {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    p = CHANGED.wait_timeout(p, left).unwrap_or_else(PoisonError::into_inner).0;
+                }
+            }
+        }
         self.gate.close();
         #[allow(deprecated)]
         alien::run_on_default(0, || {

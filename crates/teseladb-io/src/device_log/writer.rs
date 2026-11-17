@@ -18,7 +18,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use teseladb::engine::core::future::{ExceptionPtr, Promise, make_ready_future};
-use teseladb::engine::core::thread::async_ as in_thread;
+use teseladb::engine::core::thread::{ThreadAttributes, async_with_attributes as in_thread_with};
 use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint};
 use teseladb::engine::core::with_timeout::with_timeout;
 use teseladb_devlog::port::LogReq;
@@ -37,6 +37,11 @@ use crate::engine::post::ShardPost;
 const IDLE: Duration = Duration::from_millis(100);
 /// How long it waits before trying again on a full disk.
 const DISK_FULL_RETRY: Duration = Duration::from_secs(1);
+/// The stack of the writer's engine thread. The engine's default (128 KiB, as the reference
+/// engine's) is too small for the writer's frames in a debug build, which has no guard page
+/// below it: the node aborted at the writer's first wait (a future's state found already set
+/// in `set_urgent_state`), and does not with this stack. It has room in every build.
+const WRITER_STACK: usize = 1 << 20;
 
 /// What a core asks of the writer.
 pub enum Req {
@@ -161,7 +166,8 @@ impl DeviceLog {
         let s = shared.clone();
         let post = engine.post_to(0);
         let sent = post.post(move || {
-            drop(in_thread(move || {
+            let attr = ThreadAttributes { sched_group: None, stack_size: WRITER_STACK };
+            drop(in_thread_with(attr, move || {
                 let opened = match open_disk(disk) {
                     Ok(d) => d,
                     Err(e) => return drop(started_tx.send(Err(e))),
