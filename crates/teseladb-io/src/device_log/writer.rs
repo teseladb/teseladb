@@ -356,6 +356,8 @@ fn run(
     let mut results = Vec::new();
     let mut reqs = Vec::new();
     let mut woke_by_timer = false;
+    // What the writer counted into the node's metrics so far.
+    let mut published = state.stats();
     // Whether a wake-up on the disk's next result is armed.
     let armed = Rc::new(Cell::new(false));
     loop {
@@ -416,6 +418,9 @@ fn run(
         }
         shared.syncs.store(state.syncs(), Ordering::Relaxed);
         bound.set_durable(state.durable_bound());
+        let now = state.stats();
+        crate::counters::record_log_stats(&published, &now);
+        published = now;
         if worked {
             continue;
         }
@@ -446,6 +451,7 @@ fn run(
     }
     shared.syncs.store(state.syncs(), Ordering::Relaxed);
     bound.set_durable(state.durable_bound());
+    crate::counters::record_log_stats(&published, &state.stats());
     WRITERS.with(|w| w.borrow_mut().remove(&log));
     let _ = stopped.send(disk.into_model());
 }

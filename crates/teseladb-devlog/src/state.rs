@@ -35,13 +35,57 @@ pub const WRITE_AHEAD: usize = 1 << 20;
 /// takes whole blocks.
 pub const AHEAD_RECORDS: usize = 4;
 
-/// Bytes of a WAL segment held at one place of a file of the log.
+/// The shortest run of one byte at the end of a write that goes as a `FILL` frame: below it the
+/// frame's head costs about what the bytes do.
+pub const FILL_MIN: usize = 64;
+
+/// Bytes of a WAL segment held at one place of a file of the log, or a run of one byte that a
+/// `FILL` frame of that file put there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Extent {
     end: u64,
     file: u64,
     /// Where its first byte is in the file.
     pos: u64,
+    /// The byte of a `FILL`: the file holds the frame, not the bytes.
+    fill: Option<u8>,
+}
+
+impl Extent {
+    /// Bytes of the file it keeps live, `len` of its bytes.
+    fn live(&self, len: u64) -> u64 {
+        if self.fill.is_some() { 0 } else { len }
+    }
+}
+
+/// What the log wrote since it started, for the node's metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LogStats {
+    /// Records written.
+    pub records: u64,
+    /// Bytes of the records, padding included.
+    pub record_bytes: u64,
+    /// Zeros after the records, to the next block.
+    pub padding_bytes: u64,
+    /// Bytes of WAL segments that `FILL` frames stood for.
+    pub filled_bytes: u64,
+    /// Bytes copied forward from the oldest file.
+    pub copied_bytes: u64,
+    /// Bytes read from the log to copy them.
+    pub copy_read_bytes: u64,
+    /// Files made.
+    pub files_made: u64,
+    /// Files made while a record waited for them.
+    pub files_made_waiting: u64,
+    /// The cores' syncs a sync of the log answered.
+    pub synced_requests: u64,
+}
+
+/// The trailing run of one byte of `data` long enough for a `FILL`: where it starts and its byte.
+fn trailing_run(data: &[u8]) -> Option<(usize, u8)> {
+    let &last = data.last()?;
+    let run = data.iter().rev().take_while(|b| **b == last).count();
+    (run >= FILL_MIN).then_some((data.len() - run, last))
 }
 
 /// A core's WAL segment.
@@ -77,6 +121,7 @@ struct Pending {
     arg: u64,
     len: u64,
     data_at: usize,
+    fill: Option<u8>,
 }
 
 /// The answers of a flush: for each core, the operations now durable (or failed).
@@ -122,6 +167,7 @@ pub struct LogState {
     stamped: std::collections::VecDeque<(u64, u64)>,
     /// The highest bound in a durable record, or found on recovery.
     durable_bound: u64,
+    stats: LogStats,
 }
 
 fn ok(done: IoDone) -> Result<Option<Bytes>, IoErrno> {
@@ -165,6 +211,7 @@ impl LogState {
             bound: 0,
             stamped: std::collections::VecDeque::new(),
             durable_bound: 0,
+            stats: LogStats::default(),
         };
         let mut paths: Vec<(u64, std::path::PathBuf)> = match disk.list(Path::new(format::DIR)) {
             Ok(v) => {
@@ -207,7 +254,9 @@ impl LogState {
                         continue;
                     }
                     let pos = base + f.data_at as u64;
-                    s.apply(f.kind, (f.core, f.segment), f.arg, (seq, pos, u64::from(f.len)));
+                    let fill = (f.kind == FrameKind::Fill).then_some(f.fill);
+                    let place = (seq, pos, u64::from(f.len));
+                    s.apply(f.kind, (f.core, f.segment), f.arg, place, fill);
                 }
                 expected = Some(r.flush + 1);
                 at += r.len;
@@ -281,10 +330,24 @@ impl LogState {
         self.body.len()
     }
 
+    /// What the log wrote since it started.
+    #[must_use]
+    pub fn stats(&self) -> LogStats {
+        self.stats
+    }
+
     fn frame(&mut self, kind: FrameKind, core: u16, wal: u64, arg: u64, data: &[u8]) {
         let data_at = self.body.len() + format::FRAME_HEAD;
         format::push_frame(&mut self.body, kind, core, wal, arg, data);
-        self.pending.push(Pending { kind, core, wal, arg, len: data.len() as u64, data_at });
+        let len = data.len() as u64;
+        self.pending.push(Pending { kind, core, wal, arg, len, data_at, fill: None });
+    }
+
+    fn fill(&mut self, core: u16, wal: u64, arg: u64, len: u32, byte: u8) {
+        let data_at = self.body.len() + format::FRAME_HEAD;
+        format::push_fill(&mut self.body, core, wal, arg, len, byte);
+        let (kind, len) = (FrameKind::Fill, u64::from(len));
+        self.pending.push(Pending { kind, core, wal, arg, len, data_at, fill: Some(byte) });
     }
 
     /// WAL segment `wal` of `core` exists, with at least `len` bytes.
@@ -292,9 +355,21 @@ impl LogState {
         self.frame(FrameKind::Create, core, wal, len, &[]);
     }
 
-    /// `data` at `offset` of WAL segment `wal` of `core`.
+    /// `data` at `offset` of WAL segment `wal` of `core`. A long run of one byte at its end (the
+    /// padding of a WAL batch) goes as a `FILL` frame.
     pub fn write(&mut self, core: u16, wal: u64, offset: u64, data: &[u8]) {
-        self.frame(FrameKind::Write, core, wal, offset, data);
+        match trailing_run(data)
+            .and_then(|(at, b)| Some((at, b, u32::try_from(data.len() - at).ok()?)))
+        {
+            Some((at, byte, run)) => {
+                if at > 0 {
+                    self.frame(FrameKind::Write, core, wal, offset, &data[..at]);
+                }
+                self.fill(core, wal, offset + at as u64, run, byte);
+                self.stats.filled_bytes += u64::from(run);
+            }
+            None => self.frame(FrameKind::Write, core, wal, offset, data),
+        }
     }
 
     /// WAL segment `wal` of `core` ends at `len`.
@@ -335,14 +410,14 @@ impl LogState {
         let mut refs = Vec::new();
         for (s, e) in hit {
             w.extents.remove(&s);
-            refs.push((e.file, e.end - s, false));
+            refs.push((e.file, e.live(e.end - s), false));
             if s < start {
                 w.extents.insert(s, Extent { end: start, ..e });
-                refs.push((e.file, start - s, true));
+                refs.push((e.file, e.live(start - s), true));
             }
             if e.end > end {
-                w.extents.insert(end, Extent { end: e.end, file: e.file, pos: e.pos + (end - s) });
-                refs.push((e.file, e.end - end, true));
+                w.extents.insert(end, Extent { pos: e.pos + (end - s), ..e });
+                refs.push((e.file, e.live(e.end - end), true));
             }
         }
         for (file, bytes, add) in refs {
@@ -361,6 +436,7 @@ impl LogState {
         key: (u16, u64),
         arg: u64,
         (file, pos, len): (u64, u64, u64),
+        fill: Option<u8>,
     ) {
         match kind {
             FrameKind::Create => {
@@ -372,13 +448,14 @@ impl LogState {
                 }
                 self.add_ref(file, 0);
             }
-            FrameKind::Write => {
+            FrameKind::Write | FrameKind::Fill => {
                 self.cut(key, arg, arg + len);
                 let w = self.wals.entry(key).or_default();
                 w.len = w.len.max(arg + len);
                 if len > 0 {
-                    w.extents.insert(arg, Extent { end: arg + len, file, pos });
-                    self.add_ref(file, len);
+                    let e = Extent { end: arg + len, file, pos, fill };
+                    w.extents.insert(arg, e);
+                    self.add_ref(file, e.live(len));
                 }
             }
             FrameKind::Truncate => {
@@ -426,8 +503,13 @@ impl LogState {
         let mut out = vec![0u8; len];
         let parts: Vec<(u64, Extent)> = w.extents.iter().map(|(s, e)| (*s, *e)).collect();
         for (s, e) in parts {
-            let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
             let at = usize::try_from(s).map_err(|_| IoErrno::Io)?;
+            let end = usize::try_from(e.end).map_err(|_| IoErrno::Io)?;
+            if let Some(b) = e.fill {
+                out[at..end].fill(b);
+                continue;
+            }
+            let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
             out[at..at + data.len()].copy_from_slice(&data);
         }
         Ok(out)
@@ -481,8 +563,15 @@ impl LogState {
             self.create(core, wal, len);
         }
         for ((core, wal), s, e) in parts {
+            if let Some(b) = e.fill {
+                let len = u32::try_from(e.end - s).map_err(|_| IoErrno::Io)?;
+                self.fill(core, wal, s, len, b);
+                continue;
+            }
             let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
-            self.write(core, wal, s, &data);
+            self.stats.copy_read_bytes += data.len() as u64;
+            self.stats.copied_bytes += data.len() as u64;
+            self.frame(FrameKind::Write, core, wal, s, &data);
         }
         let shift = self.body.len();
         self.body.extend_from_slice(&body);
@@ -502,6 +591,8 @@ impl LogState {
         let made = ok(disk.execute(IoOp::Create { file: id, path, prealloc: size }));
         self.disk_full = matches!(made, Err(IoErrno::NoSpace));
         made?;
+        self.stats.files_made += 1;
+        self.stats.files_made_waiting += 1;
         self.next_file += 1;
         let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: None };
         self.files.insert(seq, file);
@@ -533,6 +624,9 @@ impl LogState {
         }
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
+        self.stats.records += 1;
+        self.stats.record_bytes += need;
+        self.stats.padding_bytes += need - (HEAD + self.body.len()) as u64;
         let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
         let seq =
             if fits { self.active.expect("an active file") } else { self.new_file(disk, need)? };
@@ -545,7 +639,7 @@ impl LogState {
         let base = at + HEAD as u64;
         for p in std::mem::take(&mut self.pending) {
             let place = (seq, base + p.data_at as u64, p.len);
-            self.apply(p.kind, (p.core, p.wal), p.arg, place);
+            self.apply(p.kind, (p.core, p.wal), p.arg, place, p.fill);
         }
         let flush = self.next_flush;
         for f in self.files.values_mut() {
@@ -668,6 +762,7 @@ impl LogState {
             return Vec::new();
         }
         self.syncs += 1;
+        self.stats.synced_requests += self.syncing.len() as u64;
         self.durable = self.sync_upto;
         while let Some(&(flush, bound)) = self.stamped.front()
             && flush <= self.durable

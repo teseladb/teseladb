@@ -371,6 +371,11 @@ fn settle(state: &mut LogState, disk: &mut SimDisk) -> Vec<(u16, IoDone)> {
     }
 }
 
+/// `len` bytes that start from `seed` and have no run long enough for a `FILL`.
+fn pattern(seed: u8, len: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * 7 + usize::from(seed)) % 251) as u8).collect()
+}
+
 fn synced(state: &mut LogState, disk: &mut SimDisk, core: u16) {
     state.sync(core, IoOp::Sync { file: FileId(1), batch: 0 });
     let answers = settle(state, disk);
@@ -392,13 +397,13 @@ fn a_file_freed_by_a_rewrite_written_behind_a_sync_stays_until_that_rewrite_is_d
     // File 1: core 0's segment and its first bytes. File 2: the rest of them, more than half a
     // file, so that the log never copies it forward. Then files of core 1.
     state.create(0, 1, 0);
-    state.write(0, 1, 0, &[1; 10]);
+    state.write(0, 1, 0, &pattern(1, 10));
     synced(&mut state, &mut disk, 0);
-    state.write(0, 1, 10, &[2; 5000]);
+    state.write(0, 1, 10, &pattern(2, 5000));
     synced(&mut state, &mut disk, 0);
     state.create(1, 1, 0);
     for i in 0..5u64 {
-        state.write(1, 1, i * 3000, &[3; 3000]);
+        state.write(1, 1, i * 3000, &pattern(3, 3000));
         synced(&mut state, &mut disk, 1);
     }
     // The log copied what file 1 still held forward and removed it: file 2, which only holds
@@ -409,7 +414,7 @@ fn a_file_freed_by_a_rewrite_written_behind_a_sync_stays_until_that_rewrite_is_d
     assert!(oldest.ends_with("0000000000000002.log"), "{files:?}");
     // A sync of core 1 runs; meanwhile core 0 writes the same bytes of its segment again, in a
     // record written behind that sync, which lets go of the last bytes of file 2.
-    state.write(1, 1, 15_000, &[4; 100]);
+    state.write(1, 1, 15_000, &pattern(4, 100));
     state.sync(1, IoOp::Sync { file: FileId(1), batch: 1 });
     let mut ops = Vec::new();
     assert!(state.next(&mut disk, &mut ops).is_empty());
@@ -419,7 +424,7 @@ fn a_file_freed_by_a_rewrite_written_behind_a_sync_stays_until_that_rewrite_is_d
     for op in writes {
         assert!(state.on_done(&disk.execute(op)).is_empty());
     }
-    state.write(0, 1, 10, &[5; 5000]);
+    state.write(0, 1, 10, &pattern(5, 5000));
     state.sync(0, IoOp::Sync { file: FileId(1), batch: 2 });
     assert!(state.next(&mut disk, &mut ops).is_empty());
     assert!(ops.iter().all(|op| !matches!(op, IoOp::Sync { .. })), "written behind the sync");
@@ -439,6 +444,6 @@ fn a_file_freed_by_a_rewrite_written_behind_a_sync_stays_until_that_rewrite_is_d
     // made durable.
     disk.crash(&mut Rng::new(1));
     let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
-    let want: Vec<u8> = [vec![1; 10], vec![2; 5000]].concat();
+    let want: Vec<u8> = [pattern(1, 10), pattern(2, 5000)].concat();
     assert_eq!(again.read(&mut disk, 0, 1).unwrap(), want);
 }

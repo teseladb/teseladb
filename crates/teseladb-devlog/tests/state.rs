@@ -15,6 +15,11 @@ fn sync_op(n: u64) -> IoOp {
     IoOp::Sync { file: FileId(1), batch: n }
 }
 
+/// `len` bytes without a run of one byte long enough for a `FILL`.
+fn varied(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
 /// What a core's WAL segments should hold.
 type Model = BTreeMap<(u16, u64), Vec<u8>>;
 
@@ -25,6 +30,19 @@ fn put(model: &mut Model, key: (u16, u64), offset: u64, data: &[u8]) {
         w.resize(end, 0);
     }
     w[offset as usize..end].copy_from_slice(data);
+}
+
+/// Bytes as a core's WAL writes them: random records, often followed by a run of one byte as long
+/// as the padding of a batch (or shorter than a `FILL` takes).
+fn wal_bytes(rng: &mut Rng, most: u64) -> Vec<u8> {
+    let mut data = vec![0u8; rng.range(1, most) as usize];
+    rng.fill(&mut data);
+    if rng.range(0, 2) == 0 {
+        let byte = [0x5a, 0, 7][rng.range(0, 3) as usize];
+        let run = rng.range(1, 4096) as usize;
+        data.resize(data.len() + run, byte);
+    }
+    data
 }
 
 fn check(state: &mut LogState, disk: &mut dyn Disk, model: &Model) {
@@ -101,8 +119,7 @@ fn random_writes_overwrites_truncations_and_removals_survive_restarts() {
                     let cur = model[&(core, w)].len() as u64;
                     // Mostly appends, sometimes an overwrite inside.
                     let offset = if rng.range(0, 4) == 0 { rng.range(0, cur + 1) } else { cur };
-                    let mut data = vec![0u8; rng.range(1, 6000) as usize];
-                    rng.fill(&mut data);
+                    let data = wal_bytes(&mut rng, 6000);
                     s.write(core, w, offset, &data);
                     put(&mut model, (core, w), offset, &data);
                 }
@@ -145,7 +162,7 @@ fn old_files_go_and_a_quiet_core_does_not_keep_them() {
     s.sync(1, sync_op(1));
     s.flush(&mut disk);
     // Core 0 writes a lot, a segment at a time, and lets the old segments go.
-    let block = vec![7u8; 8000];
+    let block = varied(8000);
     for w in 1..60u64 {
         s.create(0, w, 0);
         for k in 0..3 {
@@ -174,7 +191,7 @@ fn nothing_is_removed_while_the_cores_recover() {
     let mut s = LogState::recover(&mut disk, 16 << 10).unwrap();
     for w in 1..10u64 {
         s.create(0, w, 0);
-        s.write(0, w, 0, &[1; 9000]);
+        s.write(0, w, 0, &varied(9000));
         s.remove(0, w);
         s.sync(0, sync_op(w));
         s.flush(&mut disk);
@@ -196,7 +213,7 @@ fn a_full_disk_waits_and_another_error_stops_the_log() {
     s.sync(0, sync_op(1));
     assert_eq!(s.flush(&mut disk).len(), 1);
     // The next file does not fit: the sync waits.
-    s.write(0, 1, 100, &[2; 20000]);
+    s.write(0, 1, 100, &varied(20000));
     s.sync(0, sync_op(2));
     assert!(s.flush(&mut disk).is_empty());
     assert!(s.disk_full());
@@ -270,8 +287,7 @@ fn a_crash_at_any_operation_keeps_every_answered_write() {
                 continue;
             }
             let w = *mine.last().unwrap();
-            let mut data = vec![0u8; rng.range(1, 5000) as usize];
-            rng.fill(&mut data);
+            let data = wal_bytes(rng, 5000);
             let at = model[&(core, w)].len() as u64;
             s.write(core, w, at, &data);
             put(&mut model, (core, w), at, &data);
@@ -444,7 +460,7 @@ fn recovery_ends_at_a_record_out_of_order_of_another_version_or_with_broken_fram
     assert_eq!(s.segments_of(0), vec![1, 2]);
     let (at, body) = second_record(&mut whole);
     let mut newer = record(2, &body);
-    newer[4] = 2;
+    newer[4] = 3;
     // A record whose flush is not the next one (a stale record of an earlier flush), one of a
     // version this build does not read, and one whose frames do not parse: the log ends before it.
     for damaged in [record(7, &body), newer, record(2, &[0xEE; 40])] {
@@ -523,7 +539,7 @@ fn writes_nobody_syncs_wait_until_enough_bytes_wait_or_a_flush() {
     // Below the bytes written ahead, nothing goes to the disk.
     assert!(s.next(&mut disk, &mut ops).is_empty());
     assert!(ops.is_empty());
-    s.write(0, 1, 5, &vec![7; WRITE_AHEAD]);
+    s.write(0, 1, 5, &varied(WRITE_AHEAD));
     assert!(s.next(&mut disk, &mut ops).is_empty());
     assert!(matches!(ops[..], [IoOp::WriteAt { .. }]));
     assert_eq!(s.buffered(), 0);
@@ -596,7 +612,7 @@ fn the_bound_outlives_the_files_that_go() {
     let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
     s.allow_tidying();
     s.offer_bound(9_000);
-    let block = vec![7u8; 8000];
+    let block = varied(8000);
     for w in 1..40u64 {
         s.create(0, w, 0);
         for k in 0..3 {
@@ -611,4 +627,133 @@ fn the_bound_outlives_the_files_that_go() {
     assert!(files(&mut disk).len() <= KEPT_FILES + 2);
     let s = LogState::recover(&mut disk, file_bytes).unwrap();
     assert_eq!(s.durable_bound(), 9_000);
+}
+
+/// A batch of a core's WAL as it writes one: its records and the padding to 4 KiB.
+fn batch(records: &[u8]) -> Vec<u8> {
+    let mut b = records.to_vec();
+    b.resize(4096, 0x5a);
+    b
+}
+
+/// The padding of a WAL batch goes as a `FILL` frame: the record takes one block instead of two,
+/// and the segment reads back byte for byte, also after a restart and after an overwrite inside the
+/// padding.
+#[test]
+fn the_padding_of_a_wal_batch_goes_as_a_fill_and_reads_back() {
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    let first = batch(&varied(600));
+    s.create(0, 1, 8192);
+    s.write(0, 1, 0, &first);
+    s.sync(0, sync_op(1));
+    assert_eq!(s.flush(&mut disk).len(), 1);
+    let st = s.stats();
+    assert_eq!((st.records, st.record_bytes), (1, 4096));
+    assert_eq!(st.filled_bytes, 4096 - 600);
+    // Head, `CREATE`, `WRITE` of the 600 bytes and `FILL`; the rest of the block is padding.
+    assert_eq!(st.padding_bytes, 4096 - (32 + 24 + (24 + 600) + 24));
+    let mut want = first.clone();
+    want.resize(8192, 0);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    // A write over part of the padding: the rest of the run stays.
+    s.write(0, 1, 1000, b"inside");
+    want[1000..1006].copy_from_slice(b"inside");
+    // A run too short for a `FILL` goes as data.
+    let short = [9u8; 10];
+    s.write(0, 1, 4096, &short);
+    want[4096..4106].copy_from_slice(&short);
+    s.sync(0, sync_op(2));
+    s.flush(&mut disk);
+    assert_eq!(s.stats().filled_bytes, 4096 - 600);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want);
+    // Truncated inside the run, then removed.
+    s.truncate(0, 1, 2000);
+    s.sync(0, sync_op(3));
+    s.flush(&mut disk);
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), want[..2000].to_vec());
+    s.remove(0, 1);
+    s.sync(0, sync_op(4));
+    s.flush(&mut disk);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1), Err(IoErrno::NotFound));
+}
+
+/// A quiet core whose batches are mostly padding keeps them across the copies forward of the
+/// oldest file: its `FILL` frames are copied with its bytes, and they keep their file until then.
+#[test]
+fn a_quiet_core_keeps_its_padding_across_copies_forward() {
+    let mut disk = MemDisk::new();
+    let file_bytes = 32 << 10;
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    let quiet = batch(b"quiet");
+    s.create(1, 1, 0);
+    s.write(1, 1, 0, &quiet);
+    s.sync(1, sync_op(1));
+    s.flush(&mut disk);
+    let block = varied(8000);
+    for w in 1..60u64 {
+        s.create(0, w, 0);
+        for k in 0..3 {
+            s.write(0, w, k * 8000, &block);
+            s.sync(0, sync_op(w));
+            s.flush(&mut disk);
+        }
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+    }
+    assert!(s.stats().copied_bytes > 0, "{:?}", s.stats());
+    assert!(files(&mut disk).len() <= KEPT_FILES + 2);
+    assert_eq!(s.read(&mut disk, 1, 1).unwrap(), quiet);
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    assert_eq!(s.read(&mut disk, 1, 1).unwrap(), quiet);
+}
+
+/// Rewrites the version of the header and of every record of `path` to 1, as a log written before
+/// `FILL` frames has them, with their CRCs.
+fn as_version_1(disk: &mut MemDisk, path: &Path) {
+    use teseladb_devlog::format::{BLOCK, read_record};
+    use teseladb_hash::crc32c;
+    let mut data = disk.read_all(path).unwrap();
+    data[8] = 1;
+    let crc = crc32c(&data[..24]);
+    data[24..28].copy_from_slice(&crc.to_le_bytes());
+    let mut at = BLOCK as usize;
+    while let Some(len) = read_record(&data[at..]).map(|r| r.len) {
+        data[at + 4] = 1;
+        let crc = crc32c(&data[at..at + 24]);
+        data[at + 24..at + 28].copy_from_slice(&crc.to_le_bytes());
+        at += len;
+    }
+    assert!(at > BLOCK as usize);
+    assert!(matches!(
+        disk.execute(IoOp::Open { file: FileId(901), path: path.into() }),
+        IoDone::Ok(_)
+    ));
+    let data = teseladb_types::Bytes::from_vec(data);
+    let wrote = disk.execute(IoOp::WriteAt { file: FileId(901), offset: 0, data, batch: 0 });
+    assert!(matches!(wrote, IoDone::Ok(_)));
+}
+
+/// A log of version 1 reads as before, and the log goes on after it in a file of version 2.
+#[test]
+fn a_log_of_version_1_reads_and_goes_on() {
+    let mut disk = two_records();
+    let path = files(&mut disk)[0].clone();
+    as_version_1(&mut disk, &path);
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"one");
+    assert_eq!(s.read(&mut disk, 0, 2).unwrap(), b"two");
+    s.write(0, 2, 3, &batch(b"more"));
+    s.sync(0, sync_op(3));
+    assert!(matches!(s.flush(&mut disk)[..], [(0, IoDone::Ok(_))]));
+    let mut s = LogState::recover(&mut disk, 1 << 20).unwrap();
+    let mut want = b"two".to_vec();
+    want.extend_from_slice(&batch(b"more"));
+    assert_eq!(s.read(&mut disk, 0, 2).unwrap(), want);
+    assert_eq!(files(&mut disk).len(), 2);
 }

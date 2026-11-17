@@ -667,6 +667,33 @@ fn log_metrics(out: &mut String, log_syncs: u64) {
     let _ = writeln!(out, "# TYPE {name} counter\n{name} {log_syncs}");
 }
 
+/// What the node's Raft log wrote (012 FR-035): its records and their bytes, the zeros after each
+/// record up to its block, the WAL bytes that `FILL` frames stood for, what it copied forward from
+/// its oldest file, the files it made (and those a record waited for), and the cores' syncs its
+/// syncs answered.
+fn log_write_metrics(out: &mut String, s: &teseladb_io::counters::LogStats) {
+    let rows = [
+        ("records", "Records the node's Raft log wrote.", s.records),
+        ("record_bytes", "Bytes of those records, with their padding.", s.record_bytes),
+        ("padding_bytes", "Zeros after each record up to its 4 KiB block.", s.padding_bytes),
+        ("filled_bytes", "Bytes of the cores' WAL that FILL frames stood for.", s.filled_bytes),
+        ("copied_bytes", "Bytes copied forward from the oldest file of the log.", s.copied_bytes),
+        ("copy_read_bytes", "Bytes read from the log to copy them forward.", s.copy_read_bytes),
+        ("files_made", "Files of the log made.", s.files_made),
+        (
+            "files_made_waiting",
+            "Files of the log made while a record waited.",
+            s.files_made_waiting,
+        ),
+        ("synced_requests", "Syncs of the cores answered by the log's syncs.", s.synced_requests),
+    ];
+    for (what, help, v) in rows {
+        let name = format!("teseladb_raftlog_{what}_total");
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter\n{name} {v}");
+    }
+}
+
 /// The links to other nodes: how many of this node's outbound links went down, whose queued
 /// frames were dropped and wait for the next connection (012 FR-015).
 fn peer_metrics(out: &mut String, links_failed: u64) {
@@ -854,6 +881,7 @@ impl AdminBackend for NodeAdmin {
         ));
         txn_metrics(&mut out, &status.txn);
         log_metrics(&mut out, teseladb_io::counters::log_syncs());
+        log_write_metrics(&mut out, &teseladb_io::counters::log_stats());
         peer_metrics(&mut out, teseladb_io::counters::peer_links_failed());
         let outside = (
             crate::backend::served_outside(),
@@ -1729,6 +1757,31 @@ mod tests {
         assert!(out.lines().any(|l| l == "teseladb_raftlog_syncs_total 5"), "{out}");
         assert!(out.lines().any(|l| l == "# TYPE teseladb_raftlog_syncs_total counter"), "{out}");
         assert!(!out.contains("teseladb_disk_"), "the disk's syncs are the engine's: {out}");
+    }
+
+    #[test]
+    fn the_log_write_metrics_give_each_counter_of_the_raft_log() {
+        let mut out = String::new();
+        let s = teseladb_io::counters::LogStats {
+            records: 3,
+            padding_bytes: 700,
+            filled_bytes: 9000,
+            copied_bytes: 11,
+            synced_requests: 8,
+            ..Default::default()
+        };
+        log_write_metrics(&mut out, &s);
+        for line in [
+            "teseladb_raftlog_records_total 3",
+            "teseladb_raftlog_padding_bytes_total 700",
+            "teseladb_raftlog_filled_bytes_total 9000",
+            "teseladb_raftlog_copied_bytes_total 11",
+            "teseladb_raftlog_synced_requests_total 8",
+            "teseladb_raftlog_files_made_total 0",
+            "# TYPE teseladb_raftlog_record_bytes_total counter",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line}: {out}");
+        }
     }
 
     #[test]
