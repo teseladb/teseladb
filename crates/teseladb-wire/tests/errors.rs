@@ -45,6 +45,12 @@ fn every_range_error_has_the_reference_code() {
         (RangeError::OutOfRange, retry, error::INTERNAL_ERROR, false),
         (RangeError::Unsatisfiable, retry, error::UNSATISFIABLE_WRITE_CONCERN, false),
         (RangeError::TooLarge, retry, error::BSON_OBJECT_TOO_LARGE, false),
+        (
+            RangeError::ExceededMemory { needed: 900 << 20, free: 300 << 20 },
+            retry,
+            error::EXCEEDED_MEMORY_LIMIT,
+            false,
+        ),
         (RangeError::Unavailable, retry, error::INTERRUPTED_AT_SHUTDOWN, true),
         (RangeError::Unavailable, plain, error::INTERRUPTED_AT_SHUTDOWN, false),
         (RangeError::SnapshotTooOld, retry, error::SNAPSHOT_TOO_OLD, false),
@@ -54,6 +60,9 @@ fn every_range_error_has_the_reference_code() {
         assert_eq!(c.code, code, "{e:?}");
         assert_eq!(c.labels.contains(&RETRYABLE_WRITE_ERROR), labelled, "{e:?}");
     }
+    // A write past the core's free memory says what it needs and what is free.
+    let c = from_range(&RangeError::ExceededMemory { needed: 900 << 20, free: 300 << 20 }, plain);
+    assert!(c.errmsg.contains("900 MiB") && c.errmsg.contains("300 MiB"), "{}", c.errmsg);
 }
 
 #[test]

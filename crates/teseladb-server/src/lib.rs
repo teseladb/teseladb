@@ -93,6 +93,7 @@ pub mod tenant_limits;
 pub mod tls_port;
 pub mod transfer;
 pub mod txn_wire;
+pub mod write_admission;
 
 /// TLS over blocking sockets, for the servers the unit tests stand up on threads of their own (the
 /// node has none).
