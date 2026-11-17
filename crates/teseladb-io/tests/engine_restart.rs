@@ -8,12 +8,13 @@
 //! - The work handed to the threads that are not shards outlives its engine: when it ends while a
 //!   later engine runs, its result reaches nobody. Before, the numbers of that work restarted with
 //!   each engine, and a result of the first engine resolved a wait of the second one.
+//! - Starts asked for at once run one engine and refuse the others.
 //!
 //! One engine at a time (D4): the cases take turns. Linux only: the engine runs on Linux.
 #![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
-use std::sync::{Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Barrier, Mutex, PoisonError, mpsc};
 use std::time::Duration;
 
 use teseladb::engine::core::future::Future;
@@ -35,6 +36,8 @@ const SHARDS: u16 = 2;
 const OUTLIVES: Duration = Duration::from_secs(3);
 /// Works queued by each engine of the offload case.
 const WORKS: u64 = 32;
+/// Starts asked for at once.
+const STARTS: usize = 4;
 
 /// A directory of its own, removed when dropped.
 struct Dir(PathBuf);
@@ -89,7 +92,8 @@ fn use_every_class(root: PathBuf) -> Result<(), String> {
     let mut file = 0;
     for class in classes {
         file += 1;
-        let create = IoOp::Create { file: FileId(file), path: format!("f{file}").into(), prealloc: 0 };
+        let create =
+            IoOp::Create { file: FileId(file), path: format!("f{file}").into(), prealloc: 0 };
         let data = Bytes::copy_from_slice(b"kept");
         let write = IoOp::WriteAt { file: FileId(file), offset: 0, data, batch: 0 };
         for op in [create, write] {
@@ -161,4 +165,37 @@ fn disk_groups_of_each_engine_are_its_own() {
 fn offloaded_work_of_a_stopped_engine_answers_nobody_in_the_next() {
     let _turn = ONE_ENGINE.lock().unwrap_or_else(PoisonError::into_inner);
     an_offloaded_work_of_a_stopped_engine_answers_nobody_in_the_next();
+}
+
+/// Starts asked for at once from several threads: one engine runs, the others are refused. Before,
+/// each start looked for a running engine before any had registered itself, and several engines
+/// started together and reached each other's shards.
+#[test]
+fn starts_at_once_run_one_engine() {
+    let _turn = ONE_ENGINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let barrier = Arc::new(Barrier::new(STARTS));
+    let starts: Vec<_> = (0..STARTS)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                NodeEngine::start(&EngineConfig { shards: 1, ..EngineConfig::default() })
+            })
+        })
+        .collect();
+    let results: Vec<_> = starts.into_iter().map(|t| t.join().expect("the start")).collect();
+    let (running, refused): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
+    assert_eq!(running.len(), 1, "one engine runs; refused: {refused:?}");
+    for r in refused {
+        let e = r.expect_err("refused");
+        assert!(e.to_string().contains("already runs"), "{e}");
+    }
+    for e in running {
+        // The one that runs answers on its shard.
+        let e = e.expect("running");
+        assert_eq!(e.run_on(0, || 7).expect("the engine runs"), 7);
+        e.stop();
+    }
+    // Once it stopped, another starts.
+    start().stop();
 }

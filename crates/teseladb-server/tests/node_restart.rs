@@ -7,6 +7,7 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use common::{Client, READY, batch, config, docs, ok, until};
 use teseladb_bson::{Document, Value};
@@ -86,12 +87,17 @@ fn restart_and_read(cores: u16) {
     node.stop();
 }
 
+/// One node, and so one engine, at a time in the process (D4): the cases take turns.
+static ONE_NODE: Mutex<()> = Mutex::new(());
+
 #[test]
 fn a_restarted_node_of_one_core_serves_reads() {
+    let _turn = ONE_NODE.lock().unwrap_or_else(PoisonError::into_inner);
     restart_and_read(1);
 }
 
 #[test]
 fn a_restarted_node_of_two_cores_serves_reads() {
+    let _turn = ONE_NODE.lock().unwrap_or_else(PoisonError::into_inner);
     restart_and_read(2);
 }
