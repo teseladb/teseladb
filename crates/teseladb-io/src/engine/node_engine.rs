@@ -10,7 +10,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -55,6 +55,27 @@ pub struct CoreConfig {
 thread_local! {
     /// Shard 0's wait for the stop of the engine.
     static EXIT: RefCell<Option<Rc<Wake>>> = const { RefCell::new(None) };
+}
+
+/// Whether an engine of [`NodeEngine::start`] runs, or is starting, in the process (D4).
+static ENGINE_CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// The process's claim on its one engine, released when dropped.
+struct EngineClaim;
+
+impl EngineClaim {
+    fn take() -> io::Result<EngineClaim> {
+        ENGINE_CLAIMED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| EngineClaim)
+            .map_err(|_| io::Error::other("an engine already runs in this process"))
+    }
+}
+
+impl Drop for EngineClaim {
+    fn drop(&mut self) {
+        ENGINE_CLAIMED.store(false, Ordering::Release);
+    }
 }
 
 /// A running engine.
@@ -114,12 +135,17 @@ impl NodeEngine {
     /// When another engine runs in the process, or the engine cannot start (its options, its
     /// memory or its CPUs).
     pub fn start(cfg: &EngineConfig) -> io::Result<NodeEngine> {
+        // Claimed before anything starts: the engine registers its instance only once its shards
+        // run, and two starts that both looked before that ran two engines at once.
+        let claim = EngineClaim::take()?;
         if !alien::internal::default_instance().is_null() {
             return Err(io::Error::other("an engine already runs in this process"));
         }
         let args = cfg.args();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<()>>(1);
         let thread = thread::Builder::new().name("engine".into()).spawn(move || {
+            // Released when the engine's thread ends, after its instance is gone.
+            let _claim = claim;
             let config = Config {
                 name: "teseladb".into(),
                 auto_handle_sigint_sigterm: false,

@@ -14,7 +14,9 @@
 use std::cell::{Cell, RefCell};
 
 use teseladb::engine::core::coroutine::make_coroutine;
-use teseladb::engine::core::future::{ExceptionPtr, Future, make_exception_future, make_ready_future};
+use teseladb::engine::core::future::{
+    ExceptionPtr, Future, make_exception_future, make_ready_future,
+};
 use teseladb::engine::core::reactor::{
     create_scheduling_group, destroy_scheduling_group, engine_logger, internal,
 };
