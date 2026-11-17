@@ -84,6 +84,14 @@ impl<'a> Fetcher<'a> {
         }
     }
 
+    /// The scan read more entries, whose documents are in `pending`, in its order; those it
+    /// passed are forgotten.
+    pub(crate) fn extend(&mut self, pending: Vec<Vec<u8>>) {
+        self.pending.drain(..self.at);
+        self.at = 0;
+        self.pending.extend(pending);
+    }
+
     /// The scan passed an entry without its document (`pk`), whether it reads it or not.
     fn pass(&mut self, pk: &[u8]) {
         if self.pending.get(self.at).is_some_and(|p| p == pk) {

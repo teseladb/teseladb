@@ -137,40 +137,83 @@ fn check(key: &[Value], walks: &[Vec<(End, End)>], fields: &[FieldWalk]) -> Chec
 /// The walk of a scan with `fields` over `keys`, the values of each key in the index's order
 /// of fields, the keys in the scan's order.
 pub fn walk(fields: &[FieldWalk], keys: &[Vec<Value>]) -> Walk {
-    let walks: Vec<Vec<(End, End)>> = fields.iter().map(ordered).collect();
-    if walks.iter().any(Vec::is_empty) {
-        return Walk { visits: Vec::new(), seeks: 1, done: true };
+    let mut walker = Walker::new(fields);
+    let mut visits = Vec::new();
+    for (pos, key) in keys.iter().enumerate() {
+        if walker.done() {
+            break;
+        }
+        walker.step(key, pos, &mut visits);
     }
-    let start = walks.iter().map(|w| w[0].0.clone()).collect();
-    let mut target = Some(Target { prefix: start, past_prefix: false });
-    let mut out = Walk { visits: Vec::new(), seeks: 1, done: false };
-    let mut pos = 0;
-    while pos < keys.len() {
-        if let Some(t) = &target {
-            while pos < keys.len() && !reached(&keys[pos], t, fields) {
-                pos += 1;
+    Walk { visits, seeks: walker.seeks(), done: walker.done() }
+}
+
+/// The walk of [`walk`] a key at a time, for a scan that reads its keys as it goes: each key
+/// gives its visits as soon as it is read, and the walk needs no key after it.
+#[derive(Clone, Debug)]
+pub struct Walker {
+    fields: Vec<FieldWalk>,
+    walks: Vec<Vec<(End, End)>>,
+    /// Where the next key the scan examines must be, when it seeks.
+    target: Option<Target>,
+    seeks: u64,
+    done: bool,
+}
+
+impl Walker {
+    /// The walk of a scan with `fields` before its first key.
+    #[must_use]
+    pub fn new(fields: &[FieldWalk]) -> Walker {
+        let walks: Vec<Vec<(End, End)>> = fields.iter().map(ordered).collect();
+        let empty = walks.iter().any(Vec::is_empty);
+        let target = match empty {
+            true => None,
+            false => {
+                let start = walks.iter().map(|w| w[0].0.clone()).collect();
+                Some(Target { prefix: start, past_prefix: false })
             }
-            if pos == keys.len() {
-                break;
+        };
+        Walker { fields: fields.to_vec(), walks, target, seeks: 1, done: empty }
+    }
+
+    /// Walks the next key of the scan, `key` at position `pos`, adding its visits to `visits`:
+    /// none when a seek passes over it, one when it is within the intervals or ends the walk,
+    /// and one more for each seek it causes before the scan lands on it again.
+    pub fn step(&mut self, key: &[Value], pos: usize, visits: &mut Vec<Visit>) {
+        while !self.done {
+            if let Some(t) = &self.target
+                && !reached(key, t, &self.fields)
+            {
+                return;
+            }
+            match check(key, &self.walks, &self.fields) {
+                Check::Within => {
+                    visits.push(Visit::Within(pos));
+                    self.target = None;
+                    return;
+                }
+                Check::Seek(t) => {
+                    visits.push(Visit::Outside(pos));
+                    self.seeks += 1;
+                    self.target = Some(t);
+                }
+                Check::Done => {
+                    visits.push(Visit::Outside(pos));
+                    self.done = true;
+                }
             }
         }
-        match check(&keys[pos], &walks, fields) {
-            Check::Within => {
-                out.visits.push(Visit::Within(pos));
-                target = None;
-                pos += 1;
-            }
-            Check::Seek(t) => {
-                out.visits.push(Visit::Outside(pos));
-                out.seeks += 1;
-                target = Some(t);
-            }
-            Check::Done => {
-                out.visits.push(Visit::Outside(pos));
-                out.done = true;
-                break;
-            }
-        }
     }
-    out
+
+    /// Seeks so far, the first one included.
+    #[must_use]
+    pub fn seeks(&self) -> u64 {
+        self.seeks
+    }
+
+    /// Whether a key past the leading field's last interval ended the walk.
+    #[must_use]
+    pub fn done(&self) -> bool {
+        self.done
+    }
 }
