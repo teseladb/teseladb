@@ -44,10 +44,14 @@ pub const ENGINE_COMMAND_STACK: usize = 16 << 20;
 
 /// Runs each call of server-side JavaScript on a native stack of its own of `COMMAND_STACK`
 /// bytes, reserved and committed as it is used (016 A016-3-18, 023 FR-018): the 51 000 nested
-/// calls of the reference router fit, whatever the stack of the thread that runs the command.
+/// calls of the reference router fit, whatever the stack of the thread that runs the command. A
+/// call made from such a stack runs where it is, with the room left there.
 pub fn set_deep_stack() {
     fn runner(call: &mut dyn FnMut(Option<usize>)) {
-        teseladb_sys::deep_stack::run(teseladb_wire::commands::js::COMMAND_STACK, call);
+        use teseladb_sys::deep_stack;
+        deep_stack::run(teseladb_wire::commands::js::COMMAND_STACK, &mut |size| {
+            call(size.or_else(deep_stack::room_here));
+        });
     }
     teseladb_wire::commands::js::set_deep_stack(runner);
 }
