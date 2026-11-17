@@ -24,8 +24,6 @@ unsafe extern "C" {
 
 const SMALL_ALLOC_SIZE: usize = 8;
 const LARGE_ALLOC_SIZE: usize = 32000;
-/// A block of five pages (a little more than 16 KiB rounds up to them).
-const LARGE_ODD_ALLOC_SIZE: usize = 16 * 1024 + 16;
 const MAX_POINTERS: usize = 1000;
 
 /// `enum alloc_test_flags`
@@ -183,18 +181,6 @@ teseladb::perf_test_f!(alloc_bench, free_only_large, |s| -> usize {
 });
 teseladb::perf_test_f!(alloc_bench, alloc_free_large, |s| -> usize {
     s.alloc_test::<LARGE_ALLOC_SIZE, MEASURE_BOTH, CFuncs>()
-});
-
-// Large blocks of a page count that is not a power of two (five pages), which the allocator
-// trims to their pages: the cost of the trim on allocation and of freeing the run's pieces.
-teseladb::perf_test_f!(alloc_bench, alloc_only_large_odd, |s| -> usize {
-    s.alloc_test::<LARGE_ODD_ALLOC_SIZE, MEASURE_ALLOC, CFuncs>()
-});
-teseladb::perf_test_f!(alloc_bench, free_only_large_odd, |s| -> usize {
-    s.alloc_test::<LARGE_ODD_ALLOC_SIZE, MEASURE_FREE, CFuncs>()
-});
-teseladb::perf_test_f!(alloc_bench, alloc_free_large_odd, |s| -> usize {
-    s.alloc_test::<LARGE_ODD_ALLOC_SIZE, MEASURE_BOTH, CFuncs>()
 });
 
 // this test doesn't serve much value. It should take about 10 times as the
@@ -392,9 +378,6 @@ pub(crate) fn main() {
     alloc_only_large::register();
     free_only_large::register();
     alloc_free_large::register();
-    alloc_only_large_odd::register();
-    free_only_large_odd::register();
-    alloc_free_large_odd::register();
     single_alloc_and_free_small_many::register();
     single_alloc_and_free_small_many_cross_page::register();
     single_alloc_and_free_small_many_cross_page_alloc_more::register();

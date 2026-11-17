@@ -755,7 +755,6 @@ mod engine_allocator {
     const MADV_HUGEPAGE: c_int = 14;
     const MADV_NOHUGEPAGE: c_int = 15;
     const MADV_DONTDUMP: c_int = 16;
-    const MADV_DONTNEED: c_int = 4;
     const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
     const MPOL_PREFERRED: c_int = 1;
     const MPOL_MF_MOVE: u32 = 1 << 1;
@@ -1248,17 +1247,6 @@ mod engine_allocator {
         unsafe { ary.add(idx) }
     }
 
-    /// The first piece of the run of `left` pages (not zero) that starts at page `start`: the
-    /// largest power of two of pages that `start` is aligned to and that fits in `left`. The
-    /// pieces of a run, taken in turn from its start, are buddy-aligned spans; a run that
-    /// starts a buddy span of at least its length has its pieces in decreasing sizes.
-    #[inline(always)]
-    fn run_piece(start: u32, left: u32) -> u32 {
-        let align_bits = if start != 0 { start.trailing_zeros() } else { 31 };
-        let fit_bits = 31 - left.leading_zeros();
-        1 << align_bits.min(fit_bits)
-    }
-
     #[inline(always)]
     fn idx_of(ary: *mut Page, span: *const Page) -> usize {
         // SAFETY: `span` points into the same page array as `ary`.
@@ -1620,12 +1608,10 @@ mod engine_allocator {
             unsafe {
                 while (*this)._free_count < goal {
                     let mut span_size = (*this)._span_sizes.preferred as u32;
-                    // Power-of-two spans: trim_free_list frees a span as one buddy span.
-                    let mut data =
-                        CpuPages::allocate_large(mem, span_size, false, false) as *mut u8;
+                    let mut data = CpuPages::allocate_large(mem, span_size, false) as *mut u8;
                     if data.is_null() {
                         span_size = (*this)._span_sizes.fallback as u32;
-                        data = CpuPages::allocate_large(mem, span_size, false, false) as *mut u8;
+                        data = CpuPages::allocate_large(mem, span_size, false) as *mut u8;
                         if data.is_null() {
                             break;
                         }
@@ -1883,15 +1869,6 @@ mod engine_allocator {
         }
     }
 
-    /// The largest power-of-two span a large allocation is trimmed from to its pages (see
-    /// `CpuPages::trim_to_pages`): 32 pages, 128 KiB. A larger span keeps its power-of-two
-    /// size, as in the reference: the free tail of a big buffer would take the small blocks
-    /// that come next, and a long-lived one there would keep the buffer's whole buddy span
-    /// from merging back once the buffer is freed, until no span of its size is left (the
-    /// fragmentation that `resident_drift_test` provokes). Within 128 KiB that costs at most
-    /// a span of that size.
-    pub const MAX_TRIMMED_SPAN_PAGES: u32 = 32;
-
     /// The largest size served by the small pools (16 KiB, four pages); larger requests take
     /// whole spans.
     pub const MAX_SMALL_ALLOCATION: usize =
@@ -1962,10 +1939,6 @@ mod engine_allocator {
     /// Number of free span lists (one per power-of-two span size).
     pub const NR_SPAN_LISTS: usize = 32;
 
-    /// The smallest free span whose pages [`release_free_memory`] gives back to the system: a
-    /// huge page, so that a transparent huge page goes whole and is not split.
-    pub const RELEASE_MIN_PAGES: u32 = (HUGE_PAGE_SIZE / PAGE_SIZE) as u32;
-
     /// A shard's whole allocator state: the page array, free span lists, small pools, reclaimers and statistics.
     pub struct CpuPages {
         small_pools: SmallPoolArray<false>,
@@ -2000,14 +1973,6 @@ mod engine_allocator {
         // `*mut CpuPages`, and `!Unpin` keeps the remaining `&mut CpuPages` from asserting
         // uniqueness over the object (as for the crate's intrusive types); it never moves.
         _pin: std::marker::PhantomPinned,
-        /// The free spans of at least [`RELEASE_MIN_PAGES`] pages that the last
-        /// [`CpuPages::release_free_spans`] found, as (first page, pages), in order.
-        release_seen: Vec<(u32, u32)>,
-        /// Those of them whose pages it gave back to the system, in order.
-        release_done: Vec<(u32, u32)>,
-        /// The pool is a shared file mapping (hugetlbfs), whose pages `MADV_DONTNEED` does not
-        /// free: nothing is given back.
-        file_backed: bool,
     }
 
     static CPU_ID_GEN: AtomicU32 = AtomicU32::new(0);
@@ -2037,73 +2002,11 @@ mod engine_allocator {
                 heap_prof_sampler: ManuallyDrop::new(None),
                 sampled_small_pools: SmallPoolArray::new(),
                 _pin: std::marker::PhantomPinned,
-                release_seen: Vec::new(),
-                release_done: Vec::new(),
-                file_backed: false,
             }
         }
 
         fn mem(&self) -> *mut u8 {
             self.memory
-        }
-
-        /// The free spans of at least [`RELEASE_MIN_PAGES`] pages, as (first page, pages), in
-        /// order.
-        fn large_free_spans(&self) -> Vec<(u32, u32)> {
-            let mut spans = Vec::new();
-            for list in &self.free_spans[index_of(RELEASE_MIN_PAGES) as usize..] {
-                let mut idx = list._front;
-                while idx != 0 {
-                    // SAFETY: a list of free spans links pages of this shard's page array by
-                    // index, and a free span's head page holds its size.
-                    let (size, next) = unsafe {
-                        let p = pg(self.pages, idx as usize);
-                        ((*p).span_size, (*p).link._next)
-                    };
-                    spans.push((idx, size));
-                    idx = next;
-                }
-            }
-            spans.sort_unstable();
-            spans
-        }
-
-        /// Gives back to the system the pages of the free spans of at least
-        /// [`RELEASE_MIN_PAGES`] pages that were already free, the same spans, at the previous
-        /// call, and that no call gave back since: the memory a peak used and no longer does,
-        /// which the shard would otherwise keep resident for good. A span the next allocation
-        /// takes is faulted in again, zeroed, page by page; one that stays free costs one
-        /// `madvise`. Returns the bytes of the spans given back.
-        fn release_free_spans(&mut self) -> usize {
-            if self.file_backed || self.memory.is_null() {
-                return 0;
-            }
-            let now = self.large_free_spans();
-            let mut released = 0;
-            let mut done = Vec::with_capacity(now.len());
-            for &(start, pages) in &now {
-                let kept = self.release_done.binary_search(&(start, pages)).is_ok();
-                let stayed = kept || self.release_seen.binary_search(&(start, pages)).is_ok();
-                if !stayed {
-                    continue;
-                }
-                if !kept {
-                    let len = pages as usize * PAGE_SIZE;
-                    // SAFETY: the span lies within the shard's anonymous private mapping and
-                    // is free: the allocator keeps nothing in a free span's memory (its head
-                    // and tail live in the page array), so its contents may become zeros.
-                    let at = unsafe { self.memory.add(start as usize * PAGE_SIZE) };
-                    // SAFETY: as above.
-                    if unsafe { madvise(at.cast(), len, MADV_DONTNEED) } != 0 {
-                        continue;
-                    }
-                    released += len;
-                }
-                done.push((start, pages));
-            }
-            self.release_done = done;
-            self.release_seen = now;
-            released
         }
 
         // The set of allocation sites: the counters are Cells, and hashing and equality read only
@@ -2324,16 +2227,7 @@ mod engine_allocator {
             }
         }
 
-        /// Takes a span of at least `n_pages` pages: `n_pages` rounded up to a power of two
-        /// (what the small pools and the page array need), cut to exactly `n_pages` with
-        /// `exact` when that power of two is at most [`MAX_TRIMMED_SPAN_PAGES`] (the pages past
-        /// them go back to the free lists, see [`CpuPages::trim_to_pages`]).
-        fn allocate_large_and_trim(
-            &mut self,
-            n_pages: u32,
-            should_sample: bool,
-            exact: bool,
-        ) -> *mut c_void {
+        fn allocate_large_and_trim(&mut self, n_pages: u32, should_sample: bool) -> *mut c_void {
             // Avoid exercising the reclaimers for requests we'll not be able to satisfy
             // nr_pages might be zero during startup, so check for that too
             if self.nr_pages != 0 && n_pages >= self.nr_pages {
@@ -2355,12 +2249,6 @@ mod engine_allocator {
                 // SAFETY: the upper half of the span just unlinked, a power of two since the
                 // span's size is one.
                 unsafe { self.free_span_no_merge(other_span_idx as u32, span_size) };
-            }
-            if exact && span_size != n_pages && span_size <= MAX_TRIMMED_SPAN_PAGES {
-                // SAFETY: [span_idx, span_idx + span_size) is the span just taken, and
-                // n_pages < span_size.
-                unsafe { self.trim_to_pages(span_idx as u32, span_size, n_pages) };
-                span_size = n_pages;
             }
             // SAFETY: as above; `span_idx + span_size - 1` is the last page of the span kept, inside
             // the page array.
@@ -2387,73 +2275,6 @@ mod engine_allocator {
             self.maybe_reclaim();
             // SAFETY: the span lies within this shard's memory.
             unsafe { self.mem().add(span_idx * PAGE_SIZE) as *mut c_void }
-        }
-
-        /// Marks the run `[start, start + n)` as the pieces of one taken span (see
-        /// [`run_piece`]): the first and last page of each piece are taken. A large
-        /// allocation of `n` pages, `n` not a power of two, is such a run: the buddy checks
-        /// of a free that merges next to it, or that frees it piece by piece
-        /// ([`CpuPages::free_run`]), read only those pages, never its other pages, whose
-        /// marks may be stale.
-        ///
-        /// # Safety
-        /// `pages` is this shard's page array and the run lies in it.
-        #[inline]
-        unsafe fn mark_run_taken(pages: *mut Page, start: u32, n: u32) {
-            let (mut s, mut left) = (start, n);
-            while left != 0 {
-                let now = run_piece(s, left);
-                // SAFETY: both pages lie in the run, so in the page array (by the caller).
-                unsafe {
-                    (*pg(pages, s as usize)).free = false;
-                    (*pg(pages, (s + now - 1) as usize)).free = false;
-                }
-                s += now;
-                left -= now;
-            }
-        }
-
-        /// Frees the run `[start, start + n)`, whose pieces were marked taken
-        /// ([`CpuPages::mark_run_taken`]): each piece, from the lowest, goes to the free lists
-        /// merged with its free buddies. A piece merges only with free spans, as its higher
-        /// neighbours of the run are still marked taken when it is freed.
-        ///
-        /// # Safety
-        /// The run lies in this shard's page array and is taken, with its pieces marked.
-        unsafe fn free_run(&mut self, start: u32, n: u32) {
-            let (mut s, mut left) = (start, n);
-            while left != 0 {
-                let now = run_piece(s, left);
-                // SAFETY: an aligned power-of-two piece of the taken run (by the caller).
-                unsafe { self.free_span(s, now) };
-                s += now;
-                left -= now;
-            }
-        }
-
-        /// Cuts the taken span `[idx, idx + span_size)` (a power of two) down to its first
-        /// `n` pages: they become one span of `n` pages, its pieces marked taken, and the
-        /// pages past them go back to the free lists without merging (each of their buddies
-        /// holds kept pages, so none can merge).
-        ///
-        /// # Safety
-        /// The span is taken, lies in this shard's page array, and `0 < n < span_size`.
-        unsafe fn trim_to_pages(&mut self, idx: u32, span_size: u32, n: u32) {
-            let pages = self.pages;
-            // SAFETY: the run [idx, idx + n) lies in the span (by the caller).
-            unsafe {
-                Self::mark_run_taken(pages, idx, n);
-                (*pg(pages, idx as usize)).span_size = n;
-                (*pg(pages, (idx + n - 1) as usize)).span_size = n;
-            }
-            let (mut s, mut left) = (idx + n, span_size - n);
-            while left != 0 {
-                let now = run_piece(s, left);
-                // SAFETY: an aligned power-of-two piece of the span's free tail.
-                unsafe { self.free_span_no_merge(s, now) };
-                s += now;
-                left -= now;
-            }
         }
 
         #[cold]
@@ -2547,9 +2368,7 @@ mod engine_allocator {
             }
         }
 
-        /// Allocates `n_pages` pages (may run the reclaimers, which re-enter the allocator):
-        /// exactly that many with `exact`, a power of two of them otherwise (the spans of the
-        /// small pools and of the page array, which are freed as such).
+        /// Allocates `n_pages` pages (may run the reclaimers, which re-enter the allocator).
         ///
         /// # Safety
         /// `this` must be the thread's live cpu_pages.
@@ -2558,19 +2377,18 @@ mod engine_allocator {
             this: *mut Self,
             n_pages: u32,
             should_sample: bool,
-            exact: bool,
         ) -> *mut c_void {
             // SAFETY: `this` is live by the caller; each call borrows it only for its duration
             // (`CpuPages` is `!Unpin`, see `_pin`).
             unsafe {
                 (*this).check_large_allocation(n_pages as usize * PAGE_SIZE);
-                (*this).allocate_large_and_trim(n_pages, should_sample, exact)
+                (*this).allocate_large_and_trim(n_pages, should_sample)
             }
         }
 
-        /// Allocates exactly `n_pages` pages; `_align_pages` is not used: the result starts a
-        /// buddy span aligned to its own size (`n_pages` rounded up to a power of two), so it
-        /// is aligned to `_align_pages` only when that size is at least `_align_pages`.
+        /// Allocates `n_pages` pages; `_align_pages` is not used: the result is a buddy span,
+        /// aligned to its own size (`n_pages` rounded up to a power of two), so it is aligned
+        /// to `_align_pages` only when that size is at least `_align_pages`.
         ///
         /// # Safety
         /// As for [`CpuPages::allocate_large`].
@@ -2583,8 +2401,8 @@ mod engine_allocator {
             // SAFETY: as in allocate_large.
             unsafe {
                 (*this).check_large_allocation(n_pages as usize * PAGE_SIZE);
-                // buddy allocation is always aligned, and trimming keeps the span's start
-                (*this).allocate_large_and_trim(n_pages, should_sample, true)
+                // buddy allocation is always aligned
+                (*this).allocate_large_and_trim(n_pages, should_sample)
             }
         }
 
@@ -2613,51 +2431,8 @@ mod engine_allocator {
                     self.remove_alloc_site(alloc_site, sz as usize * PAGE_SIZE);
                 }
             }
-            if sz.is_power_of_two() {
-                // SAFETY: a buddy span of the array (power-of-two size).
-                unsafe { self.free_span(idx, sz) };
-            } else {
-                // SAFETY: the marked pieces of a trimmed span (trim_to_pages).
-                unsafe { self.free_trimmed(idx, sz) };
-            }
-        }
-
-        /// Frees the run of `n` pages at `idx` that [`CpuPages::trim_to_pages`] (or a shrink)
-        /// cut out of a buddy span. When the pages past it up to `n` rounded up to a power of
-        /// two are still the free pieces the trim left, they are taken back and the whole
-        /// power-of-two span is freed at once; otherwise the run is freed piece by piece.
-        ///
-        /// # Safety
-        /// The run is a live large allocation of this shard, `n` not a power of two; `idx` is
-        /// aligned to `n` rounded up to a power of two (the run starts the span it came from).
-        unsafe fn free_trimmed(&mut self, idx: u32, n: u32) {
-            let pages = self.pages;
-            let full = n.next_power_of_two();
-            let (mut s, mut left) = (idx + n, full - n);
-            while left != 0 {
-                let now = run_piece(s, left);
-                // SAFETY: a page of the span the run came from, in the page array.
-                let p = unsafe { pg(pages, s as usize) };
-                // SAFETY: as above; raw place reads.
-                if !unsafe { (*p).free } || unsafe { (*p).span_size } != now {
-                    // SAFETY: the run is taken with its pieces marked (by the caller).
-                    return unsafe { self.free_run(idx, n) };
-                }
-                s += now;
-                left -= now;
-            }
-            let (mut s, mut left) = (idx + n, full - n);
-            while left != 0 {
-                let now = run_piece(s, left);
-                // SAFETY: a free span of `now` pages (checked above), linked in its list.
-                unsafe { self.unlink(pages, index_of(now) as usize, pg(pages, s as usize)) };
-                self.nr_free_pages -= now;
-                s += now;
-                left -= now;
-            }
-            // SAFETY: [idx, idx + full) is now taken (the run and the pieces just unlinked),
-            // aligned to its power-of-two size.
-            unsafe { self.free_span(idx, full) };
+            // SAFETY: a large allocation is a buddy span of the array (power-of-two size).
+            unsafe { self.free_span(idx, sz) };
         }
 
         fn object_size(&self, ptr: *mut c_void) -> usize {
@@ -2901,19 +2676,11 @@ mod engine_allocator {
                 return;
             }
             let old_size_pages = span.span_size as usize;
-            // A span of up to MAX_TRIMMED_SPAN_PAGES keeps the pages that hold `new_size` (any
-            // page count is a run, see trim_to_pages); a larger one, always a power of two, is
-            // halved while the half holds `new_size`, as the reference does.
-            let new_size_pages = if old_size_pages <= MAX_TRIMMED_SPAN_PAGES as usize {
-                new_size.div_ceil(PAGE_SIZE).max(1)
-            } else {
-                let mut pages = old_size_pages;
-                while pages / 2 * PAGE_SIZE >= new_size {
-                    pages /= 2;
-                }
-                pages
-            };
-            if new_size_pages >= old_size_pages {
+            let mut new_size_pages = old_size_pages;
+            while new_size_pages / 2 * PAGE_SIZE >= new_size {
+                new_size_pages /= 2;
+            }
+            if new_size_pages == old_size_pages {
                 return;
             }
             #[cfg(engine_heapprof)]
@@ -2932,14 +2699,10 @@ mod engine_allocator {
             last.free = false;
             last.span_size = new_size_pages as u32;
             let idx = idx_of(self.pages, span_ptr) as Pageidx;
-            let (keep, cut) = (new_size_pages as u32, (old_size_pages - new_size_pages) as u32);
-            // SAFETY: both runs lie in the taken span: the kept one and the cut one get their
-            // pieces marked taken, then the cut one is freed piece by piece, merging.
-            unsafe {
-                Self::mark_run_taken(self.pages, idx, keep);
-                Self::mark_run_taken(self.pages, idx + keep, cut);
-                self.free_run(idx + keep, cut);
-            }
+            self.free_span_unaligned(
+                idx + new_size_pages as u32,
+                (old_size_pages - new_size_pages) as u32,
+            );
         }
 
         fn is_initialized(&self) -> bool {
@@ -3050,8 +2813,7 @@ mod engine_allocator {
             ) / PAGE_SIZE;
             let new_page_array
                 // SAFETY: `self` is the thread's live cpu_pages.
-                // A power-of-two span: the next resize frees the array as one.
-                = unsafe { Self::allocate_large(self, new_page_array_pages as u32, false, false) } as *mut Page;
+                = unsafe { Self::allocate_large(self, new_page_array_pages as u32, false) } as *mut Page;
             if new_page_array.is_null() {
                 return Err(make_exception_ptr(crate::engine::core::future::BadAlloc));
             }
@@ -3479,11 +3241,7 @@ mod engine_allocator {
     }
 
     /// Allocates `size` bytes as one span of the current shard: `size` rounded up to pages and
-    /// then to a power of two pages, as in the reference, except up to
-    /// [`MAX_TRIMMED_SPAN_PAGES`] pages, where the span keeps only the pages `size` needs (the
-    /// power of two wastes up to half of each block, as for a block of a little more than
-    /// 16 KiB that takes 32 KiB; the trimmed span starts where that one would, so its
-    /// alignment is the same, and the pages past it stay free). `should_sample` records it in the heap profiler (only with
+    /// then to a power of two pages. `should_sample` records it in the heap profiler (only with
     /// `engine_heapprof`). Logs a warning if the size reaches the large allocation threshold,
     /// and may run the synchronous reclaimers.
     ///
@@ -3497,7 +3255,7 @@ mod engine_allocator {
             return std::ptr::null_mut();
         };
         // SAFETY: the thread's cpu_pages is initialized on the allocation paths that get here.
-        unsafe { CpuPages::allocate_large(cpu_mem_ptr(), size_in_pages, should_sample, true) }
+        unsafe { CpuPages::allocate_large(cpu_mem_ptr(), size_in_pages, should_sample) }
     }
 
     /// The number of pages that hold `size` bytes, or `None` when it does not fit the page
@@ -3510,7 +3268,7 @@ mod engine_allocator {
     }
 
     /// Like [`allocate_large`]; `align` is passed down but not used: the span is aligned to its
-    /// size rounded up to a power of two pages, so the result is aligned to `align` only when that size is at
+    /// own power-of-two size, so the result is aligned to `align` only when that size is at
     /// least `align` (a `size` smaller than an `align` above one page gets a smaller
     /// alignment; [`allocate_aligned`] raises `size` to `align` before calling it). Returns null
     /// when the page count of `size` does not fit a span, as [`allocate_large`] does.
@@ -4008,10 +3766,8 @@ mod engine_allocator {
     }
 
     /// Shrinks the allocation at `obj` in place to hold at least `new_size` bytes. Only a large
-    /// allocation shrinks: a span of up to [`MAX_TRIMMED_SPAN_PAGES`] keeps the pages that hold
-    /// `new_size`, a larger one is halved while the half still holds `new_size` (as in the
-    /// reference), and the pages cut off go back to the buddy lists, merged with their free
-    /// neighbours; a small object is left as it is. Counts one
+    /// allocation shrinks: its span is halved while the half still holds `new_size`, and the
+    /// pages cut off go back to the buddy lists; a small object is left as it is. Counts one
     /// free and one allocation either way.
     ///
     /// # Panics
@@ -4190,8 +3946,6 @@ mod engine_allocator {
             });
             // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem).
             unsafe { (*get_cpu_mem()).replace_memory_backing(&sys_alloc) }?;
-            // SAFETY: the thread's cpu_mem, one field written (see get_cpu_mem).
-            unsafe { (*get_cpu_mem()).file_backed = true };
         }
         // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem).
         unsafe { (*get_cpu_mem()).resize(total, &sys_alloc) }?;
@@ -4258,20 +4012,6 @@ mod engine_allocator {
     pub fn free_memory() -> usize {
         // SAFETY: the thread's cpu_mem, one field read (see get_cpu_mem).
         unsafe { (*get_cpu_mem()).nr_free_pages as usize * PAGE_SIZE }
-    }
-
-    /// Gives back to the system the pages of the current shard's free spans of at least
-    /// [`RELEASE_MIN_PAGES`] pages that stayed free since the previous call (the same span,
-    /// free at both calls; a span taken and freed again between them counts as free) and that
-    /// no call gave back yet; returns the bytes of those spans (pages never touched count too:
-    /// the system has none of them to give back). Its free memory is unchanged: a span given
-    /// back is faulted in again, zeroed, when it is next allocated. Nothing is given back from
-    /// a pool on hugetlbfs. The reactor calls it at most once a second, when it is about to
-    /// sleep. The thread's pool must be set up.
-    pub fn release_free_memory() -> usize {
-        // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem); it calls
-        // out to nothing but `madvise`.
-        unsafe { (*get_cpu_mem()).release_free_spans() }
     }
 
     /// Frees into this shard's pools the objects other threads freed into its memory (its
@@ -4566,9 +4306,6 @@ mod engine_allocator {
         // saw, and its free pages could exceed the pages of all spans of that size.
         let mut span_size_histogram = [0u32; NR_SPAN_LISTS];
         let mut span_free_pages = [0u32; NR_SPAN_LISTS];
-        // The pages of the spans of each row: a large allocation trimmed to its pages
-        // (trim_to_pages) is a span of fewer pages than its row's size.
-        let mut span_pages = [0u32; NR_SPAN_LISTS];
 
         let mut i: u32 = 0;
         while i < nr_pages {
@@ -4578,9 +4315,7 @@ mod engine_allocator {
                 i += 1;
                 continue;
             }
-            let row = log2ceil_u32(span_size) as usize;
-            span_size_histogram[row] += 1;
-            span_pages[row] += span_size;
+            span_size_histogram[log2ceil_u32(span_size) as usize] += 1;
             i += span_size;
         }
 
@@ -4607,7 +4342,7 @@ mod engine_allocator {
             // counted, so `free_pages <= total_pages`.
             let free_pages = span_free_pages[i];
             let total_spans = span_size_histogram[i];
-            let total_pages = span_pages[i];
+            let total_pages = total_spans * (1 << i);
             writeln!(
                 it,
                 "{:>5} {:>5} {:>5} {:>5} {:>5}",
@@ -5506,12 +5241,6 @@ mod default_allocator {
     /// Without the engine allocator: always 1 GiB (see [`stats`]).
     pub fn free_memory() -> usize {
         stats().free_memory()
-    }
-
-    /// Without the engine allocator the system's allocator keeps the memory: nothing given
-    /// back here, always 0.
-    pub fn release_free_memory() -> usize {
-        0
     }
 
     /// Without the engine allocator there is no cross-shard list: always false.
