@@ -280,6 +280,9 @@ pub fn shard_collection<B: Backend + ?Sized>(
     let c = ctx.backend.collection(&ns)?.ok_or_else(no_collection)?;
     supporting_index(ctx, (&ns, &c), &asked, empty)?;
     let mut options = Document::from(RawDoc::from_bytes(&c.options)?);
+    // A collection with a shard key is not spread over partitions (003 FR-012, D-186): the
+    // documents its partitions held move to the shard key's keys under its first number.
+    options.remove(teseladb_meta::catalog::PARTITIONS);
     options.push(
         SHARD_KEY,
         Document::new().with("key", asked.key.clone()).with("unique", asked.unique),

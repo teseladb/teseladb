@@ -452,7 +452,12 @@ fn verify<B: Backend + ?Sized>(
         }
         let collation = collation_of(spec)?;
         let collator = collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator);
-        let set = IndexSet { tenant: c.tenant, collection: c.id, indexes: vec![(index.id, def)] };
+        let set = IndexSet {
+            tenant: c.tenant,
+            collection: c.id,
+            partitions: teseladb_keys::partition::Partitions::single(c.id),
+            indexes: vec![(index.id, def)],
+        };
         let versions = docs
             .iter()
             .zip(&pks)

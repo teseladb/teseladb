@@ -1246,6 +1246,30 @@ impl Backend for ServerBackend {
         self.catalog().ok()?.fields_of(collection).cloned()
     }
 
+    fn new_partitions(&mut self) -> u8 {
+        let cores = u8::try_from(self.cores.len()).unwrap_or(u8::MAX);
+        match self.h.routes.partitions() {
+            true => cores.clamp(1, teseladb_keys::partition::MAX_PARTITIONS),
+            false => 1,
+        }
+    }
+
+    fn partitions_at(
+        &mut self,
+        tenant: u32,
+        number: u32,
+    ) -> Option<teseladb_keys::partition::Partitions> {
+        let most = u32::from(teseladb_keys::partition::MAX_PARTITIONS);
+        let catalog = self.catalog().ok()?;
+        // Only an entry whose numbers could reach `number` has its options read (D-186).
+        catalog
+            .collections
+            .values()
+            .filter(|c| c.tenant == tenant && c.id <= number && number < c.id.saturating_add(most))
+            .filter_map(|c| c.partitions().ok())
+            .find(|p| p.count() > 1 && p.contains(number))
+    }
+
     fn collections(&mut self) -> Result<Vec<(Namespace, CollectionEntry)>, CommandError> {
         Ok(self.catalog()?.collections.iter().map(|(n, e)| (n.clone(), e.clone())).collect())
     }

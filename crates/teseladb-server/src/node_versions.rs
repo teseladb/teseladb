@@ -21,6 +21,8 @@ const RANGE: &str = "range";
 const KEYS: &str = "keys";
 /// The layout version that brings the `_id` order of new collections.
 const KEYS_ORDERED: u8 = 1;
+/// The layout version that brings new collections spread over partitions (D-186).
+const KEYS_PARTITIONS: u8 = 2;
 
 /// What this binary runs: the peer protocol, Group 0's snapshot format and the latest feature
 /// compatibility version.
@@ -31,7 +33,7 @@ pub fn ours() -> Vec<u8> {
         .with(FORMAT, i64::from(teseladb_meta::group0::SNAPSHOT_VERSION))
         .with(FCV, VERSIONS[0])
         .with(RANGE, i64::from(teseladb_range::command::FORMAT))
-        .with(KEYS, i64::from(KEYS_ORDERED));
+        .with(KEYS, i64::from(KEYS_PARTITIONS));
     d.to_bytes().unwrap_or_default()
 }
 
@@ -115,6 +117,16 @@ pub fn ordered_ids(sm: &Group0Sm) -> bool {
         .filter(|n| n.state != NodeState::Removed)
         .filter_map(|n| sm.settings.get(&key(n.id)))
         .all(|v| version_of(v, KEYS) >= KEYS_ORDERED)
+}
+
+/// Whether every node that is not removed reads collections spread over partitions (D-186). A
+/// node that recorded nothing yet runs this binary.
+pub fn partitions(sm: &Group0Sm) -> bool {
+    sm.nodes
+        .values()
+        .filter(|n| n.state != NodeState::Removed)
+        .filter_map(|n| sm.settings.get(&key(n.id)))
+        .all(|v| version_of(v, KEYS) >= KEYS_PARTITIONS)
 }
 
 /// The highest feature compatibility version every node that is not removed runs, if one runs

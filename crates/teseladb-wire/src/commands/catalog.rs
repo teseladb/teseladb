@@ -103,24 +103,33 @@ pub(crate) fn options_of(c: &CollectionEntry) -> Result<Document, CommandError> 
 
 /// What the catalog keeps with a collection's options that is not one of them: `options_of`
 /// leaves them out and a rewrite of the options (`collMod`) keeps them.
-const HIDDEN_OPTIONS: [&str; 4] = [
+const HIDDEN_OPTIONS: [&str; 5] = [
     ID_INDEX_VERSION,
     super::sharding::SHARD_KEY,
     super::timeseries_range::EXTENDED_RANGE,
     ORDERED_IDS,
+    PARTITIONS,
 ];
 
 /// The option of a collection's entry that keeps its documents in `_id` order (D-153).
-pub(crate) use teseladb_meta::catalog::ORDERED_IDS;
+pub(crate) use teseladb_meta::catalog::{ORDERED_IDS, PARTITIONS};
+
+/// Whether `ns` is a namespace of the server's own (`admin`, `config`, `local` or a `system.`
+/// collection), which is not spread over partitions (D-186).
+fn is_system_namespace(ns: &teseladb_meta::catalog::Namespace) -> bool {
+    matches!(ns.db.as_str(), "admin" | "config" | "local") || ns.coll.starts_with("system.")
+}
 
 /// Whether `c` keeps its documents in `_id` order: a clustered collection (015 FR-009) or a
 /// collection created with [`ORDERED_IDS`].
 pub(crate) fn in_id_order(c: &CollectionEntry) -> Result<bool, CommandError> {
     Ok(match kinds::kind_of(c)? {
         CollectionKind::Clustered { .. } => true,
+        // Spread over partitions, each partition keeps its documents in `_id` order (D-186).
         CollectionKind::Normal => {
             c.layout().map_err(|e| CommandError::new(INTERNAL_ERROR, e.0.to_owned()))?
                 == DocumentLayout::IdOrder
+                || c.partitions().is_ok_and(|p| p.count() > 1)
         }
         CollectionKind::Capped { .. }
         | CollectionKind::View { .. }
@@ -347,6 +356,11 @@ pub fn create<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Com
     // A new collection keeps its documents in `_id` order once every node reads it (D-153).
     if asked == kinds::Asked::Normal && ctx.backend.ordered_ids()? {
         stored.push(ORDERED_IDS, true);
+    }
+    // And spread over a partition per core of the node once every node reads them (D-186).
+    let partitions = ctx.backend.new_partitions();
+    if asked == kinds::Asked::Normal && partitions > 1 && !is_system_namespace(&ns) {
+        stored.push(PARTITIONS, i64::from(partitions));
     }
     let bytes = stored.to_bytes()?;
     let uuid = super::new_uuid(ctx.backend);

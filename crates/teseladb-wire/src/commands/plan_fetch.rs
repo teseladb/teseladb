@@ -34,6 +34,11 @@ pub enum Fetched {
 
 /// The key of the document an index entry with primary key `pk` names.
 pub(crate) fn document_key(coll: &CollectionEntry, unbucketed: bool, pk: &[u8]) -> Vec<u8> {
+    // In a collection spread over partitions the document is in its key's (D-186).
+    if let Some(parts) = coll.partitions().ok().filter(|p| p.count() > 1) {
+        let number = parts.number_of_bytes(pk);
+        return KeyBuilder::document_of_sharded_pk(coll.tenant, number, pk).as_bytes().to_vec();
+    }
     let key = match unbucketed {
         true => KeyBuilder::document_of_sharded_pk(coll.tenant, coll.id, pk),
         false => KeyBuilder::document_of_pk(coll.tenant, coll.id, pk),

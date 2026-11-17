@@ -178,6 +178,21 @@ pub const SCAN_BATCH: usize = teseladb_mql::vm::BATCH;
 /// at `i`).
 pub type Keep<'k> = dyn FnMut(&[&[u8]]) -> u64 + 'k;
 
+/// `[start, end)` in each partition, when its keys are those of a collection spread over several
+/// (003 FR-012, D-186): what a read of them goes to.
+pub fn partition_spans<B: Backend + ?Sized>(
+    backend: &mut B,
+    start: &[u8],
+    end: &[u8],
+) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let word = |i: usize| Some(u32::from_be_bytes(start.get(i..i + 4)?.try_into().ok()?));
+    if start.first() != Some(&teseladb_keys::space::DATA) {
+        return None;
+    }
+    let parts = backend.partitions_at(word(1)?, word(5)?)?;
+    (parts.count() > 1).then(|| parts.spans(start, end)).flatten()
+}
+
 /// [`Backend::scan_matching`] by a plain scan: every document is read, then filtered a batch at
 /// a time.
 pub fn matching_by_scan<B: Backend + ?Sized>(
@@ -646,6 +661,21 @@ pub trait Backend {
     /// nothing to wait for.
     fn catalog_barrier(&mut self) -> Result<(), CommandError> {
         Ok(())
+    }
+    /// How many partitions a new collection is spread over (003 FR-012, D-186): one per core of
+    /// the node once every node reads them; by default one.
+    fn new_partitions(&mut self) -> u8 {
+        1
+    }
+    /// The partitions of the collection that collection number `number` of tenant `tenant`
+    /// belongs to, when it is spread over several (003 FR-012, D-186): a read of its keys goes
+    /// to each of them. By default no collection is.
+    fn partitions_at(
+        &mut self,
+        _tenant: u32,
+        _number: u32,
+    ) -> Option<teseladb_keys::partition::Partitions> {
+        None
     }
     /// Reads `spans` as [`Backend::scan`] reads each, in their order. A node sends them to their
     /// ranges at once and then takes the answers, instead of one trip after the other.

@@ -69,6 +69,7 @@ mod f {
     pub const MOVES: &str = "moves";
     pub const REKEYS: &str = "rekeys";
     pub const CLUSTERED: &str = "clustered";
+    pub const PARTITIONS: &str = "partitions";
     pub const FIELDS: &str = "fields";
     pub const RETRY: &str = "retry";
     pub const MARK: &str = "mark";
@@ -186,6 +187,10 @@ pub struct Rules {
     pub retry: Option<teseladb_changestream::meta::RetryInfo>,
     /// The collection is clustered by `_id` (015 FR-009): a duplicate `_id` fails as there.
     pub clustered: bool,
+    /// How many partitions the collection is spread over from `collection` (003 FR-012, D-186):
+    /// its non-unique index entries go with their document's. 0, as rules built without it
+    /// have, is one.
+    pub partitions: u8,
     /// The numbers of the names the write carries in the collection's dictionary of field names
     /// (003 FR-022), which the tables of the versions it stores use.
     pub fields: FieldNumbers,
@@ -348,6 +353,9 @@ fn rules_doc(r: &Rules, d: &mut Document, send: Send<'_>) {
     }
     if r.clustered {
         d.push(f::CLUSTERED, true);
+    }
+    if r.partitions > 1 {
+        d.push(f::PARTITIONS, i64::from(r.partitions));
     }
     if let Some(info) = retry.or(r.retry.as_ref()) {
         d.push(f::RETRY, Value::Binary { subtype: 0, bytes: info.to_bytes() });
@@ -560,6 +568,14 @@ fn read_rules(d: &Fields<'_>) -> Result<Rules, CommandError> {
         moves: get_bool(d, f::MOVES),
         rekeys: get_bool(d, f::REKEYS),
         clustered: get_bool(d, f::CLUSTERED),
+        partitions: match d.get(f::PARTITIONS) {
+            Some(RawValue::Int64(n)) => u8::try_from(n)
+                .ok()
+                .filter(|n| (1..=teseladb_keys::partition::MAX_PARTITIONS).contains(n))
+                .ok_or_else(bad_rules)?,
+            None => 1,
+            Some(_) => return Err(bad_rules()),
+        },
         fields: match d.get(f::FIELDS) {
             Some(RawValue::Binary { bytes, .. }) => {
                 FieldNumbers::from_bytes(bytes).ok_or_else(bad_rules)?
@@ -971,8 +987,15 @@ impl Checker {
             constraint,
             collation,
             ext: super::engines::CollatedExtensions::new(collation),
-            indexes: Maintainer::new(&r.ns, (r.tenant, r.collection), &r.indexes)?
-                .with_probes(r.probes.clone(), enforce),
+            indexes: Maintainer::new(
+                &r.ns,
+                (
+                    r.tenant,
+                    teseladb_keys::partition::Partitions::new(r.collection, r.partitions.max(1)),
+                ),
+                &r.indexes,
+            )?
+            .with_probes(r.probes.clone(), enforce),
             unique: std::cell::RefCell::default(),
             vars: r.vars.clone(),
             capped: r.capped.map(|_| (r.tenant, r.collection)),

@@ -999,6 +999,7 @@ impl NodeLogic {
             routes.publish_fcv_limit(limit);
         }
         routes.publish_ordered_ids(crate::node_versions::ordered_ids(sm));
+        routes.publish_partitions(crate::node_versions::partitions(sm));
         let tags: crate::routes::NodeTags =
             sm.nodes.iter().map(|(id, n)| (*id, n.tags.clone())).collect();
         let applied = sm.applied;

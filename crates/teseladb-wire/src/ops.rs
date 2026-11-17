@@ -566,6 +566,34 @@ impl<'a, B: Backend + ?Sized> Guarded<'a, B> {
     /// document is a row of a collection's documents, an index entry a row of one of its indexes
     /// (also the `_id` entries of a capped collection), and the rest (multikey marks, guards of
     /// `prepareUnique`, the node's own tables) is neither.
+    /// `[start, end)` in each partition, when its keys are those of a collection spread over
+    /// several (D-186).
+    fn partition_spans(&mut self, start: &[u8], end: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+        crate::commands::partition_spans(&mut *self.inner, start, end)
+    }
+
+    /// [`Backend::scan`] or [`Backend::scan_back`] of a collection spread over partitions: each
+    /// partition read in one trip, their rows merged in the index's order (D-186). `None` when
+    /// `[start, end)` is not such a collection's.
+    fn scan_partitions(
+        &mut self,
+        (start, end): (&[u8], &[u8]),
+        limit: usize,
+        backward: bool,
+        concern: ReadConcern,
+    ) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, CommandError> {
+        let Some(spans) = self.partition_spans(start, end) else { return Ok(None) };
+        let spans: Vec<crate::commands::Span> = spans
+            .into_iter()
+            .map(|(start, end)| crate::commands::Span { start, end, limit, backward })
+            .collect();
+        let lists = self.call(|b| b.scan_spans(&spans, concern))?;
+        self.check()?;
+        let rows = teseladb_keys::partition::merge(lists, limit, backward);
+        self.tally(&rows);
+        Ok(Some(stored::document_rows(rows)))
+    }
+
     fn tally(&mut self, rows: &[(Vec<u8>, Vec<u8>)]) {
         let (mut keys, mut docs) = (0u64, 0u64);
         for (key, _) in rows {
@@ -1087,6 +1115,18 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         self.call(|b| b.ordered_ids())
     }
 
+    fn new_partitions(&mut self) -> u8 {
+        self.inner.new_partitions()
+    }
+
+    fn partitions_at(
+        &mut self,
+        tenant: u32,
+        number: u32,
+    ) -> Option<teseladb_keys::partition::Partitions> {
+        self.inner.partitions_at(tenant, number)
+    }
+
     fn scan(
         &mut self,
         start: &[u8],
@@ -1094,6 +1134,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        if let Some(rows) = self.scan_partitions((start, end), limit, false, concern)? {
+            return Ok(rows);
+        }
         // A read that ran past the deadline stops the operation once it returns; a write
         // that returned is done and keeps its result.
         let rows = self.call(|b| b.scan(start, end, limit, concern))?;
@@ -1112,6 +1155,50 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         block: &dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool,
         sent: Option<&[u8]>,
     ) -> Result<crate::commands::Matching, CommandError> {
+        // A collection spread over partitions: each examines its share where it is stored, and
+        // what they accepted merges in order up to the first key where one of them stopped
+        // (D-186). The next read goes on from that key in every partition.
+        if let Some(spans) = self.partition_spans(start, end) {
+            use teseladb_keys::partition::after_number;
+            let per = examine.div_ceil(spans.len()).max(1);
+            let mut parts = Vec::with_capacity(spans.len());
+            for (s, e) in &spans {
+                let m = self.call(|b| b.scan_matching(s, e, per, concern, keep, block, sent))?;
+                parts.push(m);
+            }
+            self.check()?;
+            let frontier = parts
+                .iter()
+                .filter_map(|m| m.next.as_deref())
+                .min_by(|a, b| after_number(a).cmp(after_number(b)))
+                .map(<[u8]>::to_vec);
+            let below =
+                |k: &[u8]| frontier.as_deref().is_none_or(|f| after_number(k) < after_number(f));
+            let examined: usize = parts.iter().map(|m| m.examined).sum();
+            let mut seen_before = 0;
+            let lists: Vec<Vec<(Vec<u8>, (usize, Vec<u8>))>> = parts
+                .into_iter()
+                .map(|m| {
+                    let offset = seen_before;
+                    seen_before += m.examined;
+                    m.rows
+                        .into_iter()
+                        .zip(m.seen)
+                        .filter(|((k, _), _)| below(k))
+                        .map(|((k, v), seen)| (k, (offset + seen, v)))
+                        .collect()
+                })
+                .collect();
+            let merged = teseladb_keys::partition::merge(lists, usize::MAX, false);
+            let mut out =
+                crate::commands::Matching { examined, next: frontier, ..Default::default() };
+            for (k, (seen, v)) in merged {
+                out.seen.push(seen);
+                out.rows.push((k, v));
+            }
+            self.report.docs += out.examined as u64;
+            return Ok(out);
+        }
         let m = self.call(|b| b.scan_matching(start, end, examine, concern, keep, block, sent))?;
         self.check()?;
         // Every document it examined counts, not only those its filter accepted.
@@ -1129,6 +1216,22 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
         concern: ReadConcern,
     ) -> Result<Option<crate::commands::Scattered>, CommandError> {
+        // A collection spread over partitions: each partition folds its documents where they
+        // are stored, and their partial groups join the others' (D-186). One that declines sends
+        // the caller to read the documents and run the pipeline itself.
+        if let Some(spans) = self.partition_spans(span.0, span.1) {
+            let mut all = crate::commands::Scattered::default();
+            for (s, e) in &spans {
+                let Some(part) = self.call(|b| b.scatter_groups((s, e), program, concern))? else {
+                    return Ok(None);
+                };
+                all.parts.extend(part.parts);
+                all.examined += part.examined;
+            }
+            self.check()?;
+            self.report.docs += all.examined as u64;
+            return Ok(Some(all));
+        }
         let found = self.call(|b| b.scatter_groups(span, program, concern))?;
         self.check()?;
         // Every document the cores examined counts, as in a scan of the collection.
@@ -1154,6 +1257,19 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn doc_count(&mut self, tenant: u32, collection: u32) -> Result<Option<u64>, CommandError> {
+        // The partitions' counts added up; one estimated leaves the caller counting by reading.
+        if let Some(parts) = self.inner.partitions_at(tenant, collection).filter(|p| p.count() > 1)
+        {
+            let mut total = 0;
+            for n in parts.numbers() {
+                match self.call(|b| b.doc_count(tenant, n))? {
+                    Some(c) => total += c,
+                    None => return Ok(None),
+                }
+            }
+            self.check()?;
+            return Ok(Some(total));
+        }
         let n = self.call(|b| b.doc_count(tenant, collection))?;
         self.check()?;
         Ok(n)
@@ -1164,6 +1280,23 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         coll: (u32, u32),
         span: (&[u8], &[u8]),
     ) -> Result<Option<(u64, u64, u64)>, CommandError> {
+        if let Some(spans) = self.partition_spans(span.0, span.1) {
+            let mut sum = (0, 0, 0);
+            for (n, (s, e)) in self
+                .inner
+                .partitions_at(coll.0, coll.1)
+                .into_iter()
+                .flat_map(|p| p.numbers())
+                .zip(&spans)
+            {
+                let Some((a, b, c)) = self.call(|x| x.doc_tally((coll.0, n), (s, e)))? else {
+                    return Ok(None);
+                };
+                sum = (sum.0 + a, sum.1 + b, sum.2 + c);
+            }
+            self.check()?;
+            return Ok(Some(sum));
+        }
         let t = self.call(|b| b.doc_tally(coll, span))?;
         self.check()?;
         Ok(t)
@@ -1193,6 +1326,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         limit: usize,
         concern: ReadConcern,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, CommandError> {
+        if let Some(rows) = self.scan_partitions((start, end), limit, true, concern)? {
+            return Ok(rows);
+        }
         // As `scan`: the deadline stops the operation once the read returns.
         let rows = self.call(|b| b.scan_back(start, end, limit, concern))?;
         self.check()?;
@@ -1207,6 +1343,44 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         spans: &[crate::commands::Span],
         concern: ReadConcern,
     ) -> Result<Vec<crate::commands::Rows>, CommandError> {
+        // A span of a collection spread over partitions goes to each, in the same trip, and
+        // its partitions' rows merge back in the index's order (D-186).
+        let mut sent = Vec::new();
+        let mut groups = Vec::new();
+        for span in spans {
+            let parts = self.partition_spans(&span.start, &span.end).unwrap_or_default();
+            if parts.is_empty() {
+                groups.push(1);
+                sent.push(span.clone());
+                continue;
+            }
+            groups.push(parts.len());
+            let (limit, backward) = (span.limit, span.backward);
+            sent.extend(parts.into_iter().map(|(start, end)| crate::commands::Span {
+                start,
+                end,
+                limit,
+                backward,
+            }));
+        }
+        if sent.len() != spans.len() {
+            let mut lists = self.call(|b| b.scan_spans(&sent, concern))?.into_iter();
+            self.check()?;
+            let mut all = Vec::with_capacity(spans.len());
+            for (span, n) in spans.iter().zip(groups) {
+                let rows = match n {
+                    1 => lists.next().unwrap_or_default(),
+                    n => teseladb_keys::partition::merge(
+                        lists.by_ref().take(n).collect(),
+                        span.limit,
+                        span.backward,
+                    ),
+                };
+                self.tally(&rows);
+                all.push(stored::document_rows(rows));
+            }
+            return Ok(all);
+        }
         let all = self.call(|b| b.scan_spans(spans, concern))?;
         self.check()?;
         for rows in &all {

@@ -46,6 +46,8 @@ pub struct SharedRoutes {
     fcv_limit: Published<Option<String>>,
     /// Every node keeps the documents of a new collection in `_id` order (D-153).
     ordered_ids: Arc<std::sync::atomic::AtomicBool>,
+    /// Every node reads collections spread over partitions (D-186).
+    partitions: Arc<std::sync::atomic::AtomicBool>,
     /// The state of each tenant but the default one: its limits, its access list and whether it
     /// is suspended (FR-030, FR-034, FR-035).
     tenants: Published<TenantStates>,
@@ -245,6 +247,16 @@ impl SharedRoutes {
     /// Records whether every node keeps the documents of a new collection in `_id` order.
     pub fn publish_ordered_ids(&self, on: bool) {
         self.ordered_ids.store(on, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Records whether every node reads collections spread over partitions (D-186).
+    pub fn publish_partitions(&self, on: bool) {
+        self.partitions.store(on, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether a new collection is spread over partitions (D-186).
+    pub fn partitions(&self) -> bool {
+        self.partitions.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether a new collection keeps its documents in `_id` order (D-153).

@@ -148,11 +148,12 @@ fn malformed() -> CommandError {
 }
 
 impl Maintainer {
-    /// The indexes `rules` of collection `collection` of tenant `tenant` of namespace `ns`;
+    /// The indexes `rules` of the collection with numbers `parts` of tenant `tenant` of namespace
+    /// `ns` (its non-unique entries go with their document's partition, D-186);
     /// `text` indexes have no entries here (011 keeps them).
     pub fn new(
         ns: &str,
-        (tenant, collection): (u32, u32),
+        (tenant, parts): (u32, teseladb_keys::partition::Partitions),
         rules: &[IndexRule],
     ) -> Result<Maintainer, CommandError> {
         let mut sets = Vec::new();
@@ -164,7 +165,12 @@ impl Maintainer {
             let unique = def.unique;
             // A stored specification has `prepareUnique: true` or none (`createIndexes`).
             let prepared = !unique && spec.get(PREPARE_UNIQUE) == Some(RawValue::Boolean(true));
-            let set = IndexSet { tenant, collection, indexes: vec![(r.id, def)] };
+            let set = IndexSet {
+                tenant,
+                collection: parts.unique_number(),
+                partitions: parts,
+                indexes: vec![(r.id, def)],
+            };
             let name = match spec.get(NAME) {
                 Some(RawValue::String(n)) => n.to_string(),
                 _ => return Err(malformed()),

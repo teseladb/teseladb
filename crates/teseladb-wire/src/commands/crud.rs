@@ -446,17 +446,31 @@ pub fn rules_of(
         rekeys: false,
         retry: None,
         clustered: matches!(super::kinds::kind_of(coll)?, CollectionKind::Clustered { .. }),
+        partitions: partitions_of(coll)?.count(),
         fields: teseladb_keys::fields::FieldNumbers::default(),
     })
 }
 
+/// The partitions of collection `coll` (003 FR-012, D-186).
+pub(crate) fn partitions_of(
+    coll: &CollectionEntry,
+) -> Result<teseladb_keys::partition::Partitions, CommandError> {
+    coll.partitions().map_err(|e| CommandError::new(crate::error::INTERNAL_ERROR, e.0.to_owned()))
+}
+
 /// The key of a document with `_id` `id` in collection `coll`: in `_id` order without bucket in a
-/// clustered collection (015 FR-009), after the hash bucket of its `_id` in the others.
+/// clustered collection (015 FR-009), in its partition in one spread over partitions (D-186),
+/// after the hash bucket of its `_id` in the others.
 pub fn doc_key(coll: &CollectionEntry, id: &Value) -> Result<Vec<u8>, CommandError> {
     let holder = Document::new().with("_id", id.clone());
     let bytes = holder.to_bytes()?;
     let raw = RawDoc::from_bytes(&bytes)?;
     let id = raw.get("_id").ok_or(CommandError::new(BAD_VALUE, "bad _id"))?;
+    let parts = partitions_of(coll)?;
+    if parts.count() > 1 {
+        let pk = teseladb_keys::PrimaryKey::id(id);
+        return Ok(parts.document(coll.tenant, &pk).as_bytes().to_vec());
+    }
     let key = match super::kinds::kind_of(coll)? {
         CollectionKind::Clustered { .. } => {
             KeyBuilder::document_clustered(coll.tenant, coll.id, id)

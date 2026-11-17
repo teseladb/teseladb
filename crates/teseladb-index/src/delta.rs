@@ -16,8 +16,11 @@ use crate::keygen::{FieldKind, IndexDef, KeygenError, entry_value, index_entries
 pub struct IndexSet {
     /// Tenant.
     pub tenant: u32,
-    /// Collection.
+    /// Collection: its first number, where the entries of its unique indexes go.
     pub collection: u32,
+    /// Its partitions (003 FR-012, D-186): the entries of a non-unique index go with their
+    /// document's.
+    pub partitions: teseladb_keys::partition::Partitions,
     /// Index number and definition.
     pub indexes: Vec<(u32, IndexDef)>,
 }
@@ -67,8 +70,11 @@ impl IndexSet {
     ) -> Result<BTreeMap<Key, Vec<u8>>, KeygenError> {
         let mut out = BTreeMap::new();
         for (id, def) in which {
-            let entries =
-                index_entries(self.tenant, self.collection, *id, def, v.doc, v.pk, collation)?;
+            let collection = match def.unique {
+                true => self.collection,
+                false => self.partitions.number_of(v.pk),
+            };
+            let entries = index_entries(self.tenant, collection, *id, def, v.doc, v.pk, collation)?;
             out.extend(entries.into_iter().map(|(k, bits)| (k, entry_value(def, v.pk, &bits))));
         }
         Ok(out)

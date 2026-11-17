@@ -12,6 +12,7 @@ fn set() -> IndexSet {
     IndexSet {
         tenant: 0,
         collection: 3,
+        partitions: teseladb_keys::partition::Partitions::single(3),
         indexes: vec![
             (1, def(vec![IndexField::ordered("a", Direction::Ascending)])),
             (2, def(vec![IndexField::ordered("tags", Direction::Descending)])),
@@ -175,7 +176,12 @@ fn an_index_left_out_does_not_look_at_its_fields_and_a_wildcard_one_is_always_co
     let projection = teseladb_index::keygen::wildcard::WildcardProjection::all();
     let wild = IndexField::wildcard("$**", Direction::Ascending, projection);
     let def = IndexDef { fields: vec![wild], buckets: 0, sparse: false, unique: false };
-    let s = IndexSet { tenant: 0, collection: 3, indexes: vec![(9, def)] };
+    let s = IndexSet {
+        tenant: 0,
+        collection: 3,
+        partitions: teseladb_keys::partition::Partitions::single(3),
+        indexes: vec![(9, def)],
+    };
     let (old, new) = (bytes("{\"_id\": 1, \"q\": 1}"), bytes("{\"_id\": 1, \"q\": 2}"));
     let (o, n) = (RawDoc::from_bytes(&old).unwrap(), RawDoc::from_bytes(&new).unwrap());
     let (old, new) = (Version { doc: o, pk: &pk }, Version { doc: n, pk: &pk });

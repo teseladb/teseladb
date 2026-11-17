@@ -1,0 +1,174 @@
+//! Collections spread over partitions (003 FR-012, 009 FR-002, D-186): the same writes and reads
+//! on a collection created with four partitions and on one created with one give the same
+//! answers, in the same order where the command asks for one, and the partitioned one keeps its
+//! documents and their index entries under its partitions' collection numbers.
+
+mod common;
+
+use common::{Mem, doc, field};
+use teseladb_bson::{Document, Value};
+use teseladb_keys::KeyParts;
+use teseladb_wire::commands::{Ctx, Shared, run};
+use teseladb_wire::ops::{Guarded, Op, op_type};
+
+/// Runs `cmd` as the node runs a client's command: through the operation's guard, which sends
+/// the reads of a collection spread over partitions to each of them.
+fn guarded(m: &mut Mem, cmd: Document) -> Document {
+    let shared = Shared::default();
+    let op = Op {
+        conn: 1,
+        client: None,
+        metadata: None,
+        app_name: None,
+        op: op_type("command"),
+        ns: "db.c".to_owned(),
+        command: Document::new(),
+        started_ms: 0,
+        deadline_ms: None,
+        killed: false,
+        interrupt: None,
+        user: None,
+        tenant: 0,
+        privileges: None,
+        roles: None,
+        desc: None,
+        progress: None,
+        metrics: None,
+    };
+    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op);
+    let mut g = Guarded::new(m, &shared, id);
+    let r = run(&mut Ctx { backend: &mut g, shared: &shared, db: "db", cmd: &cmd })
+        .expect("a command of the module");
+    match r {
+        Ok(d) => d,
+        Err(e) => e.to_document(),
+    }
+}
+
+fn s(x: &str) -> Value {
+    Value::from(x)
+}
+
+fn d(pairs: &[(&str, Value)]) -> Value {
+    Value::Document(doc(pairs))
+}
+
+fn field_of(v: &Value, name: &str) -> Value {
+    match v {
+        Value::Document(d) => d.get(name).cloned().unwrap_or(Value::Null),
+        other => panic!("not a document: {other:?}"),
+    }
+}
+
+fn batch(r: &Document) -> Vec<Value> {
+    match field(r, "cursor.firstBatch") {
+        Value::Array(a) => a.clone(),
+        other => panic!("no batch in {r:?}: {other:?}"),
+    }
+}
+
+/// Creates collection `coll` spread over `parts` partitions, with an index on `v` and 3,000
+/// documents: more than a scan reads at once, so the scans go on from where they stopped.
+fn fill(m: &mut Mem, coll: &str, parts: u8) {
+    m.partitions = parts;
+    let r = guarded(m, doc(&[("create", s(coll))]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    m.partitions = 1;
+    let index = d(&[("key", d(&[("v", 1.into())])), ("name", s("v_1"))]);
+    let r = guarded(m, doc(&[("createIndexes", s(coll)), ("indexes", Value::Array(vec![index]))]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    let docs: Vec<Value> = (0..3000)
+        .map(|i: i32| d(&[("_id", i.into()), ("v", (i % 17).into()), ("g", (i % 5).into())]))
+        .collect();
+    let r = guarded(m, doc(&[("insert", s(coll)), ("documents", Value::Array(docs))]));
+    assert_eq!(field(&r, "n"), &Value::Int32(3000), "{r:?}");
+}
+
+/// The answers of a battery of commands on `coll`.
+fn answers(m: &mut Mem, coll: &str) -> Vec<Value> {
+    let find = |m: &mut Mem, filter: Value, sort: Value, limit: i32| {
+        let cmd = doc(&[
+            ("find", s(coll)),
+            ("filter", filter),
+            ("sort", sort),
+            ("limit", limit.into()),
+            ("batchSize", 1000.into()),
+        ]);
+        Value::Array(batch(&guarded(m, cmd)))
+    };
+    let range = d(&[("v", d(&[("$gte", 3.into()), ("$lt", 9.into())]))]);
+    let by_v = d(&[("v", 1.into()), ("_id", 1.into())]);
+    let mut out = vec![
+        find(m, d(&[("_id", 7.into())]), d(&[]), 0),
+        find(m, range, by_v.clone(), 0),
+        find(m, d(&[]), d(&[("_id", (-1).into())]), 10),
+        find(m, d(&[("v", 5.into())]), d(&[("v", 1.into())]), 0),
+    ];
+    // A filter on a field without an index: every document examined, the accepted ones in
+    // whatever order the scan reads them, compared by `_id`.
+    let cmd = doc(&[
+        ("find", s(coll)),
+        ("filter", d(&[("g", 1.into()), ("v", d(&[("$lt", 4.into())]))])),
+        ("projection", d(&[("_id", 1.into())])),
+        ("batchSize", 100_000.into()),
+    ]);
+    let mut ids: Vec<i32> = batch(&guarded(m, cmd))
+        .iter()
+        .map(|d| match field_of(d, "_id") {
+            Value::Int32(i) => i,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    ids.sort_unstable();
+    out.push(Value::Array(ids.into_iter().map(Value::Int32).collect()));
+    let count = guarded(m, doc(&[("count", s(coll)), ("query", d(&[("g", 2.into())]))]));
+    out.push(field(&count, "n").clone());
+    let group = d(&[("$group", d(&[("_id", s("$g")), ("n", d(&[("$sum", 1.into())]))]))]);
+    let sort = d(&[("$sort", d(&[("_id", 1.into())]))]);
+    let cmd = doc(&[
+        ("aggregate", s(coll)),
+        ("pipeline", Value::Array(vec![group, sort])),
+        ("cursor", d(&[])),
+    ]);
+    out.push(Value::Array(batch(&guarded(m, cmd))));
+    let inc = d(&[("$inc", d(&[("v", 100.into())]))]);
+    let update = d(&[("q", d(&[("g", 3.into())])), ("u", inc), ("multi", true.into())]);
+    let r = guarded(m, doc(&[("update", s(coll)), ("updates", Value::Array(vec![update]))]));
+    out.push(field(&r, "nModified").clone());
+    out.push(find(m, d(&[("v", d(&[("$gt", 100.into())]))]), by_v, 0));
+    let delete = d(&[("q", d(&[("g", 4.into())])), ("limit", 0.into())]);
+    let r = guarded(m, doc(&[("delete", s(coll)), ("deletes", Value::Array(vec![delete]))]));
+    out.push(field(&r, "n").clone());
+    let count = guarded(m, doc(&[("count", s(coll))]));
+    out.push(field(&count, "n").clone());
+    out
+}
+
+#[test]
+fn a_collection_over_four_partitions_answers_as_one_over_one() {
+    let mut m = Mem::new();
+    fill(&mut m, "spread", 4);
+    fill(&mut m, "plain", 1);
+    let spread =
+        m.catalog.collections.values().find(|c| c.partitions().is_ok_and(|p| p.count() == 4));
+    let parts = spread.expect("a collection over four partitions").partitions().unwrap();
+    // Its documents and their entries are under the four numbers, and under each of them.
+    let numbers: std::collections::BTreeSet<u32> = m
+        .data
+        .keys()
+        .filter_map(|k| match KeyParts::of(k) {
+            Ok(KeyParts::Data { collection, .. }) if parts.contains(collection) => Some(collection),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(numbers.len(), 4, "{numbers:?}");
+    let (spread, plain) = (answers(&mut m, "spread"), answers(&mut m, "plain"));
+    assert_eq!(spread.len(), plain.len());
+    for (i, (a, b)) in spread.iter().zip(&plain).enumerate() {
+        assert_eq!(a, b, "answer {i}");
+    }
+    // The option is the catalog's own: `listCollections` does not show it.
+    let cmd = doc(&[("listCollections", 1.into()), ("filter", d(&[("name", s("spread"))]))]);
+    let listed = format!("{:?}", batch(&guarded(&mut m, cmd)));
+    assert!(!listed.contains("partitions"), "{listed}");
+}

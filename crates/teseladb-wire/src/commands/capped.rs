@@ -87,7 +87,12 @@ pub fn id_keys<B: Backend + ?Sized>(
         .ok()
         .flatten()
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "the _id_ index has no definition"))?;
-    let set = IndexSet { tenant: coll.tenant, collection: coll.id, indexes: vec![(ID_INDEX, def)] };
+    let set = IndexSet {
+        tenant: coll.tenant,
+        collection: coll.id,
+        partitions: teseladb_keys::partition::Partitions::single(coll.id),
+        indexes: vec![(ID_INDEX, def)],
+    };
     let collation = super::index_maintenance::collation_of(RawDoc::from_bytes(&spec_bytes)?)?;
     let collator = collation.as_ref().map(|c| c as &dyn teseladb_bson::Collator);
     let pk = PrimaryKey::seq(0);

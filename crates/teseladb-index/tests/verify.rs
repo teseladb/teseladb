@@ -33,7 +33,12 @@ fn set() -> IndexSet {
         sparse: false,
         unique: false,
     };
-    IndexSet { tenant: 0, collection: 7, indexes: vec![(A, a), (WILD, wild)] }
+    IndexSet {
+        tenant: 0,
+        collection: 7,
+        partitions: teseladb_keys::partition::Partitions::single(7),
+        indexes: vec![(A, a), (WILD, wild)],
+    }
 }
 
 fn bytes(text: &str) -> Vec<u8> {
@@ -106,6 +111,7 @@ fn other_type_bits_unknown_indexes_and_refused_documents() {
     let parallel = IndexSet {
         tenant: 0,
         collection: 7,
+        partitions: teseladb_keys::partition::Partitions::single(7),
         indexes: vec![(
             3,
             IndexDef {

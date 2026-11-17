@@ -28,7 +28,12 @@ fn pk(id: i32) -> PrimaryKey {
 
 /// The (key, value) entries of `doc` in index `def`.
 fn entries(def: &IndexDef, doc: &[u8], id: i32) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let set = IndexSet { tenant: 0, collection: 9, indexes: vec![(ID, def.clone())] };
+    let set = IndexSet {
+        tenant: 0,
+        collection: 9,
+        partitions: teseladb_keys::partition::Partitions::single(9),
+        indexes: vec![(ID, def.clone())],
+    };
     let raw = RawDoc::from_bytes(doc).unwrap();
     let pk = pk(id);
     let d = set.delta(None, Some(Version { doc: raw, pk: &pk }), None).unwrap();
@@ -107,7 +112,12 @@ fn the_error_names_the_index_its_pattern_and_the_conflicting_values() {
     let doc = bytes(r#"{"_id": 7, "a": [1, 2], "b": "x"}"#);
     let raw = RawDoc::from_bytes(&doc).unwrap();
     let keys = entries(&unique, &doc, 7);
-    let set = IndexSet { tenant: 0, collection: 9, indexes: vec![(ID, unique.clone())] };
+    let set = IndexSet {
+        tenant: 0,
+        collection: 9,
+        partitions: teseladb_keys::partition::Partitions::single(9),
+        indexes: vec![(ID, unique.clone())],
+    };
     let values = conflicting_values(&set, ID, raw, &keys[1].0, None).unwrap();
     assert_eq!(values, vec![Value::Int32(2), Value::from("x")], "the second element's entry");
     assert!(conflicting_values(&set, ID, raw, b"nope", None).unwrap().is_empty());

@@ -1731,6 +1731,18 @@ pub fn tick_idle(backend: &mut dyn Backend, shared: &Shared) {
 }
 
 impl Backend for TxnBackend<'_> {
+    fn new_partitions(&mut self) -> u8 {
+        self.inner.new_partitions()
+    }
+
+    fn partitions_at(
+        &mut self,
+        tenant: u32,
+        number: u32,
+    ) -> Option<teseladb_keys::partition::Partitions> {
+        self.inner.partitions_at(tenant, number)
+    }
+
     fn field_numbers(
         &mut self,
         collection: u32,
@@ -2036,6 +2048,16 @@ impl Backend for TxnBackend<'_> {
         // Inside the transaction: at its read mark, with its own intents and held writes.
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
+        // A collection spread over partitions: each read, merged in the index's order (D-186).
+        if let Some(spans) = super::partition_spans(self, start, end) {
+            let mut lists = Vec::with_capacity(spans.len());
+            for (s, e) in &spans {
+                let rows = self.scan_over((s, e), limit, (at, &view, window), false);
+                lists.push(rows.map_err(|e| self.run.note_uncertain(e))?);
+            }
+            let rows = teseladb_keys::partition::merge(lists, limit, false);
+            return Ok(teseladb_keys::stored::document_rows(rows));
+        }
         self.scan_over((start, end), limit, (at, &view, window), false)
             .map(teseladb_keys::stored::document_rows)
             .map_err(|e| self.run.note_uncertain(e))
@@ -2051,6 +2073,15 @@ impl Backend for TxnBackend<'_> {
         // As `scan`, from the last key down (H-003).
         self.contact(start);
         let (at, view, window) = (self.run.read_ts(), self.run.view.clone(), self.run.uncertain_to);
+        if let Some(spans) = super::partition_spans(self, start, end) {
+            let mut lists = Vec::with_capacity(spans.len());
+            for (s, e) in &spans {
+                let rows = self.scan_over((s, e), limit, (at, &view, window), true);
+                lists.push(rows.map_err(|e| self.run.note_uncertain(e))?);
+            }
+            let rows = teseladb_keys::partition::merge(lists, limit, true);
+            return Ok(teseladb_keys::stored::document_rows(rows));
+        }
         self.scan_over((start, end), limit, (at, &view, window), true)
             .map(teseladb_keys::stored::document_rows)
             .map_err(|e| self.run.note_uncertain(e))

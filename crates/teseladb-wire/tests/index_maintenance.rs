@@ -46,7 +46,12 @@ fn entries(m: &Mem, collection: u32, id: u32) -> Vec<Vec<u8>> {
 fn expected(collection: u32, id: u32, key: Document, doc: &Document) -> Vec<Vec<u8>> {
     let s = spec(key);
     let def = index_def(RawDoc::from_bytes(&s).unwrap(), 0).unwrap().unwrap();
-    let set = IndexSet { tenant: 0, collection, indexes: vec![(id, def)] };
+    let set = IndexSet {
+        tenant: 0,
+        collection,
+        partitions: teseladb_keys::partition::Partitions::single(collection),
+        indexes: vec![(id, def)],
+    };
     let bytes = doc.to_bytes().unwrap();
     let raw = RawDoc::from_bytes(&bytes).unwrap();
     let pk = PrimaryKey::id(raw.get("_id").unwrap());

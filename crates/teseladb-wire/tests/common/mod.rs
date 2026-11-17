@@ -240,6 +240,8 @@ pub struct Mem {
     pub fcv_limit: Option<String>,
     /// Every node keeps the documents of a new collection in `_id` order (D-153).
     pub ordered_ids: bool,
+    /// How many partitions a new collection is spread over (D-186); 0 or 1: none.
+    pub partitions: u8,
     /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
@@ -1506,6 +1508,21 @@ impl Backend for Mem {
 
     fn ordered_ids(&mut self) -> Result<bool, CommandError> {
         Ok(self.ordered_ids)
+    }
+
+    fn new_partitions(&mut self) -> u8 {
+        self.partitions.max(1)
+    }
+
+    fn partitions_at(
+        &mut self,
+        _tenant: u32,
+        number: u32,
+    ) -> Option<teseladb_keys::partition::Partitions> {
+        self.catalog
+            .by_number(number)
+            .and_then(|(_, c)| c.partitions().ok())
+            .filter(|p| p.count() > 1)
     }
 
     fn set_read_mark(&mut self, at: Option<teseladb_txn::causal::ReadMark>) {

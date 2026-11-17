@@ -1142,11 +1142,16 @@ mod tests {
         assert_eq!(SplitRule::of(true, false), SplitRule::Live);
         assert_eq!(SplitRule::of(false, true), SplitRule::Disk);
         assert_eq!(SplitRule::of(false, false), SplitRule::Load);
-        let names: Vec<&str> =
-            [SplitRule::Capped, SplitRule::Live, SplitRule::Disk, SplitRule::Load, SplitRule::Partition]
-                .into_iter()
-                .map(SplitRule::name)
-                .collect();
+        let names: Vec<&str> = [
+            SplitRule::Capped,
+            SplitRule::Live,
+            SplitRule::Disk,
+            SplitRule::Load,
+            SplitRule::Partition,
+        ]
+        .into_iter()
+        .map(SplitRule::name)
+        .collect();
         assert_eq!(names, ["capped", "live", "disk", "load", "partition"]);
     }
 
