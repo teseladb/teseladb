@@ -398,10 +398,19 @@ impl NodeEngine {
         let post = self.post(shard);
         let gate = self.gate.clone();
         // `build` runs in an engine thread of the shard: the recovery of the core's log and LSM
-        // waits on the shard's disk executor through the synchronous `Disk` (023 FR-010).
+        // waits on the shard's disk executor through the synchronous `Disk` (023 FR-010). It
+        // runs on a deep stack of its own, as a client's command does ([`super::stacks`]): the
+        // engine thread's stack is 128 KiB of the shard's memory, and a recovery that went past
+        // it wrote over the blocks beside it, which crashed the node later in an allocation.
         let sent = post.clone().post(move || {
             drop(in_thread(move || {
-                let (logic, mut disk, mut log) = match build() {
+                let mut build = Some(build);
+                let mut built = None;
+                teseladb_sys::deep_stack::run(super::stacks::stack_size(), &mut |_| {
+                    built = build.take().map(|b| b());
+                });
+                let built = built.expect("the deep stack runs its call once");
+                let (logic, mut disk, mut log) = match built {
                     Ok(v) => v,
                     Err(e) => return drop(built_tx.send(Err(e))),
                 };

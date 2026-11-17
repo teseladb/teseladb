@@ -45,6 +45,7 @@ pub fn run() {
         ("background_requests_waiting_at_a_stop_are_answered", background_at_a_stop_answered),
         ("a_core_reaches_another_core_from_its_shard", a_core_reaches_another_core),
         ("the_logic_is_told_the_runtime_sends_no_files", the_logic_is_told_no_file_sends),
+        ("a_core_is_built_on_a_deep_stack", a_core_is_built_on_a_deep_stack),
     ];
     // `CASES=a,b` runs only those.
     let only = std::env::var("CASES").ok();
@@ -451,6 +452,25 @@ fn a_core_reaches_another_core(e: &NodeEngine) {
     let (tb, _, _) = stop(e, b);
     assert_eq!(ta.served, vec![6]);
     assert_eq!(tb.served, vec![5]);
+}
+
+/// A core's `build`, the recovery of its log and LSM, runs on a deep stack of its own, as a
+/// client's command does: on the engine thread's 128 KiB, taken from the shard's memory, a deep
+/// recovery wrote past the stack into the blocks beside it, and the node crashed later in an
+/// allocation (the native one-node load and the server's relocation test).
+fn a_core_is_built_on_a_deep_stack(e: &NodeEngine) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let room = Arc::new(AtomicUsize::new(0));
+    let seen = room.clone();
+    let h = hello(73, &free_port().to_string());
+    let core = start_core_built(e, 0, &h, Duration::from_millis(5), None, move || {
+        seen.store(teseladb_sys::deep_stack::room_here().unwrap_or(0), Ordering::SeqCst);
+        (Toy::default(), MemDisk::new())
+    });
+    assert!(core.sender().send(CoreInput::Stop).is_ok());
+    drop(core.join().unwrap());
+    let room = room.load(Ordering::SeqCst);
+    assert!(room >= 1 << 20, "{room} bytes of stack for the core's recovery");
 }
 
 fn the_logic_is_told_no_file_sends(e: &NodeEngine) {
