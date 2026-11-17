@@ -381,6 +381,52 @@ fn nesting_in_values_patterns_and_eval_ends_as_on_the_reference() {
     on_big_stack(CASES);
 }
 
+/// The nesting of values the shell prints and the engine writes as JSON, as a reference router
+/// 9.0.4 ends it (measured on 02-11): `tojson` prints an object nested deeper than 100 levels with
+/// `[Object]` below them, so any depth gives its text (11 219 characters for `{a: …}`), and
+/// `JSON.stringify` writes 346 nested arrays and not 347.
+const VALUE_NESTING: &[(&str, &str)] = &[
+    (
+        "(function(){ let o = {}; for (let i = 0; i < 300; i++) { o = {a: o} } return tojson(o).length })()",
+        "11219",
+    ),
+    (
+        "(function(){ let o = {}; let c = o; for (let i = 0; i < 200; i++) { c.a = {}; c = c.a } return tojson(o).length })()",
+        "11219",
+    ),
+    (
+        "(function(){ const t = (d) => { let a = []; for (let i = 0; i < d; i++) a = [a]; try { return JSON.stringify(a).length } catch (e) { return e.message } }; return t(346) + ' ' + t(347) })()",
+        "694 too much recursion",
+    ),
+];
+
+fn value_nesting_with(stack: usize) {
+    for (src, want) in VALUE_NESTING {
+        let limits = Limits { stack, ..Limits::default() };
+        let mut ctx = JsCtx { limits, ..JsCtx::default() };
+        let body = format!("function(){{ return String({src}) }}");
+        assert_eq!(run_with(&body, &mut ctx), Ok(Value::String((*want).into())), "{src}");
+    }
+}
+
+/// On the thread of a test, with the native stack a call has by default, the nesting of values
+/// ends where the reference ends it: the interpreter's frames are small enough on every
+/// architecture (a `tojson` of the deepest object it prints took 1 027 KiB of stack on aarch64,
+/// past the 1 MiB of [`teseladb_js::DEFAULT_STACK`], and its `[Object]` became `too much
+/// recursion`).
+#[test]
+fn the_nesting_of_values_ends_as_on_the_reference_with_the_default_stack() {
+    value_nesting_with(teseladb_js::DEFAULT_STACK);
+}
+
+/// The same within three quarters of the default stack: what the frames take keeps room below
+/// the default, so a change that makes them larger fails here before it changes an answer.
+#[cfg(not(debug_assertions))]
+#[test]
+fn the_nesting_of_values_keeps_a_quarter_of_the_default_stack_free() {
+    value_nesting_with(teseladb_js::DEFAULT_STACK / 4 * 3);
+}
+
 /// A program nested deeper than the engine parses fails to compile with `too much recursion` and
 /// no place; arrow functions, which it does not check, exhaust its stack (measured on a reference
 /// router 9.0.4 on 02-11).

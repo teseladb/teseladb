@@ -597,7 +597,10 @@ impl<'c> Interp<'c> {
         Ok(o)
     }
 
-    /// An error of constructor `name` (`TypeError`, …) with `message`.
+    /// An error of constructor `name` (`TypeError`, …) with `message`. Out of line: inlined, it
+    /// adds its frame to every hot function that may throw.
+    #[cold]
+    #[inline(never)]
     pub fn error(&self, name: &str, message: &str) -> Ctrl {
         match self.make_error(name, message) {
             Ok(v) => Ctrl::Throw(v),
@@ -1347,19 +1350,25 @@ impl<'c> Interp<'c> {
             return self.type_error("class constructors must be invoked with 'new'");
         }
         let (frames, units, native) = self.call_cost(&func);
-        self.nested(frames, units, native, |it| match func {
+        self.nested(frames, units, native, |it| it.invoke(fo, func, this, args))
+    }
+
+    /// Runs `func`, the function of `fo`, inside the call [`Interp::call`] counted.
+    #[inline(never)]
+    fn invoke(&mut self, fo: &ObjRef, func: Func, this: &Val, args: &[Val]) -> R {
+        match func {
             Func::Native(n, name) => {
-                it.native = name;
-                n(it, this, args)
+                self.native = name;
+                n(self, this, args)
             }
             Func::Bound(target, bound_this, bound_args) => {
                 let mut all = bound_args.clone();
                 all.extend_from_slice(args);
-                it.call(&Val::Obj(target), &bound_this, &all)
+                self.call(&Val::Obj(target), &bound_this, &all)
             }
             Func::Closure { def, env, this: arrow_this, home, .. } => {
                 let this = arrow_this.unwrap_or_else(|| this.clone());
-                it.run_closure(
+                self.run_closure(
                     fo,
                     &def,
                     &env,
@@ -1369,7 +1378,7 @@ impl<'c> Interp<'c> {
                     None,
                 )
             }
-        })
+        }
     }
 
     pub fn new_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
@@ -1417,6 +1426,61 @@ impl<'c> Interp<'c> {
         args: &[Val],
         new_target: Option<Val>,
     ) -> R {
+        let scope = self.closure_scope(fo, def, env, this, home, args, new_target)?;
+        if def.generator {
+            return crate::generators::make(self, fo, def, scope);
+        }
+        let outer = std::mem::replace(&mut self.strict, def.strict);
+        let r = self.exec_block_in(&def.body, &scope);
+        self.strict = outer;
+        if def.is_async {
+            return crate::promise::settle_async(self, r);
+        }
+        let v = match r {
+            Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
+            Err(Ctrl::Return(v)) => v,
+            Err(e) => return Err(e),
+        };
+        if def.is_ctor_of_derived && !matches!(v, Val::Obj(_)) {
+            return self.derived_result(&v, &scope);
+        }
+        Ok(v)
+    }
+
+    /// A derived constructor gives the `this` its `super(...)` made, unless it returns an object.
+    /// Measured on a reference router 9.0.4 on 02-11: another value is refused, and `undefined`
+    /// needs the `this` of `super(...)`.
+    #[inline(never)]
+    fn derived_result(&mut self, v: &Val, scope: &EnvRef) -> R {
+        if !matches!(v, Val::Undef) {
+            let shown = crate::decompile::value_source(self, v);
+            return self
+                .type_error(&format!("derived class constructor returned invalid value {shown}"));
+        }
+        let this = scope.borrow().this.clone();
+        this.ok_or_else(|| {
+            self.error(
+                "ReferenceError",
+                "must call super constructor before using 'this' in derived class constructor",
+            )
+        })
+    }
+
+    /// The scope a call of a closure runs its body in: `this`, `arguments`, the parameters bound
+    /// and the body's declarations hoisted. Out of line, so that what it takes of the native stack
+    /// is given back before the body runs.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn closure_scope(
+        &mut self,
+        fo: &ObjRef,
+        def: &Rc<FuncDef>,
+        env: &EnvRef,
+        this: Option<Val>,
+        home: Option<ObjRef>,
+        args: &[Val],
+        new_target: Option<Val>,
+    ) -> R<EnvRef> {
         // Sloppy code sees `this` as an object: the global one for undefined and null.
         let this = match this {
             Some(Val::Undef | Val::Null) if !def.strict && !def.arrow => {
@@ -1531,40 +1595,7 @@ impl<'c> Interp<'c> {
             }
             self.hoist_block_functions(&def.body, &scope, &params);
         }
-        if def.generator {
-            return crate::generators::make(self, fo, def, scope);
-        }
-        let outer = std::mem::replace(&mut self.strict, def.strict);
-        let r = self.exec_block_in(&def.body, &scope);
-        self.strict = outer;
-        if def.is_async {
-            return crate::promise::settle_async(self, r);
-        }
-        let v = match r {
-            Ok(()) | Err(Ctrl::Break(_) | Ctrl::Continue(_)) => Val::Undef,
-            Err(Ctrl::Return(v)) => v,
-            Err(e) => return Err(e),
-        };
-        // A derived constructor gives the `this` its `super(...)` made, unless it returns an
-        // object.
-        // Measured on a reference router 9.0.4 on 02-11: another value is refused, and `undefined`
-        // needs the `this` of `super(...)`.
-        if def.is_ctor_of_derived && !matches!(v, Val::Obj(_)) {
-            if !matches!(v, Val::Undef) {
-                let shown = crate::decompile::value_source(self, &v);
-                return self.type_error(&format!(
-                    "derived class constructor returned invalid value {shown}"
-                ));
-            }
-            let this = scope.borrow().this.clone();
-            return this.ok_or_else(|| {
-                self.error(
-                    "ReferenceError",
-                    "must call super constructor before using 'this' in derived class constructor",
-                )
-            });
-        }
-        Ok(v)
+        Ok(scope)
     }
 
     /// `new f(...args)`.
@@ -1940,6 +1971,7 @@ impl<'c> Interp<'c> {
 
     /// A function expression: a named one sees its name in a scope of its own (ECMA-262
     /// §15.2.5), which it cannot change.
+    #[inline(never)]
     fn function_expression(&mut self, def: &Rc<FuncDef>, env: &EnvRef) -> R {
         let Some(name) = def.name.as_ref().filter(|_| !def.arrow && !def.method) else {
             return self.closure(def, env);
@@ -2307,6 +2339,9 @@ impl<'c> Interp<'c> {
         self.exec_block_in(body, &scope)
     }
 
+    /// Runs `s`. Like [`Interp::eval`], it is on the native stack once for every statement that
+    /// nests another and every call: the arms that hold values of their own are methods that are
+    /// never inlined.
     pub fn exec(&mut self, s: &Stmt, env: &EnvRef) -> R<()> {
         self.step()?;
         match s {
@@ -2314,35 +2349,11 @@ impl<'c> Interp<'c> {
                 let v = self.eval(e, env)?;
                 self.last = Some(v);
             }
-            Stmt::Decl(kind, decls) => {
-                for (p, init) in decls {
-                    let v = match init {
-                        Some(e) => {
-                            let v = self.eval(e, env)?;
-                            name_function(&v, p, e);
-                            v
-                        }
-                        None if *kind == DeclKind::Var => continue,
-                        None => Val::Undef,
-                    };
-                    match kind {
-                        DeclKind::Var => self.bind(p, v, env, None)?,
-                        DeclKind::Let => self.bind(p, v, env, Some(true))?,
-                        DeclKind::Const => self.bind(p, v, env, Some(false))?,
-                    }
-                }
-            }
-            Stmt::Func(n, def) if def.annex.get() => {
-                // Annex B.3.3: the function's `var` takes the block's binding.
-                let v = self.read_var(env, n)?;
-                declare(&var_scope_of(env), n, v, true);
-            }
+            Stmt::Decl(kind, decls) => self.exec_decl(*kind, decls, env)?,
+            Stmt::Func(n, def) if def.annex.get() => self.exec_annex_function(n, env)?,
             Stmt::Func(..) | Stmt::Empty => {}
             Stmt::Suspends(s) => self.exec(s, env)?,
-            Stmt::Class(n, c) => {
-                let v = self.class(c, env)?;
-                self.bind(&Pattern::Name(n.clone()), v, env, Some(true))?;
-            }
+            Stmt::Class(n, c) => self.exec_class(n, c, env)?,
             Stmt::Return(e) => {
                 let v = match e {
                     Some(e) => self.eval(e, env)?,
@@ -2368,96 +2379,163 @@ impl<'c> Interp<'c> {
             }
             Stmt::Break(l) => return Err(Ctrl::Break(l.clone())),
             Stmt::Continue(l) => return Err(Ctrl::Continue(l.clone())),
-            Stmt::Throw(e, pos) => {
-                // A value that is not an error is reported where the evaluation left the
-                // position: the `throw`, or the last call or property inside it.
-                self.pos = *pos;
-                let v = self.eval(e, env)?;
-                self.thrown_at = self.pos;
-                return Err(Ctrl::Throw(v));
-            }
+            Stmt::Throw(e, pos) => return self.exec_throw(e, *pos, env),
             Stmt::Try(body, catch, finally) => {
-                let mut r = self.block(body, env);
-                if let (Err(Ctrl::Throw(x)), Some((param, handler))) = (&r, catch) {
-                    let x = x.clone();
-                    self.out_of_memory.set(false);
-                    let scope = self.new_env(Some(env.clone()));
-                    if let Some(p) = param {
-                        self.bind(p, x, &scope, Some(true))?;
-                    }
-                    // The completion value of a statement list (`eval`): a catch starts from
-                    // undefined, and a finally that ends normally keeps the value before it
-                    // (measured on the engine of a reference router 9.0.4).
-                    self.last = Some(Val::Undef);
-                    r = self.block(handler, &scope);
-                }
-                if let Some(f) = finally {
-                    let before = self.last.replace(Val::Undef);
-                    self.block(f, env)?;
-                    self.last = before;
-                }
-                r?;
+                self.exec_try(body, catch.as_ref(), finally.as_deref(), env)?;
             }
-            Stmt::Switch(d, cases) => {
-                let v = self.eval(d, env)?;
-                let scope = self.new_env(Some(env.clone()));
-                for (_, body) in cases {
-                    for s in body {
-                        self.hoist_lexical(s, &scope)?;
-                    }
+            Stmt::Switch(d, cases) => self.exec_switch(d, cases, env)?,
+            Stmt::With(o, body) => self.exec_with(o, body, env)?,
+            Stmt::Labeled(label, body) => self.exec_labeled(label, body, env)?,
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn exec_decl(
+        &mut self,
+        kind: DeclKind,
+        decls: &[(Pattern, Option<Expr>)],
+        env: &EnvRef,
+    ) -> R<()> {
+        for (p, init) in decls {
+            let v = match init {
+                Some(e) => {
+                    let v = self.eval(e, env)?;
+                    name_function(&v, p, e);
+                    v
                 }
-                let mut start = None;
-                for (i, (t, _)) in cases.iter().enumerate() {
-                    if let Some(t) = t {
-                        let x = self.eval(t, &scope)?;
-                        if strict_eq(&v, &x) {
-                            start = Some(i);
-                            break;
-                        }
-                    }
-                }
-                let start = start.or_else(|| cases.iter().position(|(t, _)| t.is_none()));
-                if let Some(start) = start {
-                    for (_, body) in &cases[start..] {
-                        match self.exec_block_in(body, &scope) {
-                            Err(Ctrl::Break(None)) => return Ok(()),
-                            r => r?,
-                        }
-                    }
+                None if kind == DeclKind::Var => continue,
+                None => Val::Undef,
+            };
+            match kind {
+                DeclKind::Var => self.bind(p, v, env, None)?,
+                DeclKind::Let => self.bind(p, v, env, Some(true))?,
+                DeclKind::Const => self.bind(p, v, env, Some(false))?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Annex B.3.3: the function's `var` takes the block's binding.
+    #[inline(never)]
+    fn exec_annex_function(&mut self, n: &Name, env: &EnvRef) -> R<()> {
+        let v = self.read_var(env, n)?;
+        declare(&var_scope_of(env), n, v, true);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn exec_class(&mut self, n: &Name, c: &Rc<ClassDef>, env: &EnvRef) -> R<()> {
+        let v = self.class(c, env)?;
+        self.bind(&Pattern::Name(n.clone()), v, env, Some(true))
+    }
+
+    #[inline(never)]
+    fn exec_throw(&mut self, e: &Expr, pos: Pos, env: &EnvRef) -> R<()> {
+        // A value that is not an error is reported where the evaluation left the position: the
+        // `throw`, or the last call or property inside it.
+        self.pos = pos;
+        let v = self.eval(e, env)?;
+        self.thrown_at = self.pos;
+        Err(Ctrl::Throw(v))
+    }
+
+    #[inline(never)]
+    fn exec_try(
+        &mut self,
+        body: &[Stmt],
+        catch: Option<&(Option<Pattern>, Vec<Stmt>)>,
+        finally: Option<&[Stmt]>,
+        env: &EnvRef,
+    ) -> R<()> {
+        let mut r = self.block(body, env);
+        if let (Err(Ctrl::Throw(x)), Some((param, handler))) = (&r, catch) {
+            let x = x.clone();
+            self.out_of_memory.set(false);
+            let scope = self.new_env(Some(env.clone()));
+            if let Some(p) = param {
+                self.bind(p, x, &scope, Some(true))?;
+            }
+            // The completion value of a statement list (`eval`): a catch starts from undefined,
+            // and a finally that ends normally keeps the value before it (measured on the engine
+            // of a reference router 9.0.4).
+            self.last = Some(Val::Undef);
+            r = self.block(handler, &scope);
+        }
+        if let Some(f) = finally {
+            let before = self.last.replace(Val::Undef);
+            self.block(f, env)?;
+            self.last = before;
+        }
+        r
+    }
+
+    #[inline(never)]
+    fn exec_switch(
+        &mut self,
+        d: &Expr,
+        cases: &[(Option<Expr>, Vec<Stmt>)],
+        env: &EnvRef,
+    ) -> R<()> {
+        let v = self.eval(d, env)?;
+        let scope = self.new_env(Some(env.clone()));
+        for (_, body) in cases {
+            for s in body {
+                self.hoist_lexical(s, &scope)?;
+            }
+        }
+        let mut start = None;
+        for (i, (t, _)) in cases.iter().enumerate() {
+            if let Some(t) = t {
+                let x = self.eval(t, &scope)?;
+                if strict_eq(&v, &x) {
+                    start = Some(i);
+                    break;
                 }
             }
-            Stmt::With(o, body) => {
-                let o = self.eval(o, env)?;
-                let scope = self.with_scope(&o, env)?;
-                self.exec(body, &scope)?;
-            }
-            Stmt::Labeled(label, body) => {
-                // `a: b: while …`: a `continue` to any of the labels goes on with the loop.
-                let mut labels = vec![label.clone()];
-                let mut inner = &**body;
-                while let Stmt::Labeled(l, b) = inner {
-                    labels.push(l.clone());
-                    inner = b;
-                }
-                let ls = labels.as_slice();
-                let r = match inner {
-                    Stmt::For(i, t, u, b) => {
-                        self.exec_for(i.as_ref(), t.as_ref(), u.as_ref(), b, env, ls)
-                    }
-                    Stmt::ForIn { decl, target, of, obj, body } => {
-                        self.exec_for_in(*decl, target, *of, obj, body, env, ls)
-                    }
-                    Stmt::While(c, b) => self.exec_while(c, b, env, ls, true),
-                    Stmt::DoWhile(b, c) => self.exec_while(c, b, env, ls, false),
-                    other => self.exec(other, env),
-                };
-                match r {
-                    Err(Ctrl::Break(Some(l))) if labels.contains(&l) => {}
+        }
+        let start = start.or_else(|| cases.iter().position(|(t, _)| t.is_none()));
+        if let Some(start) = start {
+            for (_, body) in &cases[start..] {
+                match self.exec_block_in(body, &scope) {
+                    Err(Ctrl::Break(None)) => return Ok(()),
                     r => r?,
                 }
             }
         }
         Ok(())
+    }
+
+    #[inline(never)]
+    fn exec_with(&mut self, o: &Expr, body: &Stmt, env: &EnvRef) -> R<()> {
+        let o = self.eval(o, env)?;
+        let scope = self.with_scope(&o, env)?;
+        self.exec(body, &scope)
+    }
+
+    #[inline(never)]
+    fn exec_labeled(&mut self, label: &Name, body: &Stmt, env: &EnvRef) -> R<()> {
+        // `a: b: while …`: a `continue` to any of the labels goes on with the loop.
+        let mut labels = vec![label.clone()];
+        let mut inner = body;
+        while let Stmt::Labeled(l, b) = inner {
+            labels.push(l.clone());
+            inner = b;
+        }
+        let ls = labels.as_slice();
+        let r = match inner {
+            Stmt::For(i, t, u, b) => self.exec_for(i.as_ref(), t.as_ref(), u.as_ref(), b, env, ls),
+            Stmt::ForIn { decl, target, of, obj, body } => {
+                self.exec_for_in(*decl, target, *of, obj, body, env, ls)
+            }
+            Stmt::While(c, b) => self.exec_while(c, b, env, ls, true),
+            Stmt::DoWhile(b, c) => self.exec_while(c, b, env, ls, false),
+            other => self.exec(other, env),
+        };
+        match r {
+            Err(Ctrl::Break(Some(l))) if labels.contains(&l) => Ok(()),
+            r => r,
+        }
     }
 
     /// `while (c) body`, or `do body while (c)` when `test_first` is false.
@@ -2861,18 +2939,15 @@ impl<'c> Interp<'c> {
 
     // Expressions.
 
+    /// The value of `e`. Every nested expression and every call of the program runs through here
+    /// on the native stack, so its frame is kept to what the dispatch needs: the arms that hold
+    /// values of their own are methods that are never inlined, and an expression takes the stack
+    /// of its own kind only (a call nested in `+` in a condition took the largest frame three
+    /// times, and the shell's `tojson` of the deepest object it prints did not fit in
+    /// [`crate::DEFAULT_STACK`] on aarch64).
     pub fn eval(&mut self, e: &Expr, env: &EnvRef) -> R {
         match e {
-            Expr::PrivateIn(n, x) => {
-                let key = self.private_key(n, env)?;
-                let v = self.eval(x, env)?;
-                let Val::Obj(o) = &v else {
-                    let msg =
-                        format!("right-hand side of 'in' should be an object, got {}", v.type_of());
-                    return self.type_error(&msg);
-                };
-                Ok(Val::Bool(o.borrow().get_own(&key).is_some()))
-            }
+            Expr::PrivateIn(n, x) => self.eval_private_in(n, x, env),
             Expr::Num(n) => Ok(Val::Num(*n)),
             Expr::BigInt(b) => Ok(Val::BigInt(b.clone())),
             // The parser leaves a generator's `yield` only where `generators.rs` runs it.
@@ -2885,125 +2960,22 @@ impl<'c> Interp<'c> {
             Expr::Bool(b) => Ok(Val::Bool(*b)),
             Expr::Null => Ok(Val::Null),
             Expr::Undefined => Ok(Val::Undef),
-            Expr::Template(strs, subs) => {
-                let mut out = String::new();
-                for (i, s) in strs.iter().enumerate() {
-                    out.push_str(s);
-                    if let Some(x) = subs.get(i) {
-                        let v = self.eval(x, env)?;
-                        let s = self.str_of(&v);
-                        out.push_str(&self.name_operands(s, &[(x, &v)])?);
-                    }
-                }
-                self.joined_string(out)
-            }
+            Expr::Template(strs, subs) => self.eval_template(strs, subs, env),
             Expr::Regex(b, f) => crate::builtins::make_regexp(self, b.clone(), f.clone()),
             Expr::TemplateObject(parts) => self.template_object(parts),
-            Expr::Ident(n, _) => {
-                if &**n == "undefined" && self.lookup(env, "undefined").is_none() {
-                    return Ok(Val::Undef);
-                }
-                self.read_var(env, n)
-            }
-            Expr::This => match self.this_of(env) {
-                Some((t, _)) => Ok(t),
-                None if self.function_env(env).is_some() => Err(self.error(
-                    "ReferenceError",
-                    "must call super constructor before using 'this' in derived class constructor",
-                )),
-                None => Ok(Val::Undef),
-            },
-            Expr::Array(items) => {
-                let mut out = Vec::with_capacity(items.len());
-                for it in items {
-                    match it {
-                        None => out.push(Val::Hole),
-                        Some(Expr::Spread(x)) => {
-                            let v = self.eval(x, env)?;
-                            let all = self.iterate(&v);
-                            let all = self.name_operands(all, &[(x, &v)])?;
-                            self.reserve_elements(all.len())?;
-                            out.extend(all);
-                        }
-                        Some(x) => out.push(self.eval(x, env)?),
-                    }
-                }
-                self.array(out)
-            }
+            Expr::Ident(n, _) => self.eval_ident(n, env),
+            Expr::This => self.eval_this(env),
+            Expr::Array(items) => self.eval_array(items, env),
             Expr::Object(props) => self.object_literal(props, env),
             Expr::Func(def) => self.function_expression(def, env),
             Expr::Class(c) => self.class(c, env),
             Expr::Spread(_) => self.type_error("unexpected spread"),
-            Expr::Unary(op, x) => {
-                let v = self.eval(x, env)?;
-                let r = self.unary(op, &v);
-                self.name_operands(r, &[(x, &v)])
-            }
-            Expr::Typeof(x) => {
-                if let Expr::Ident(n, _) = &**x
-                    && self.lookup(env, n).is_none()
-                    && !self.has_property(&self.realm.global.clone(), n)
-                {
-                    return Ok(Val::str("undefined"));
-                }
-                let v = self.eval(x, env)?;
-                Ok(Val::str(v.type_of()))
-            }
-            Expr::Delete(x) => match &**x {
-                Expr::Member { obj, prop, .. } => {
-                    let o = self.eval(obj, env)?;
-                    let key = self.member_key(prop, env)?;
-                    match &o {
-                        Val::Obj(o) => Ok(Val::Bool(self.delete_key(o, &key)?)),
-                        _ => Ok(Val::Bool(true)),
-                    }
-                }
-                Expr::Ident(n, _) => self.delete_name(env, n),
-                Expr::At(_, inner) => match &**inner {
-                    Expr::Ident(n, _) => self.delete_name(env, n),
-                    _ => Ok(Val::Bool(true)),
-                },
-                _ => Ok(Val::Bool(true)),
-            },
-            Expr::Update { op, prefix, target } => {
-                let old = self.eval(target, env)?;
-                let (old, new) = match self.numeric(&old)? {
-                    Val::BigInt(b) => {
-                        let one = crate::bigint::BigInt::from_i64(1);
-                        let new = if *op == "++" { b.add(&one) } else { b.sub(&one) };
-                        (Val::BigInt(b), Val::BigInt(Rc::new(new)))
-                    }
-                    v => {
-                        let n = self.number_of(&v)?;
-                        (Val::Num(n), Val::Num(if *op == "++" { n + 1.0 } else { n - 1.0 }))
-                    }
-                };
-                self.assign_to(target, new.clone(), env)?;
-                Ok(if *prefix { new } else { old })
-            }
-            Expr::Binary(op, a, b) => {
-                let x = self.eval(a, env)?;
-                let y = self.eval(b, env)?;
-                self.conversion_called = false;
-                let r = self.binary(op, &x, &y);
-                // SpiderMonkey names the left operand of `+` only when the conversion called no
-                // method (measured: `o + 1` with a `valueOf` gives the source of `o`,
-                // `Object.create(null) + ""` names it, `"" + Object.create(null)` gives
-                // `Object.create(...)`).
-                if *op == "+" && self.conversion_called {
-                    return self.name_operands(r, &[(b, &y)]);
-                }
-                self.name_operands(r, &[(a, &x), (b, &y)])
-            }
-            Expr::Logical(op, a, b) => {
-                let x = self.eval(a, env)?;
-                let short = match *op {
-                    "&&" => !x.truthy(),
-                    "||" => x.truthy(),
-                    _ => !x.is_nullish(),
-                };
-                if short { Ok(x) } else { self.eval(b, env) }
-            }
+            Expr::Unary(op, x) => self.eval_unary(op, x, env),
+            Expr::Typeof(x) => self.eval_typeof(x, env),
+            Expr::Delete(x) => self.eval_delete(x, env),
+            Expr::Update { op, prefix, target } => self.eval_update(op, *prefix, target, env),
+            Expr::Binary(op, a, b) => self.eval_binary(op, a, b, env),
+            Expr::Logical(op, a, b) => self.eval_logical(op, a, b, env),
             Expr::Cond(c, a, b) => {
                 if self.eval(c, env)?.truthy() {
                     self.eval(a, env)
@@ -3012,40 +2984,13 @@ impl<'c> Interp<'c> {
                 }
             }
             Expr::Assign { op, target, value } => self.assign(op, target, value, env),
-            Expr::Seq(all) => {
-                let mut last = Val::Undef;
-                for x in all {
-                    last = self.eval(x, env)?;
-                }
-                Ok(last)
-            }
+            Expr::Seq(all) => self.eval_seq(all, env),
             Expr::OptChain(x) => match self.eval(x, env) {
                 Err(Ctrl::Break(Some(l))) if &*l == "?." => Ok(Val::Undef),
                 r => r,
             },
-            Expr::Member { obj, prop, optional, .. } => {
-                let o = self.eval(obj, env)?;
-                if *optional && o.is_nullish() {
-                    return Err(Ctrl::Break(Some("?.".into())));
-                }
-                let key = self.member_key(prop, env)?;
-                if o.is_nullish() {
-                    let msg = null_access(obj, &self.access_key(&key), &o);
-                    return self.type_error(&msg);
-                }
-                self.get(&o, &key)
-            }
-            Expr::SuperMember(k) => {
-                let key = self.eval(k, env)?;
-                let key = self.key_of(&key)?;
-                let home = self.home_of(env);
-                let this = self.this_of(env).map_or(Val::Undef, |(t, _)| t);
-                let proto = home.and_then(|h| h.borrow().proto.clone());
-                match proto {
-                    Some(p) => self.get_with_receiver(&p, &key, &this),
-                    None => Ok(Val::Undef),
-                }
-            }
+            Expr::Member { obj, prop, optional, .. } => self.eval_member(obj, prop, *optional, env),
+            Expr::SuperMember(k) => self.eval_super_member(k, env),
             Expr::SuperCall(args, pos) => {
                 self.pos = *pos;
                 self.super_call(args, env)
@@ -3057,22 +3002,208 @@ impl<'c> Interp<'c> {
                 self.pos = *pos;
                 self.eval(e, env)
             }
-            Expr::New { callee, args: exprs, pos } => {
-                let f = self.eval(callee, env)?;
-                let args = self.eval_args(exprs, env)?;
-                self.pos = *pos;
-                if !is_constructor(&f) {
-                    let text = match &**callee {
-                        Expr::Func(_) => constructor_text(self, callee, &f),
-                        other => callee_text(other),
-                    };
-                    return self.type_error(&format!("{text} is not a constructor"));
-                }
-                self.conversion_called = false;
-                let r = self.construct(&f, &args, &f);
-                self.name_arguments(r, &f, exprs, &args)
+            Expr::New { callee, args, pos } => self.eval_new(callee, args, *pos, env),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_private_in(&mut self, n: &Name, x: &Expr, env: &EnvRef) -> R {
+        let key = self.private_key(n, env)?;
+        let v = self.eval(x, env)?;
+        let Val::Obj(o) = &v else {
+            let msg = format!("right-hand side of 'in' should be an object, got {}", v.type_of());
+            return self.type_error(&msg);
+        };
+        Ok(Val::Bool(o.borrow().get_own(&key).is_some()))
+    }
+
+    #[inline(never)]
+    fn eval_template(&mut self, strs: &[Name], subs: &[Expr], env: &EnvRef) -> R {
+        let mut out = String::new();
+        for (i, s) in strs.iter().enumerate() {
+            out.push_str(s);
+            if let Some(x) = subs.get(i) {
+                let v = self.eval(x, env)?;
+                let s = self.str_of(&v);
+                out.push_str(&self.name_operands(s, &[(x, &v)])?);
             }
         }
+        self.joined_string(out)
+    }
+
+    #[inline(never)]
+    fn eval_ident(&mut self, n: &str, env: &EnvRef) -> R {
+        if n == "undefined" && self.lookup(env, "undefined").is_none() {
+            return Ok(Val::Undef);
+        }
+        self.read_var(env, n)
+    }
+
+    #[inline(never)]
+    fn eval_this(&mut self, env: &EnvRef) -> R {
+        match self.this_of(env) {
+            Some((t, _)) => Ok(t),
+            None if self.function_env(env).is_some() => Err(self.error(
+                "ReferenceError",
+                "must call super constructor before using 'this' in derived class constructor",
+            )),
+            None => Ok(Val::Undef),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_array(&mut self, items: &[Option<Expr>], env: &EnvRef) -> R {
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            match it {
+                None => out.push(Val::Hole),
+                Some(Expr::Spread(x)) => {
+                    let v = self.eval(x, env)?;
+                    let all = self.iterate(&v);
+                    let all = self.name_operands(all, &[(x, &v)])?;
+                    self.reserve_elements(all.len())?;
+                    out.extend(all);
+                }
+                Some(x) => out.push(self.eval(x, env)?),
+            }
+        }
+        self.array(out)
+    }
+
+    #[inline(never)]
+    fn eval_unary(&mut self, op: &str, x: &Expr, env: &EnvRef) -> R {
+        let v = self.eval(x, env)?;
+        let r = self.unary(op, &v);
+        self.name_operands(r, &[(x, &v)])
+    }
+
+    #[inline(never)]
+    fn eval_typeof(&mut self, x: &Expr, env: &EnvRef) -> R {
+        if let Expr::Ident(n, _) = x
+            && self.lookup(env, n).is_none()
+            && !self.has_property(&self.realm.global.clone(), n)
+        {
+            return Ok(Val::str("undefined"));
+        }
+        let v = self.eval(x, env)?;
+        Ok(Val::str(v.type_of()))
+    }
+
+    #[inline(never)]
+    fn eval_delete(&mut self, x: &Expr, env: &EnvRef) -> R {
+        match x {
+            Expr::Member { obj, prop, .. } => {
+                let o = self.eval(obj, env)?;
+                let key = self.member_key(prop, env)?;
+                match &o {
+                    Val::Obj(o) => Ok(Val::Bool(self.delete_key(o, &key)?)),
+                    _ => Ok(Val::Bool(true)),
+                }
+            }
+            Expr::Ident(n, _) => self.delete_name(env, n),
+            Expr::At(_, inner) => match &**inner {
+                Expr::Ident(n, _) => self.delete_name(env, n),
+                _ => Ok(Val::Bool(true)),
+            },
+            _ => Ok(Val::Bool(true)),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_update(&mut self, op: &str, prefix: bool, target: &Expr, env: &EnvRef) -> R {
+        let old = self.eval(target, env)?;
+        let (old, new) = match self.numeric(&old)? {
+            Val::BigInt(b) => {
+                let one = crate::bigint::BigInt::from_i64(1);
+                let new = if op == "++" { b.add(&one) } else { b.sub(&one) };
+                (Val::BigInt(b), Val::BigInt(Rc::new(new)))
+            }
+            v => {
+                let n = self.number_of(&v)?;
+                (Val::Num(n), Val::Num(if op == "++" { n + 1.0 } else { n - 1.0 }))
+            }
+        };
+        self.assign_to(target, new.clone(), env)?;
+        Ok(if prefix { new } else { old })
+    }
+
+    #[inline(never)]
+    fn eval_binary(&mut self, op: &str, a: &Expr, b: &Expr, env: &EnvRef) -> R {
+        let x = self.eval(a, env)?;
+        let y = self.eval(b, env)?;
+        self.conversion_called = false;
+        let r = self.binary(op, &x, &y);
+        // SpiderMonkey names the left operand of `+` only when the conversion called no method
+        // (measured: `o + 1` with a `valueOf` gives the source of `o`, `Object.create(null) + ""`
+        // names it, `"" + Object.create(null)` gives `Object.create(...)`).
+        if op == "+" && self.conversion_called {
+            return self.name_operands(r, &[(b, &y)]);
+        }
+        self.name_operands(r, &[(a, &x), (b, &y)])
+    }
+
+    #[inline(never)]
+    fn eval_logical(&mut self, op: &str, a: &Expr, b: &Expr, env: &EnvRef) -> R {
+        let x = self.eval(a, env)?;
+        let short = match op {
+            "&&" => !x.truthy(),
+            "||" => x.truthy(),
+            _ => !x.is_nullish(),
+        };
+        if short { Ok(x) } else { self.eval(b, env) }
+    }
+
+    #[inline(never)]
+    fn eval_seq(&mut self, all: &[Expr], env: &EnvRef) -> R {
+        let mut last = Val::Undef;
+        for x in all {
+            last = self.eval(x, env)?;
+        }
+        Ok(last)
+    }
+
+    #[inline(never)]
+    fn eval_member(&mut self, obj: &Expr, prop: &MemberProp, optional: bool, env: &EnvRef) -> R {
+        let o = self.eval(obj, env)?;
+        if optional && o.is_nullish() {
+            return Err(Ctrl::Break(Some("?.".into())));
+        }
+        let key = self.member_key(prop, env)?;
+        if o.is_nullish() {
+            let msg = null_access(obj, &self.access_key(&key), &o);
+            return self.type_error(&msg);
+        }
+        self.get(&o, &key)
+    }
+
+    #[inline(never)]
+    fn eval_super_member(&mut self, k: &Expr, env: &EnvRef) -> R {
+        let key = self.eval(k, env)?;
+        let key = self.key_of(&key)?;
+        let home = self.home_of(env);
+        let this = self.this_of(env).map_or(Val::Undef, |(t, _)| t);
+        let proto = home.and_then(|h| h.borrow().proto.clone());
+        match proto {
+            Some(p) => self.get_with_receiver(&p, &key, &this),
+            None => Ok(Val::Undef),
+        }
+    }
+
+    #[inline(never)]
+    fn eval_new(&mut self, callee: &Expr, exprs: &[Expr], pos: Pos, env: &EnvRef) -> R {
+        let f = self.eval(callee, env)?;
+        let args = self.eval_args(exprs, env)?;
+        self.pos = pos;
+        if !is_constructor(&f) {
+            let text = match callee {
+                Expr::Func(_) => constructor_text(self, callee, &f),
+                other => callee_text(other),
+            };
+            return self.type_error(&format!("{text} is not a constructor"));
+        }
+        self.conversion_called = false;
+        let r = self.construct(&f, &args, &f);
+        self.name_arguments(r, &f, exprs, &args)
     }
 
     fn get_with_receiver(&mut self, start: &ObjRef, key: &str, receiver: &Val) -> R {
@@ -3090,6 +3221,7 @@ impl<'c> Interp<'c> {
         Ok(Val::Undef)
     }
 
+    #[inline(never)]
     fn super_call(&mut self, args: &[Expr], env: &EnvRef) -> R {
         let fenv = self.function_env(env).ok_or_else(|| {
             self.error("SyntaxError", "super() is only valid in derived class constructors")
@@ -3153,6 +3285,7 @@ impl<'c> Interp<'c> {
         }
     }
 
+    #[inline(never)]
     fn call_expr(
         &mut self,
         callee: &Expr,
@@ -3468,6 +3601,7 @@ impl<'c> Interp<'c> {
 
     /// The strings array of a tagged template: one per site and call, frozen, with its frozen
     /// `raw` (ECMA-262 §13.2.8.4).
+    #[inline(never)]
     fn template_object(&mut self, parts: &Rc<crate::lexer::TemplateParts>) -> R {
         let site = Rc::as_ptr(parts) as usize;
         if let Some((_, v)) = self.templates.iter().find(|(s, _)| *s == site) {
