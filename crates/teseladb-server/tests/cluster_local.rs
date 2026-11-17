@@ -317,7 +317,11 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     // A clean stop ends with code 0.
     let mut p4 = p4;
     p4.signal("-TERM");
-    assert_eq!(p4.child.wait().unwrap().code(), Some(0));
+    let ended = p4.child.wait().unwrap();
+    // Its readers end with its pipes.
+    let rest: Vec<String> =
+        std::iter::from_fn(|| p4.lines.recv_timeout(Duration::from_secs(2)).ok()).collect();
+    assert_eq!(ended.code(), Some(0), "{ended:?}; its last lines:\n{}", rest.join("\n"));
     drop((p2, p3));
 }
 
