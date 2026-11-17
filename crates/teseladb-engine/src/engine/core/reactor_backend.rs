@@ -1063,13 +1063,28 @@ impl AioStorageContext {
                 // SAFETY: as above.
                 set_eventfd_notification(unsafe { &mut *io }, efd);
             }
+            // A write that allocates blocks would come back with EAGAIN from an RWF_NOWAIT
+            // submission and be retried on the syscall thread: send it there at once and save
+            // the failed io_submit and the reap of its EAGAIN.
+            // (Without RWF_NOWAIT the reactor submits it itself, as any other request.)
+            if req.allocates() && crate::engine::core::reactor::aio_nowait_supported() {
+                // SAFETY: as above.
+                set_nowait(unsafe { &mut *io }, false);
+                // SAFETY: each iocb of the pool is in at most one retry list, so the list
+                // (capacity `max_aio`) has room.
+                unsafe { static_vector_push(&mut me._pending_aio_retry, io) };
+                return true;
+            }
             // SAFETY: the queue was cleared above and holds at most one entry per iocb of
             // the pool (`max_aio`), its capacity.
             unsafe { static_vector_push(&mut me._submission_queue, io) };
             true
         };
         // SAFETY: as above; draining runs no user code.
-        let mut to_submit = unsafe { (*sink).drain(prepare) };
+        let drained = unsafe { (*sink).drain(prepare) };
+        // The drained requests that went to the retry list are not in the submission queue.
+        let mut to_submit = self._submission_queue.len();
+        did_work |= drained != to_submit;
 
         // SAFETY: `_r` is the reactor that owns this backend, live while the backend is; it is reached for this access only.
         if unsafe { (*self.r())._cfg.kernel_page_cache } {
@@ -1078,7 +1093,7 @@ impl AioStorageContext {
             //
             // Pretend that all aio failed with EAGAIN and submit them
             // via schedule_retry(), below.
-            did_work = !self._submission_queue.is_empty();
+            did_work |= !self._submission_queue.is_empty();
             for i in 0..self._submission_queue.len() {
                 // SAFETY: `i` is in bounds.
                 let iocbp = unsafe { *self._submission_queue.get_unchecked(i) };

@@ -378,6 +378,12 @@ pub struct AppendChallengedPosixFileImpl {
     pub(crate) _committed_size: Cell<u64>,
     // File size as a result of the file API calls
     pub(crate) _logical_size: Cell<u64>,
+    // Offset from which the file has no blocks as far as this file knows: its size when
+    // opened, raised by completed writes and allocations, lowered by truncations. A write
+    // at or past it allocates, which RWF_NOWAIT refuses on every append-challenged
+    // filesystem, so it goes to the syscall thread at once. An offset too low only costs
+    // that hop for a write the reactor could have submitted; too high, a failed attempt.
+    pub(crate) _data_end: Cell<u64>,
     // Queue of pending operations; processed from front to back to avoid starvation, but
     // can issue concurrent operations.
     //
