@@ -17,7 +17,11 @@ impl Mutation for Inc {
     fn eval(&self, current: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
         let found = current[0].map_or(0, |(_, v)| v[0]);
         Ok(Outcome {
-            puts: vec![Put { key: KEY.to_vec(), value_type: 1, value: vec![found + 1] }],
+            puts: vec![Put {
+                key: KEY.to_vec(),
+                value_type: 1,
+                value: vec![found.wrapping_add(1)],
+            }],
             deletes: vec![],
             change: vec![b'+'],
             result: vec![found],
@@ -228,6 +232,38 @@ fn a_session_keeps_the_records_of_its_newest_txn_number_only() {
         assert_eq!(mutated(c.reply(l, again)).1, vec![result], "{k:?} keeps its record");
     }
     assert_eq!(read(&mut c, l), Some(3), "no retry wrote again");
+}
+
+#[test]
+fn a_purge_round_that_fills_its_batch_goes_on_at_once_with_the_records_past_it() {
+    // A session that writes more records in a period than a round deletes kept every record past
+    // the batch until the next period: a range written faster than that grew its records without
+    // end (the one-node load wrote about 20 000 a minute to a range).
+    use teseladb_range::dedup::PURGE_BATCH;
+    let mut c = Cluster::standard();
+    let l = c.elect();
+    let last = PURGE_BATCH as i64 + 2;
+    for chunk in (1..=last).collect::<Vec<_>>().chunks(256) {
+        let ws: Vec<ReqId> = chunk
+            .iter()
+            .map(|&txn_number| inc(&mut c, l, Some(DedupKey { txn_number, ..K })))
+            .collect();
+        c.ticks(4);
+        for w in ws {
+            mutated(c.reply(l, w));
+        }
+    }
+    // One period later the first round deleted a full batch, the lowest `txnNumber`s; the next
+    // one, at once, the record past it that the newest one replaced.
+    c.wall_ahead = 2 * PURGE_EVERY_MS;
+    c.ticks(400);
+    let l = c.leader().expect("a leader");
+    let past_the_batch = inc(&mut c, l, Some(DedupKey { txn_number: last - 1, ..K }));
+    c.ticks(2);
+    assert_too_old(c.reply(l, past_the_batch), last - 1, last);
+    let newest = inc(&mut c, l, Some(DedupKey { txn_number: last, ..K }));
+    c.ticks(2);
+    assert_eq!(mutated(c.reply(l, newest)).1, vec![(last - 1) as u8], "the newest stays");
 }
 
 /// A record keeps the greatest key its statement wrote before its result (007 FR-022), and a

@@ -379,23 +379,32 @@ fn a_purge_search_takes_a_batch_of_expired_records_and_skips_the_rest() {
         }
     }
     r.apply(index + 1, ts(1_000), &write(u32::MAX)).unwrap();
-    let mut search = PurgeScan::new(&r.lsm, G, ts(500));
-    let mut batch = None;
+    let mut search = PurgeScan::new(&r.lsm, G, ts(500), None);
+    let batch = purge_search(&mut r, &mut search);
+    assert_eq!(batch.len(), PURGE_BATCH, "one full batch; the rest go in the next round");
+    assert!(!batch.contains(&dedup_key(G, 7, 1, 0)), "the deleted record is not purged again");
+    assert!(!batch.contains(&dedup_key(G, 7, 1, u32::MAX)), "the newer record stays");
+    // The next round goes on at the session of the batch's last record, once the batch is gone.
+    let resume = search.resume().map(<[u8]>::to_vec);
+    assert_eq!(resume, Some(dedup_key(G, 7, i64::MIN, 0)));
+    r.apply(index + 2, ts(1_001), &Command::PurgeDedup { keys: batch }).unwrap();
+    let mut next = PurgeScan::new(&r.lsm, G, ts(500), resume.as_deref());
+    let rest = purge_search(&mut r, &mut next);
+    assert_eq!(rest, vec![dedup_key(G, 7, 1, PURGE_BATCH as u32 + 1)], "what the batch left");
+    assert_eq!(next.resume(), None, "this round read every record");
+}
+
+/// The records a purge search finds, reading the blocks it waits for.
+fn purge_search(r: &mut Replica, search: &mut teseladb_range::dedup::PurgeScan) -> Vec<Vec<u8>> {
     for _ in 0..MAX_ROUNDS * 100 {
         match search.step(&r.lsm) {
-            Some(found) => {
-                batch = Some(found.expect("the LSM answers"));
-                break;
-            }
+            Some(found) => return found.expect("the LSM answers"),
             None => {
                 r.lsm.borrow_mut().run_io(&mut r.disk, Nanos::ZERO);
             }
         }
     }
-    let batch = batch.expect("the search ends");
-    assert_eq!(batch.len(), PURGE_BATCH, "one full batch; the rest go in the next round");
-    assert!(!batch.contains(&dedup_key(G, 7, 1, 0)), "the deleted record is not purged again");
-    assert!(!batch.contains(&dedup_key(G, 7, 1, u32::MAX)), "the newer record stays");
+    panic!("the search does not end");
 }
 
 /// A record written after the cutoff is left for a later search, even within one batch.
@@ -421,20 +430,9 @@ fn a_purge_search_leaves_the_records_newer_than_its_cutoff() {
     // One already purged is not taken again.
     r.apply(3, ts(11), &write(2)).unwrap();
     r.apply(4, ts(12), &Command::PurgeDedup { keys: vec![dedup_key(G, 7, 1, 2)] }).unwrap();
-    let mut search = PurgeScan::new(&r.lsm, G, ts(500));
-    let mut batch = None;
-    for _ in 0..MAX_ROUNDS {
-        match search.step(&r.lsm) {
-            Some(found) => {
-                batch = Some(found.expect("the LSM answers"));
-                break;
-            }
-            None => {
-                r.lsm.borrow_mut().run_io(&mut r.disk, Nanos::ZERO);
-            }
-        }
-    }
-    assert_eq!(batch.expect("the search ends"), vec![dedup_key(G, 7, 1, 0)]);
+    let mut search = PurgeScan::new(&r.lsm, G, ts(500), None);
+    assert_eq!(purge_search(&mut r, &mut search), vec![dedup_key(G, 7, 1, 0)]);
+    assert_eq!(search.resume(), None);
 }
 
 /// 007 FR-012: a closed mark never goes back; a `SetClosedTs` at or below the one kept leaves it.

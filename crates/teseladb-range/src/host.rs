@@ -345,14 +345,14 @@ impl Leader {
 
 /// Where a leader's purge round is.
 enum Purge {
-    /// The next round starts at this cluster time (ms).
-    Idle(u64),
+    /// The next round starts at this cluster time (ms), from this record key (`None`: the first).
+    Idle(u64, Option<Vec<u8>>),
     /// Looking for the expired records.
     Scanning(Box<dedup::PurgeScan>),
-    /// Waiting for the latches of the records found.
-    Latching(Vec<Vec<u8>>),
-    /// Its `PurgeDedup` is proposed (a [`Req::Purge`] waits for it).
-    Proposed,
+    /// Waiting for the latches of the records found; where the next round starts.
+    Latching(Vec<Vec<u8>>, Option<Vec<u8>>),
+    /// Its `PurgeDedup` is proposed (a [`Req::Purge`] waits for it); where the next round starts.
+    Proposed(Option<Vec<u8>>),
 }
 
 /// A proposed `PurgeDedup`: its latch goes when the core answers.
@@ -1651,7 +1651,7 @@ impl RangeHost {
             latches: Latches::default(),
             locks: crate::locks::LockTable::default(),
             cache: TsCache::for_lease(lease, CACHE_INTERVALS),
-            purge: Purge::Idle(0),
+            purge: Purge::Idle(0, None),
             gc: Round::Idle(0),
             check: Round::Idle(lease.physical + CHECKSUM_EVERY_MS),
             tally: None,

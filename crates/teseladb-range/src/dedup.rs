@@ -96,10 +96,14 @@ pub fn cutoff(now_ms: u64) -> Option<Hlc> {
 /// their session replaced.
 pub struct PurgeScan {
     cursor: Scan,
+    g: GroupId,
     cutoff: Hlc,
     keys: Vec<Vec<u8>>,
     /// The session being read and its records.
     session: Option<(u128, Vec<SessionRecord>)>,
+    /// Where the next round starts when this one found a full batch: the first record of the
+    /// session of its last key, since the records past the batch are left for it.
+    resume: Option<Vec<u8>>,
 }
 
 /// A record of the session a purge reads: its key, its `txnNumber` and whether it expired.
@@ -110,11 +114,22 @@ struct SessionRecord {
 }
 
 impl PurgeScan {
-    /// A search of range `g`'s records at or below `cutoff`.
-    pub fn new(lsm: &RefCell<Lsm>, g: GroupId, cutoff: Hlc) -> PurgeScan {
-        let (start, end) = dedup_interval(g);
-        let cursor = lsm.borrow().view().scan(&start, &end, NEWEST);
-        PurgeScan { cursor, cutoff, keys: Vec::new(), session: None }
+    /// A search of range `g`'s records at or below `cutoff`, from record key `from` (a round
+    /// that goes on where the last one left its batch, [`PurgeScan::resume`]) or from the first.
+    pub fn new(lsm: &RefCell<Lsm>, g: GroupId, cutoff: Hlc, from: Option<&[u8]>) -> PurgeScan {
+        let (first, end) = dedup_interval(g);
+        let start =
+            from.filter(|k| first.as_slice() <= *k && *k < end.as_slice()).unwrap_or(&first);
+        let cursor = lsm.borrow().view().scan(start, &end, NEWEST);
+        PurgeScan { cursor, g, cutoff, keys: Vec::new(), session: None, resume: None }
+    }
+
+    /// Where the next round starts, once [`PurgeScan::step`] gave a full batch: more records
+    /// may be left past it, and the next round reads them at once instead of a period later
+    /// (a range written faster than a batch per period kept every record past it). `None` when
+    /// the search read every record.
+    pub fn resume(&self) -> Option<&[u8]> {
+        self.resume.as_deref()
     }
 
     /// The records of the session read so far that go: expired, or of a `txnNumber` below its
@@ -152,8 +167,12 @@ impl PurgeScan {
             }
         }
         // A session's records join at once: what passes the batch goes in the next round, which
-        // reads the records from the start again.
-        self.keys.truncate(PURGE_BATCH);
+        // reads again from the first record of the session of the batch's last key.
+        if self.keys.len() >= PURGE_BATCH {
+            self.keys.truncate(PURGE_BATCH);
+            let last = self.keys.last().and_then(|k| parse(k));
+            self.resume = last.map(|(lsid, _)| dedup_key(self.g, lsid, i64::MIN, 0));
+        }
         Some(Ok(std::mem::take(&mut self.keys)))
     }
 }
