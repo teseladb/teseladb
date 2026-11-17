@@ -107,6 +107,39 @@ pub fn frozen_alive_bytes() -> u64 {
     FROZEN_ALIVE.load(Ordering::Relaxed)
 }
 
+/// A memtable nothing reads any more, freed a few nodes at a time ([`MemTeardown::step`]): it
+/// counts as alive until the last of them goes.
+pub(crate) struct MemTeardown {
+    versions: crate::art::Teardown<Slot>,
+    tombstones: crate::art::Teardown<RangeTombstone>,
+    /// The memtable, emptied, dropped at the end (its bytes stop counting then).
+    table: Option<Memtable>,
+}
+
+impl std::fmt::Debug for MemTeardown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemTeardown").field("done", &self.table.is_none()).finish()
+    }
+}
+
+impl MemTeardown {
+    /// Takes the nodes of `table` to free them a few at a time.
+    pub(crate) fn new(mut table: Memtable) -> MemTeardown {
+        let versions = table.versions.teardown();
+        let tombstones = table.tombstones.teardown();
+        MemTeardown { versions, tombstones, table: Some(table) }
+    }
+
+    /// Frees up to `budget` nodes and values; whether the memtable is all freed.
+    pub(crate) fn step(&mut self, budget: usize) -> bool {
+        let done = self.tombstones.step(budget) && self.versions.step(budget);
+        if done {
+            self.table = None;
+        }
+        done
+    }
+}
+
 impl Drop for Memtable {
     fn drop(&mut self) {
         if self.frozen.load(Ordering::Acquire) {

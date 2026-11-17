@@ -180,12 +180,63 @@ impl SharedLsm {
         self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.used())).sum()
     }
 
-    /// Drops the blocks of file `file` (of `blocks` data blocks) from the shared cache: the file
-    /// is gone, and its blocks would hold the cache's memory until other blocks evict them.
+    /// Drops the blocks of file `file` from the shared cache: the file is gone, and its blocks
+    /// would hold the cache's memory until other blocks evict them.
     pub(crate) fn forget(&self, file: u64, blocks: usize) {
-        for shard in self.inner.cache.iter() {
-            shard.with_waiting(|c| c.forget(file, blocks));
+        self.drop_blocks(file, blocks);
+    }
+
+    /// Drops the blocks of file `file`, which left the current version, from the shared cache.
+    /// A reader of an older view that still reads it puts the blocks it reads back, since its
+    /// next try looks for them there; they go with the file ([`SharedLsm::forget`]).
+    pub(crate) fn retire(&self, file: u64, blocks: usize) {
+        self.drop_blocks(file, blocks);
+    }
+
+    /// Drops the blocks of a file of `blocks` data blocks, each from the one shard it hashes
+    /// to: asking every shard for every block made a file's removal 64 times the work.
+    fn drop_blocks(&self, file: u64, blocks: usize) {
+        let mut by_shard: Vec<Vec<u32>> = vec![Vec::new(); self.inner.cache.len()];
+        for b in crate::cache::file_slots(blocks) {
+            by_shard[self.inner.shard_of(file, b as usize)].push(b);
         }
+        for (shard, slots) in self.inner.cache.iter().zip(by_shard) {
+            if !slots.is_empty() {
+                shard.with_waiting(|c| c.drop_blocks(file, slots.iter().copied()));
+            }
+        }
+    }
+
+    /// The core's lookup of block `block` of `file`: `None` when it is not cached, or when a
+    /// reader holds its shard, which the core then takes as a miss rather than wait.
+    pub(crate) fn cached(&self, file: u64, block: u32) -> Option<Bytes> {
+        let shard = self.inner.shard(file, block as usize);
+        shard.try_with(|c| c.get(file, block)).flatten()
+    }
+
+    /// Whether block `block` of `file` is cached (`false` when a reader holds its shard).
+    pub(crate) fn holds(&self, file: u64, block: u32) -> bool {
+        let shard = self.inner.shard(file, block as usize);
+        shard.try_with(|c| c.contains(file, block)).unwrap_or(false)
+    }
+
+    /// Caches a block the core read from the disk.
+    pub(crate) fn keep(&self, file: u64, block: u32, payload: Bytes) {
+        let shard = self.inner.shard(file, block as usize);
+        shard.with_waiting(|c| c.insert(file, block, payload.clone()));
+    }
+
+    /// Whether each shard of the cache can hold at least `blocks` blocks of `block_bytes`.
+    pub(crate) fn holds_blocks(&self, blocks: u64, block_bytes: u64) -> bool {
+        self.inner
+            .cache
+            .first()
+            .is_some_and(|s| s.with_waiting(|c| c.budget()) >= blocks * block_bytes)
+    }
+
+    /// Bytes of the blocks in the shared cache of the files `live` says no.
+    pub(crate) fn bytes_outside(&self, live: &dyn Fn(u64) -> bool) -> u64 {
+        self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.bytes_outside(live))).sum()
     }
 
     /// Gives the cache the block `need` names, read from its file as `bytes`.
@@ -193,6 +244,7 @@ impl SharedLsm {
         let raw = Bytes::copy_from_slice(bytes);
         let payload =
             need.table.payload(need.block, &raw).map_err(|_| corrupt(&need.table, need.block))?;
+        let payload = read::own_bytes(payload, &raw);
         let (file, block) = (need.table.number, need.block);
         let shard = self.inner.shard(file, block);
         // A miss already cost a read of the disk; a moment's retry keeps the block for the next
@@ -204,8 +256,12 @@ impl SharedLsm {
 
 impl Inner {
     fn shard(&self, file: u64, block: usize) -> &TryCell<BlockCache> {
+        &self.cache[self.shard_of(file, block)]
+    }
+
+    fn shard_of(&self, file: u64, block: usize) -> usize {
         let h = file.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (block as u64);
-        &self.cache[(h as usize) % self.cache.len()]
+        (h as usize) % self.cache.len()
     }
 }
 

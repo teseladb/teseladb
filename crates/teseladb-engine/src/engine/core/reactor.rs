@@ -280,6 +280,10 @@ impl IoCompletion {
     }
 }
 
+/// How often, at most, an idle shard gives back to the system the memory that stayed free
+/// (`memory::release_free_memory`): a span must stay free a whole period to go.
+pub const MEMORY_RELEASE_PERIOD: Duration = Duration::from_secs(1);
+
 /// Capacity of the active task queue lists: the number of scheduling groups rounded up to a
 /// power of two.
 pub const TASK_QUEUE_LIST_CAPACITY: usize = (max_scheduling_groups() as usize).next_power_of_two();
@@ -6496,6 +6500,10 @@ impl Reactor {
         // runnable leave nothing else to do, the reactor sleeps again after one empty poll
         // rather than polling for max_poll_time first.
         let mut idle_poll_start: Option<SchedTimePoint> = None;
+        // When the shard last gave back to the system the memory that stayed free (see
+        // `memory::release_free_memory`), which it does at most once a period, before a sleep.
+        let mut released_at = Self::now();
+        let release_period = SchedDuration::from_std(MEMORY_RELEASE_PERIOD);
 
         let check_for_work = move || -> bool {
             // SAFETY: called from this loop, with no reference to the reactor live; the pollers
@@ -6553,6 +6561,12 @@ impl Reactor {
                         if t - poll_start > (*this)._cfg.max_poll_time
                             && Self::pollers_enter_interrupt_mode(this)
                         {
+                            // The shard goes to sleep: the memory that stayed free for a period
+                            // goes back to the system first.
+                            if t - released_at > release_period {
+                                memory::release_free_memory();
+                                released_at = t;
+                            }
                             // Turn off the task quota timer to avoid spurious wakeups
                             let zero_itimerspec = crate::engine::core::posix::Itimerspec::default();
                             (*this)._task_quota_timer.timerfd_settime(0, &zero_itimerspec)?;

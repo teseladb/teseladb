@@ -195,6 +195,10 @@ pub const SPACE_FLOOR: u64 = 4 << 20;
 /// each with the whole of it, a core used twice its share of the node's memory.
 pub const SHARED_CACHE_PERCENT: u64 = 75;
 
+/// The data blocks each shard of the shared cache must hold for the core to keep its own data
+/// blocks there rather than in its own cache.
+pub const SHARED_SHARD_BLOCKS: u64 = 8;
+
 /// The least the core's own cache keeps of a small budget, up to all of it: it holds every open
 /// file's index and filter blocks with the data blocks of one read, and below that its reads stop
 /// making progress (the simulator's caches of 64 KiB, of which a quarter is one data block).
@@ -262,6 +266,11 @@ pub struct Lsm {
     requests: std::collections::VecDeque<Request>,
     next_request: u64,
     pub(crate) obsolete: Vec<Arc<Table>>,
+    /// Memtables that left the version after their flush, kept until no view holds them, so
+    /// that the last one to go never frees one whole on the shard that drops it.
+    graveyard: Vec<Arc<Memtable>>,
+    /// Memtables nothing holds any more, freed a few nodes at a time ([`Lsm::bury`]).
+    tearing: Vec<crate::memtable::MemTeardown>,
     done: Completions,
     pub(crate) counters: Counters,
     /// Bytes compactions wrote per collection since its dictionary was trained (004 FR-022).
@@ -315,6 +324,12 @@ impl Lsm {
         let version = Arc::new(v);
         let shared =
             crate::concurrent::SharedLsm::new(version.clone(), shared_cache, cfg.dir.clone());
+        // The core keeps its data blocks in the shared cache when each of its shards holds a few:
+        // the two caches held the same hot blocks twice. A small budget (the simulator's) keeps
+        // them in the core's own cache.
+        if shared.holds_blocks(SHARED_SHARD_BLOCKS, cfg.block_bytes as u64) {
+            reader.shared = Some(shared.clone());
+        }
         let mut lsm = Lsm {
             cfg: cfg.clone(),
             version,
@@ -352,6 +367,8 @@ impl Lsm {
             requests: std::collections::VecDeque::new(),
             next_request: 1,
             obsolete: Vec::new(),
+            graveyard: Vec::new(),
+            tearing: Vec::new(),
             done: Completions::default(),
             counters: Counters::default(),
             dict_written: crate::dict::Written::new(),
