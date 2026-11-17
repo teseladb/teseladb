@@ -197,13 +197,14 @@ fn a_file_is_appended_to_through_the_engine() {
             push_everywhere(&o).await?;
             let lines = EACH * shards() + 1;
             let q = p.clone();
-            assert!(
-                until(move || {
-                    std::fs::read(&q)
-                        .is_ok_and(|b| b.iter().filter(|c| **c == b'\n').count() >= lines)
-                })
-                .await
-            );
+            // Every line there and whole: the file is read while the last write may still be
+            // landing, whose blocks a reader can see out of order.
+            let whole = |b: &[u8]| {
+                b.ends_with(b"\n")
+                    && !b.contains(&0)
+                    && b.iter().filter(|c| **c == b'\n').count() >= lines
+            };
+            assert!(until(move || std::fs::read(&q).is_ok_and(|b| whole(&b))).await);
             Ok::<_, ExceptionPtr>(std::fs::read_to_string(&p).unwrap())
         })
     });
