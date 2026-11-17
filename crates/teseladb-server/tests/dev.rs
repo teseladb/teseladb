@@ -287,7 +287,8 @@ fn the_nodes_go_when_the_development_cluster_stops_or_dies() {
         match stop {
             Some(s) => {
                 send_stop(dev.id(), s).unwrap();
-                assert_eq!(dev.wait().unwrap().code(), Some(0), "{s:?}");
+                let status = dev.wait().unwrap();
+                assert_eq!(status.code(), Some(0), "{s:?}: {status}");
             }
             None => {
                 dev.kill().unwrap();
@@ -345,15 +346,15 @@ fn a_node_that_dies_stops_the_development_cluster() {
     let killed = Command::new("kill").args(["-9", &nodes[1].to_string()]).status().unwrap();
     assert!(killed.success());
     let end = Instant::now() + Duration::from_secs(20);
-    let code = loop {
+    let status = loop {
         if let Some(s) = dev.try_wait().unwrap() {
-            break s.code();
+            break s;
         }
         assert!(Instant::now() < end, "the cluster still runs with a node dead");
         thread::sleep(Duration::from_millis(20));
     };
-    assert_eq!(code, Some(1));
     let log = log.join().unwrap();
+    assert_eq!(status.code(), Some(1), "{status}: {log:?}");
     assert!(log.iter().any(|l| l.contains("a node of the development cluster ended")), "{log:?}");
     for at in &ports {
         assert!(std::net::TcpStream::connect(at.as_str()).is_err(), "{at} still serves");
