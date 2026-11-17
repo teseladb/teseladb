@@ -208,6 +208,20 @@ pub fn on_own_stack() -> bool {
     POOL.with(|p| p.borrow().busy.iter().any(|&(base, len)| here >= base && here < base + len))
 }
 
+/// The bytes left below this code when it runs on a stack of [`run`]: from here down to the guard.
+/// A call made from such a stack runs where it is, and this is the room it has there.
+#[must_use]
+pub fn room_here() -> Option<usize> {
+    let here = stack_address();
+    POOL.with(|p| {
+        p.borrow()
+            .busy
+            .iter()
+            .find(|&&(base, len)| here >= base && here < base + len)
+            .map(|&(base, _)| here - (base + GUARD))
+    })
+}
+
 /// Runs `f` with the stack pointer at `top`, catching its panic there.
 fn on_stack(top: *mut u8, f: &mut dyn FnMut()) -> std::thread::Result<()> {
     let mut outcome: std::thread::Result<()> = Ok(());
@@ -321,6 +335,14 @@ mod tests {
             run(4 << 20, &mut |size| inner = Some(size));
         });
         assert_eq!(inner, Some(None), "a call from an own stack stays on it");
+        let mut room = None;
+        run(4 << 20, &mut |size| {
+            let usable = size.expect("a stack of its own");
+            room = room_here().map(|r| (usable, r));
+        });
+        let (usable, left) = room.expect("on a stack of its own");
+        assert!(left < usable && left > usable - (64 << 10), "{left} of {usable}");
+        assert_eq!(room_here(), None, "off the stacks of `run`");
         let idle = idle_here();
         assert!(idle >= 1);
         run(4 << 20, &mut |_| {});

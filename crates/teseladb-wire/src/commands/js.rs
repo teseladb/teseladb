@@ -207,8 +207,9 @@ pub const COMMAND_STACK: usize = 256 << 20;
 const STACK_SPARE: usize = 8 << 20;
 
 /// What runs a call on a native stack of its own (016 A016-3-18): it calls the function it is given
-/// once, with `Some(bytes)` on a fresh stack of that size, or with `None` on the caller's stack
-/// (the caller already runs on such a stack, or none could be made). A process whose threads have
+/// once, with `Some(bytes)` and that room below where the call starts (a fresh stack of that size,
+/// or what is left of the one the caller already runs on), or with `None` on the caller's stack
+/// when its room is not known (none could be made). A process whose threads have
 /// small stacks (the engine's) sets one so that a call keeps the depth of [`COMMAND_STACK`].
 pub type DeepStack = fn(&mut dyn FnMut(Option<usize>));
 
