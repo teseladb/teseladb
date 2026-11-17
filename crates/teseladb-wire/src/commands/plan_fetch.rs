@@ -5,7 +5,7 @@
 //! each batch after doubles the one before up to [`MOST`]: a `findOne` reads no document more than
 //! it needs, and a plan's trial stays within its budget of work.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use teseladb_keys::KeyBuilder;
 use teseladb_meta::catalog::CollectionEntry;
@@ -114,11 +114,15 @@ impl<'a> Fetcher<'a> {
             // This entry's document and those of the entries after it the batches have not read.
             let cap = most.map_or(self.batch, |m| m.clamp(1, self.batch));
             let mut pks: Vec<Vec<u8>> = vec![pk.to_vec()];
+            // The keys taken so far, by a set: a batch of hundreds of keys checked against a
+            // list of them went through it once per key.
+            let mut taken: HashSet<&[u8]> = HashSet::with_capacity(cap);
+            taken.insert(pk);
             for p in self.pending.iter().skip(self.at) {
                 if pks.len() >= cap {
                     break;
                 }
-                if !self.got.contains_key(p) && !pks.contains(p) {
+                if !self.got.contains_key(p) && taken.insert(p.as_slice()) {
                     pks.push(p.clone());
                 }
             }
