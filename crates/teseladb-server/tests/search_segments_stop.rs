@@ -1,14 +1,17 @@
-//! A node's stop waits for the search segment changes still in memory (011 FR-012, 023 FR-029):
-//! the ordered writer writes them off the shards, and a change it had not written when the node
-//! stopped was lost with the process, so the next start built the index again from its older
-//! file. Here the writer is held on the change of one index (its file is a named pipe whose
-//! reader comes late) while the change of another index waits behind it; the stop returns only
-//! once that second file is on disk, and the restarted node serves both indexes.
-//!
-//! One engine per process (D4): a program with its own `main`.
+//! A node's stop keeps the search segment changes still in memory (011 FR-012, 023 FR-029): the
+//! ordered writer writes them off the shards, in work a shard started in the background, and the
+//! engine does not end before its background work does, so the process ends only once every
+//! change is on disk; a change lost with the process would leave the index's older file, and the
+//! next start would build the index again from that older mark. Here the writer of a node
+//! process is held on the change of one index (its file is a named pipe whose reader comes late)
+//! while the change of another index waits behind it; when the process ends that second file is
+//! on disk, and the restarted node serves both indexes.
 
 #[cfg(target_os = "linux")]
 mod common;
+#[cfg(target_os = "linux")]
+#[path = "common/procs.rs"]
+mod procs;
 
 #[cfg(target_os = "linux")]
 mod cases {
@@ -18,29 +21,25 @@ mod cases {
     use std::time::{Duration, Instant};
 
     use teseladb_bson::{Document, Value};
-    use teseladb_io::engine::disk::DiskPlace;
-    use teseladb_server::node::{Node, NodeConfig, lock_dir};
+    use teseladb_server::node::NodeConfig;
+    use teseladb_server::procs::{NodeArgs, NodeProc, start_self};
 
     use super::common::{Client, READY, batch, config, ok, until};
 
     const DB: &str = "segstop";
     /// Documents of the first index's change: past the count that makes a query write its file.
     const MANY: i32 = 1100;
-    /// How long the reader of the first index's file waits once the stop begins.
-    const HOLD: Duration = Duration::from_secs(3);
+    /// How long the reader of the first index's file waits once the stop begins: longer than a
+    /// node's stop takes without it.
+    const HOLD: Duration = Duration::from_secs(10);
 
-    pub fn run() {
-        let start = Instant::now();
-        a_stop_waits_for_the_segments_in_memory();
-        println!("test a_stop_waits_for_the_segments_in_memory ... ok ({:?})", start.elapsed());
-        println!("test result: ok. 1 passed");
+    /// A node on files in the directory it is given.
+    pub fn recipe(a: &NodeArgs) -> NodeConfig {
+        NodeConfig { data_dir: a.dir.clone(), ..config(a.join.clone()) }
     }
 
-    fn start(dir: &Path) -> Node {
-        let cfg = NodeConfig { data_dir: Some(dir.to_path_buf()), ..config(Vec::new()) };
-        let lock = lock_dir(dir).expect("locks the directory");
-        let node =
-            Node::start(cfg, DiskPlace::Files(dir.to_path_buf()), Some(lock)).expect("starts");
+    fn start(dir: &Path) -> NodeProc {
+        let node = start_self("node", &[], Some(dir), &[]);
         assert!(node.wait_ready(READY));
         node
     }
@@ -115,10 +114,11 @@ mod cases {
             .any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "tmp")))
     }
 
-    fn a_stop_waits_for_the_segments_in_memory() {
+    pub fn a_stop_waits_for_the_segments_in_memory() {
         let dir: PathBuf =
             std::env::temp_dir().join(format!("teseladb-segstop-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let node = start(&dir);
         let mut c = Client::new(&node);
 
@@ -161,11 +161,13 @@ mod cases {
 
         go.send(()).expect("the reader waits");
         let stopping = Instant::now();
-        node.stop();
+        assert!(node.stop().success(), "the node stops cleanly");
         let took = stopping.elapsed();
         let files = segment_files(&dir);
         println!("the stop took {took:?}; segment files right after it: {files:?}");
-        assert_eq!(files.len(), 2, "B's file is on disk when the stop returns ({took:?})");
+        // The writer was still held when the stop began: the process ended after the reader.
+        assert!(took >= HOLD, "the stop waited for the writer: {took:?}");
+        assert_eq!(files.len(), 2, "B's file is on disk when the node ends ({took:?})");
         let written = got.recv_timeout(READY).expect("the writer wrote A's change to the pipe");
         assert!(written > 0);
         assert!(!pipe.exists());
@@ -174,16 +176,24 @@ mod cases {
         let node = start(&dir);
         let mut c = Client::new(&node);
         until("a query on B after the restart", || (found(&mut c, "b") == Some(5)).then_some(()));
-        until("a query on A after the restart", || {
-            (found(&mut c, "a") == Some(all)).then_some(())
-        });
+        until("a query on A after the restart", || (found(&mut c, "a") == Some(all)).then_some(()));
         drop(c);
-        node.stop();
+        assert!(node.stop().success());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
-    #[cfg(target_os = "linux")]
-    cases::run();
+    procs::main(
+        &[(
+            "a_stop_waits_for_the_segments_in_memory",
+            cases::a_stop_waits_for_the_segments_in_memory,
+        )],
+        &[("node", cases::recipe)],
+    );
 }
+
+/// The tests run on Linux only (D-177): elsewhere the program does nothing.
+#[cfg(not(target_os = "linux"))]
+fn main() {}
