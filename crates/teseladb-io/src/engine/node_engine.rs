@@ -22,6 +22,7 @@ use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::thread::async_ as in_thread;
 
 use super::core_loop::{CoreLogic, CoreSender};
+use super::disk::IoGroups;
 use super::disk_port::{CoreDisk, DiskWaker};
 use super::driver::Driver;
 use super::options::EngineConfig;
@@ -128,6 +129,9 @@ impl NodeEngine {
             let code = app.run(args, move || {
                 let wake = Rc::new(Wake::default());
                 EXIT.with(|e| *e.borrow_mut() = Some(wake.clone()));
+                // The disk classes' groups are this engine's: destroyed when it exits, so that
+                // the next engine of the process makes its own (023 FR-012).
+                IoGroups::tie_to_engine();
                 // SIGINT and SIGTERM through shard 0's reactor (023 FR-031).
                 let _ = ready_tx.send(super::signals::install_here());
                 make_coroutine(async move {

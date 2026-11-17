@@ -148,7 +148,7 @@ engine_test_case!(the_classes_are_scheduling_groups_with_their_shares, {
         assert_eq!(g.of(IoClass::Log).get_shares(), LOG_SHARES);
         assert_eq!(g.of(IoClass::Data).get_shares(), DATA_SHARES);
         assert_eq!(g.of(IoClass::Background).get_shares(), BACKGROUND_SHARES);
-        // Made once per process.
+        // Made once per engine.
         let again = IoGroups::get_or_create().get().unwrap();
         assert_eq!(again, g);
     })
