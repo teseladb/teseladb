@@ -10,13 +10,21 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use teseladb::engine::core::future::{Future, make_exception_future};
-use teseladb::engine::core::reactor::engine;
+use teseladb::engine::core::future::{ExceptionPtr, Future, make_exception_future};
+use teseladb::engine::core::reactor::{engine, listen_with};
+use teseladb::engine::core::shard_id::this_shard_id;
 use teseladb::engine::core::shared_ptr::{LwSharedPtr, make_lw_shared};
 use teseladb::engine::core::sstring::Sstring;
+use teseladb::engine::core::thread::async_;
+use teseladb::engine::core::timer::{Clock, SteadyClockType};
 use teseladb::engine::core::when_all::when_all;
-use teseladb::engine::net::dns::{DnsResolver, DnsResolverOptions, Hostent, SrvProto, SrvRecords};
+use teseladb::engine::core::with_timeout::with_timeout;
+use teseladb::engine::net::api::{ConnectedSocketInputStreamConfig, ListenOptions, ServerSocket};
+use teseladb::engine::net::dns::{
+    DnsError, DnsResolver, DnsResolverOptions, Hostent, SrvProto, SrvRecords,
+};
 use teseladb::engine::net::inet_address::{Family, InetAddress};
+use teseladb::engine::net::socket_defs::{Ipv4Addr, SocketAddress};
 
 static ENGINE_NAME: LazyLock<Sstring> = LazyLock::new(|| Sstring::from("engine.io"));
 
@@ -138,6 +146,72 @@ teseladb::engine_test_case!(test_connection_refused_tcp, {
     let d =
         make_lw_shared(try_or_fail!(DnsResolver::with_stack(unsafe { (*engine()).net() }, &opts)));
     expect_failure(d)
+});
+
+/// Closes every connection after reading its query, until `abort_accept()`. Runs in an
+/// engine thread.
+fn serve_tcp_dns_and_close(listener: *mut ServerSocket) -> Result<(), ExceptionPtr> {
+    loop {
+        // SAFETY: the listener outlives this thread (the test joins it before dropping it);
+        // the test only calls `abort_accept` on it while this thread waits in `accept`.
+        let ar = unsafe { (*listener).accept() }.get();
+        let Ok(ar) = ar else {
+            return Ok(());
+        };
+        let mut socket = ar.connection;
+        let mut input = socket.input(ConnectedSocketInputStreamConfig::default());
+
+        let len_buf = input.read_exactly(2).get()?;
+        assert_eq!(len_buf.size(), 2);
+        let query_len = u16::from_be_bytes([len_buf[0], len_buf[1]]) as usize;
+        let query = input.read_exactly(query_len).get()?;
+        assert_eq!(query.size(), query_len);
+        input.close().get()?;
+        socket.shutdown_output();
+    }
+}
+
+// A name server that closes the connection must fail the query, not hang the reactor.
+teseladb::engine_test_case!(test_tcp_server_closes_connection, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        let mut lo = ListenOptions { reuse_address: true, ..ListenOptions::default() };
+        lo.set_fixed_cpu(this_shard_id());
+        let mut listener = Box::new(listen_with(
+            SocketAddress::from_ipv4_addr(Ipv4Addr::from_string_port("127.0.0.1", 0)?),
+            lo,
+        )?);
+        let port = listener.local_address()?.port();
+        let lp: *mut ServerSocket = &mut *listener;
+        let server = async_(move || serve_tcp_dns_and_close(lp));
+
+        let opts = DnsResolverOptions {
+            servers: Some(vec![inet("127.0.0.1")]),
+            use_tcp_query: Some(true),
+            tcp_port: Some(port),
+            timeout: Some(Duration::from_millis(300)),
+            ..DnsResolverOptions::default()
+        };
+
+        // SAFETY: the reactor of this shard runs the test; the stack outlives the resolver.
+        let d = make_lw_shared(DnsResolver::with_stack(unsafe { (*engine()).net() }, &opts)?);
+        let deadline = <SteadyClockType as Clock>::add(
+            <SteadyClockType as Clock>::now(),
+            Duration::from_secs(10),
+        );
+        let f = with_timeout::<SteadyClockType, Hostent>(
+            deadline,
+            d_of(&d).get_host_by_name(&Sstring::from("closed.engine.test"), Some(Family::INET)),
+        )
+        .get();
+
+        d_of(&d).close().get()?;
+        listener.abort_accept();
+        server.get()?;
+
+        let e = f.expect_err("the query fails");
+        assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
+        Ok(())
+    })
 });
 
 teseladb::engine_test_case!(

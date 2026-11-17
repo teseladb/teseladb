@@ -2,9 +2,9 @@
 //! `dns` namespace and the `inet_address` helpers built on them (find, find_all, hostname,
 //! aliases), answered from /etc/hosts for `localhost`; a numeric name answered without a
 //! query; a name with a NUL refused; the reverse lookup of an IPv6 address (an `AF_INET6`
-//! host entry); and a name the server knows with no address of the type asked (ENODATA).
-//! (A TCP server that closes the connection spins the reactor in `do_recvfrom`, in the
-//! original too: its end of stream is an empty ready read that the loop retries forever.)
+//! host entry); a name the server knows with no address of the type asked (ENODATA); and a
+//! TCP server that sends part of a length prefix and closes the connection (end of stream is
+//! the peer closing, so the lookup fails).
 #![cfg(all(target_os = "linux", feature = "dns"))]
 
 use std::io::{Read, Write};
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use teseladb::engine::core::future::{ExceptionPtr, InvalidArgument};
+use teseladb::engine::core::future::InvalidArgument;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::net::dns::{DnsError, DnsResolver, DnsResolverOptions, dns};
 use teseladb::engine::net::inet_address::{Family, InetAddress};
@@ -223,6 +223,19 @@ engine_thread_test_case!(names_with_a_nul_and_names_without_addresses, {
         .resolve_name(&s("noaddr.test"), Some(Family::INET))
         .get()
         .expect_err("no data");
+    assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
+    r.close().get().expect("closed");
+});
+
+engine_thread_test_case!(a_tcp_server_that_drops_the_connection_fails_the_lookup, {
+    let server = Server::start();
+    let mut opts = server.options();
+    opts.use_tcp_query = Some(true);
+    let mut r = DnsResolver::with_options(&opts).expect("a resolver");
+    let e = r
+        .get_host_by_name(&s("noaddr.test"), Some(Family::INET))
+        .get()
+        .expect_err("dropped");
     assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
     r.close().get().expect("closed");
 });

@@ -1937,10 +1937,7 @@ impl DnsResolverImpl {
                         }
 
                         match f.get() {
-                            Ok(b) => {
-                                tcp.indata = b;
-                                continue; // loop will take care of data
-                            }
+                            Ok(b) => tcp.indata = b,
                             Err(ex) => {
                                 if let Some(c) = system_error_code(&ex) {
                                     set_errno(c);
@@ -1948,6 +1945,13 @@ impl DnsResolverImpl {
                                 return Ok(-1);
                             }
                         }
+                        // At end of stream `read_up_to` returns an empty buffer, and again on
+                        // every later call: return 0, which c-ares takes as the peer closing.
+                        if tcp.indata.empty() {
+                            crate::log_trace!(dns_log(), "Read {}: connection closed by peer", fd);
+                            return Ok(0);
+                        }
+                        continue; // loop will take care of data
                     }
                     SockKind::Udp(udp) => {
                         if let Some(d) = udp.in_.as_mut() {

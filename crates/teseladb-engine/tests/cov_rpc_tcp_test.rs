@@ -1072,3 +1072,43 @@ teseladb::engine_test_case!(handlers_are_removed_while_calls_are_in_flight, {
         env.finish()
     })
 });
+
+// The original's rpc::cancellable move assignment: the pending send and wait follow the
+// object they are moved to, and the target first cancels what it was tracking.
+teseladb::engine_test_case!(a_cancellable_hands_its_pending_calls_over, {
+    async_(|| -> Result<(), ExceptionPtr> {
+        let mut env = Env::plain()?;
+        env.proto
+            .as_mut()
+            .register_handler(30, |x: i32| -> Result<i32, ExceptionPtr> { Ok(x * 2) })?;
+        let mut c = env.client(ClientOptions::default())?;
+        let v = env.proto.make_client::<fn(i32) -> Future<i32>>(30);
+        assert_eq!(v.call(cm(&mut c), &(1,)).get()?, 2);
+
+        // `a` tracks a queued send and a wait.
+        let mut a = std::pin::pin!(Cancellable::default());
+        let id = cm(&mut c).next_message_id();
+        let data = marshall(&Serializer, REQUEST_FRAME_HEADROOM, &(4i32,))?;
+        let sent = cm(&mut c).request(30, id, data, None, Some(a.as_mut()));
+        let (h, got, dropped) = recording();
+        cm(&mut c).wait_for_reply(9_990, h, None, Some(a.as_mut()));
+        // `b` tracks another wait; taking over `a` cancels it first.
+        let mut b = std::pin::pin!(Cancellable::default());
+        let (h2, _got2, dropped2) = recording();
+        cm(&mut c).wait_for_reply(9_991, h2, None, Some(b.as_mut()));
+        b.as_mut().assign_from(a.as_mut());
+        assert!(dropped2.get(), "the wait `b` tracked was canceled");
+        assert!(!dropped.get(), "the wait `a` tracked is still pending");
+        // Canceling `a` now does nothing; canceling `b` cancels what `a` tracked.
+        a.as_mut().cancel();
+        assert!(!dropped.get());
+        b.as_mut().cancel();
+        assert!(dropped.get());
+        assert!(got.borrow().is_none());
+        // The send was already on its way, or was withdrawn by the cancel.
+        let _ = sent.get();
+        assert_eq!(v.call(cm(&mut c), &(5,)).get()?, 10);
+        stop_client(c)?;
+        env.finish()
+    })
+});
