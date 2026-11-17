@@ -7,7 +7,7 @@
 //! own tests read by hand.
 
 use std::fmt;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
 use teseladb_raftlog::{IoDone, IoOp};
@@ -124,8 +124,10 @@ enum Route<M> {
     /// The core's shard in its node's engine.
     #[cfg(target_os = "linux")]
     Shard(super::post::ShardPost),
-    /// A queue read by hand.
+    /// A queue read by hand, with room for so many inputs.
     Queue(SyncSender<(Instant, CoreInput<M>)>),
+    /// A queue read by hand, without a bound: it allocates as inputs come, not up front.
+    Unbounded(Sender<(Instant, CoreInput<M>)>),
 }
 
 /// Hands messages to one core. Cheap to clone; usable from any thread.
@@ -163,6 +165,9 @@ impl<M: Send + 'static> CoreSender<M> {
                 Err(TrySendError::Full((_, m))) => Err(SendError::Full(m)),
                 Err(TrySendError::Disconnected((_, m))) => Err(SendError::Closed(m)),
             },
+            Route::Unbounded(q) => {
+                q.send((Instant::now(), input)).map_err(|e| SendError::Closed(e.0.1))
+            }
         }
     }
 
@@ -174,6 +179,7 @@ impl<M: Send + 'static> CoreSender<M> {
     pub fn send_waiting(&self, input: CoreInput<M>) -> Result<(), CoreInput<M>> {
         match &self.route {
             Route::Queue(q) => q.send((Instant::now(), input)).map_err(|e| e.0.1),
+            Route::Unbounded(q) => q.send((Instant::now(), input)).map_err(|e| e.0.1),
             #[cfg(target_os = "linux")]
             Route::Shard(_) => self.send(input).map_err(SendError::into_inner),
         }
@@ -185,7 +191,7 @@ impl<M: Send + 'static> CoreSender<M> {
             #[cfg(target_os = "linux")]
             Route::Shard(post) => post.is_closed(),
             // A queue says it when a send fails.
-            Route::Queue(_) => false,
+            Route::Queue(_) | Route::Unbounded(_) => false,
         }
     }
 
@@ -206,6 +212,7 @@ impl<M> Clone for CoreSender<M> {
             #[cfg(target_os = "linux")]
             Route::Shard(p) => Route::Shard(p.clone()),
             Route::Queue(q) => Route::Queue(q.clone()),
+            Route::Unbounded(q) => Route::Unbounded(q.clone()),
         };
         CoreSender { route }
     }
@@ -216,7 +223,7 @@ impl<M> fmt::Debug for CoreSender<M> {
         match &self.route {
             #[cfg(target_os = "linux")]
             Route::Shard(p) => write!(f, "CoreSender(shard {})", p.shard()),
-            Route::Queue(_) => f.write_str("CoreSender(queue)"),
+            Route::Queue(_) | Route::Unbounded(_) => f.write_str("CoreSender(queue)"),
         }
     }
 }
@@ -244,12 +251,12 @@ impl<M> CoreReceiver<M> {
     }
 }
 
-/// Room of an unbounded test channel's queue.
-const UNBOUNDED: usize = 1 << 20;
-
-/// A sender bound to a queue that is read by hand instead of a core (for tests).
+/// A sender bound to a queue that is read by hand instead of a core (for tests), without a
+/// bound. Its memory grows with what waits in it: a bounded `sync_channel` makes all its slots
+/// at once, which for a room of 2^20 inputs took a gigabyte per queue.
 pub fn core_channel<M: Send + 'static>() -> (CoreSender<M>, CoreReceiver<M>) {
-    core_channel_with(UNBOUNDED)
+    let (tx, rx) = mpsc::channel();
+    (CoreSender { route: Route::Unbounded(tx) }, CoreReceiver { rx })
 }
 
 /// [`core_channel`] with room for `cap` inputs: past them, [`CoreSender::send`] answers
