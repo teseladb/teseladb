@@ -27,6 +27,25 @@ const ENTRY_HEADER: usize = 3 * 10 + 1;
 /// The newest dictionary of each collection, by the collection's prefix (004 FR-022).
 pub(crate) type CurrentDictionaries = BTreeMap<Vec<u8>, (u64, Arc<[u8]>)>;
 
+/// Work of [`TableWriter::prepare`] that one column block counts for, in filter keys: framing
+/// and compressing a column block of a 16 KiB data block takes about what 200 keys of the filter
+/// take.
+const COLUMN_WORK: usize = 256;
+
+/// Framed length and highest mark of each data block's column block, when it has one.
+type ColumnSizes = Vec<Option<(u64, Hlc)>>;
+
+/// The end of a file worked out ahead of [`TableWriter::finish`] (FR-030).
+#[derive(Debug)]
+enum Ending {
+    /// The column blocks left to write, and those written.
+    Columns(std::vec::IntoIter<Option<(Vec<u8>, Hlc)>>, ColumnSizes),
+    /// The filter in the making, with the column blocks written (none when no block has one).
+    Filter(Option<ColumnSizes>, super::ribbon::Builder),
+    /// Both done; each is taken once by [`TableWriter::finish`].
+    Ready(Option<ColumnSizes>, Option<Vec<u8>>),
+}
+
 /// Which of a file and its history file each version of an output goes to (FR-031): the newest
 /// version of a key goes to the file, and the older ones to the history file when that newest
 /// one is a value or a deletion. Under an intent or a `Retract` they stay in the file: a read
@@ -99,6 +118,8 @@ pub(crate) struct TableWriter {
     packer: Option<Packer>,
     /// The column blocks of its data blocks (010 FR-033); none where there are no zones.
     columns: Option<ColumnWriter>,
+    /// What [`TableWriter::prepare`] did of the end of the file.
+    ending: Option<Ending>,
 }
 
 impl TableWriter {
@@ -127,6 +148,7 @@ impl TableWriter {
             block_last: Vec::new(),
             packer: Some(Packer::default()),
             columns: Some(ColumnWriter::default()),
+            ending: None,
         }
     }
 
@@ -367,27 +389,79 @@ impl TableWriter {
     /// Writes the column blocks after the last data block, one after the other (010 FR-033):
     /// each framed with the file's compression, zstd alone for a file with a dictionary. The
     /// framed length and highest mark of each, by data block; `None` when no block has one.
-    fn write_columns(&mut self) -> Option<Vec<Option<(u64, Hlc)>>> {
-        let blocks = self.columns.take()?.finish();
-        if blocks.iter().all(Option::is_none) {
-            return None;
+    /// What [`TableWriter::prepare`] left undone is done now.
+    fn write_columns(&mut self) -> Option<ColumnSizes> {
+        while !self.prepare(usize::MAX) {}
+        match &mut self.ending {
+            Some(Ending::Ready(columns, _)) => columns.take(),
+            _ => unreachable!("a prepared end is ready"),
         }
-        let method = match self.codec {
-            Codec::None => Method::None,
-            Codec::Zlib => Method::Zlib,
-            Codec::Lz4 => Method::Lz4,
-            Codec::Zstd | Codec::ZstdDict => Method::Zstd,
+    }
+
+    /// The payload of the file's filter, built by [`TableWriter::prepare`].
+    fn take_filter(&mut self) -> Vec<u8> {
+        while !self.prepare(usize::MAX) {}
+        match &mut self.ending {
+            Some(Ending::Ready(_, filter)) => filter.take().expect("the filter is taken once"),
+            _ => unreachable!("a prepared end is ready"),
+        }
+    }
+
+    /// Does part of the end of the file ahead of [`TableWriter::finish`], so that whoever writes
+    /// it serves other work in between (FR-030): it ends the open data block, then writes up to
+    /// `work / COLUMN_WORK` column blocks or puts up to `work` keys in the filter. Whether that
+    /// work is all done; [`TableWriter::finish`] then only writes the meta blocks. No version is
+    /// added once it is called.
+    pub(crate) fn prepare(&mut self, work: usize) -> bool {
+        let ending = match self.ending.take() {
+            None => {
+                if !self.data.is_empty() {
+                    self.flush_block();
+                }
+                let blocks = self.columns.take().map(ColumnWriter::finish);
+                match blocks.filter(|b| b.iter().any(Option::is_some)) {
+                    Some(b) => {
+                        let sizes = Vec::with_capacity(b.len());
+                        Ending::Columns(b.into_iter(), sizes)
+                    }
+                    None => Ending::Filter(
+                        None,
+                        super::ribbon::Builder::new(std::mem::take(&mut self.hashes)),
+                    ),
+                }
+            }
+            Some(Ending::Columns(mut left, mut sizes)) => {
+                let method = match self.codec {
+                    Codec::None => Method::None,
+                    Codec::Zlib => Method::Zlib,
+                    Codec::Lz4 => Method::Lz4,
+                    Codec::Zstd | Codec::ZstdDict => Method::Zstd,
+                };
+                for b in left.by_ref().take((work / COLUMN_WORK).max(1)) {
+                    sizes.push(b.map(|(payload, ts)| {
+                        let offset = self.taken + self.out.len() as u64;
+                        let framed = self.framed(&payload, method, offset);
+                        self.out.extend_from_slice(&framed);
+                        (framed.len() as u64, ts)
+                    }));
+                }
+                match left.len() {
+                    0 => Ending::Filter(
+                        Some(sizes),
+                        super::ribbon::Builder::new(std::mem::take(&mut self.hashes)),
+                    ),
+                    _ => Ending::Columns(left, sizes),
+                }
+            }
+            Some(Ending::Filter(columns, mut b)) => match b.step(work) {
+                Some(filter) => Ending::Ready(columns, Some(filter)),
+                None => Ending::Filter(columns, b),
+            },
+            Some(ready @ Ending::Ready(..)) => ready,
         };
-        let mut sizes = Vec::with_capacity(blocks.len());
-        for b in blocks {
-            sizes.push(b.map(|(payload, ts)| {
-                let offset = self.taken + self.out.len() as u64;
-                let framed = self.framed(&payload, method, offset);
-                self.out.extend_from_slice(&framed);
-                (framed.len() as u64, ts)
-            }));
-        }
-        Some(sizes)
+        let ready = matches!(ending, Ending::Ready(..));
+        self.ending = Some(ending);
+        ready
     }
 
     fn meta_block(&mut self, payload: &[u8]) -> Handle {
@@ -415,7 +489,8 @@ impl TableWriter {
         let column_sizes = self.write_columns();
         pad(&mut self.out);
         let meta_start = self.taken + self.out.len() as u64;
-        let filter = self.meta_block(&filter::build(&self.hashes));
+        let filter = self.take_filter();
+        let filter = self.meta_block(&filter);
         let zones = self.zones.take().and_then(ZoneBuilder::finish).map(|z| {
             let h = self.meta_block(&z);
             (h.offset, h.len)
@@ -497,6 +572,62 @@ mod tests {
         // A key that is the start of another is another key.
         assert!(!goes(b"da", 1, Kind::Put));
         assert!(goes(b"da", 0, Kind::Put));
+    }
+
+    /// FR-030: a file whose end is prepared in small steps, columns and filter, is the file
+    /// finished at once, byte for byte; each step writes few column blocks.
+    #[test]
+    fn a_file_prepared_in_steps_is_the_file_finished_at_once() {
+        use teseladb_bson::Document;
+        let doc = |i: u32| {
+            let d = Document::new().with("_id", i64::from(i)).with("n", format!("v{}", i % 7));
+            [&[crate::DOCUMENT_VALUE][..], &d.to_bytes().unwrap()].concat()
+        };
+        let write = |codec: Codec, work: Option<usize>| {
+            let mut w = TableWriter::new(4096, codec);
+            let mut file = Vec::new();
+            for i in 0..5000u32 {
+                let ik = entry::internal_key(&data_key(7, i), Hlc { physical: 5, logical: i });
+                w.add(&ik, Kind::Put, &doc(i));
+                if let Some((at, c)) = w.take() {
+                    assert_eq!(at, file.len() as u64);
+                    file.extend_from_slice(&c);
+                }
+            }
+            let mut steps = 0;
+            if let Some(work) = work {
+                let mut out = w.out.len();
+                while !w.prepare(work) {
+                    steps += 1;
+                    let wrote = w.out.len() - out;
+                    assert!(wrote <= (work / COLUMN_WORK).max(1) * 4096, "{wrote} bytes in a step");
+                    out = w.out.len();
+                }
+            }
+            let tombstone = RangeTombstone {
+                start: data_key(7, 10),
+                end: data_key(7, 20),
+                ts: Hlc { physical: 6, logical: 0 },
+            };
+            let (at, c, table) = w.finish(4, vec![tombstone]).unwrap();
+            assert_eq!(at, file.len() as u64);
+            file.extend_from_slice(&c);
+            (file, table, steps)
+        };
+        for codec in [Codec::None, Codec::Lz4] {
+            let (whole, wt, _) = write(codec, None);
+            assert!(wt.props.columns.is_some(), "the file has column blocks");
+            for work in [1, 300, 5000] {
+                let (stepped, st, steps) = write(codec, Some(work));
+                assert_eq!(stepped, whole, "{codec:?} in steps of {work}");
+                assert_eq!(st.size, wt.size);
+                assert!(steps > 1, "{steps} steps of {work}");
+            }
+        }
+        // A writer with nothing in it is prepared at once, and writes nothing.
+        let mut w = TableWriter::new(4096, Codec::None);
+        while !w.prepare(1) {}
+        assert!(w.finish(1, Vec::new()).is_none());
     }
 
     #[test]

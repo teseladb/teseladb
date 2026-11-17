@@ -264,13 +264,28 @@ pub fn start_core<D: Disk + Send + 'static>(
     tick: Duration,
     tls: Option<PeerTls>,
 ) -> CoreHandle<Cmd, Stopped<D>> {
+    start_core_built(engine, shard, h, tick, tls, move || (toy, disk))
+}
+
+/// As [`start_core`], with the toy and its disk made by `build` where the engine builds the core.
+pub fn start_core_built<D: Disk + Send + 'static>(
+    engine: &NodeEngine,
+    shard: u16,
+    h: &Hello,
+    tick: Duration,
+    tls: Option<PeerTls>,
+    build: impl FnOnce() -> (Toy, D) + Send + 'static,
+) -> CoreHandle<Cmd, Stopped<D>> {
     let seed = h.node_id.0 * 16 + u64::from(h.core);
     let cfg = CoreConfig { hello: h.clone(), tick, seed, tls, origin: Instant::now() };
     engine
         .start_core(
             shard,
             cfg,
-            move || Ok::<_, std::io::Error>((toy, InlineDisk::new(disk), None)),
+            move || {
+                let (toy, disk) = build();
+                Ok::<_, std::io::Error>((toy, InlineDisk::new(disk), None))
+            },
             |toy, disk: InlineDisk<D>, gone| (toy, disk.disk, gone),
         )
         .unwrap()

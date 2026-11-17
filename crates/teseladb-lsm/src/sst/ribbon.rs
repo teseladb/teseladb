@@ -45,61 +45,142 @@ fn rows_for(n: usize, attempt: u32) -> usize {
     base + base * attempt as usize / 10
 }
 
-/// Solves the system of `keys` over `rows` rows with `seed`, if it is consistent.
-fn solve(keys: &[(u32, u32)], seed: u32, rows: usize) -> Option<Vec<u8>> {
-    let mut coeff = vec![0u64; rows];
-    let mut result = vec![0u8; rows];
-    for &k in keys {
-        let (mut s, mut c, mut r) = row(k, seed, rows);
+/// Builds the filter of a file's keys in steps: a step adds some keys to the system, or solves
+/// some of its rows, so that whoever writes the file serves other work between two of them. The
+/// filter is the one [`build`] gives: the same keys go in, in the same order, with the same seeds.
+#[derive(Debug)]
+pub(crate) struct Builder {
+    keys: Vec<(u32, u32)>,
+    /// Growths of the rows so far, and the seed tried with them.
+    attempt: u32,
+    seed: u32,
+    /// The system: each row's coefficients and fingerprint once it holds a key.
+    coeff: Vec<u64>,
+    result: Vec<u8>,
+    /// Keys added to the system so far.
+    added: usize,
+    /// The solution, from row `solved` to the last one, once every key is in.
+    z: Vec<u8>,
+    solved: usize,
+}
+
+impl Builder {
+    /// A builder of the filter of `keys` (their hashes).
+    pub(crate) fn new(keys: Vec<(u32, u32)>) -> Builder {
+        let mut b = Builder {
+            keys,
+            attempt: 0,
+            seed: 0,
+            coeff: Vec::new(),
+            result: Vec::new(),
+            added: 0,
+            z: Vec::new(),
+            solved: 0,
+        };
+        b.restart();
+        b
+    }
+
+    /// Starts the system again with the current seed and growth.
+    fn restart(&mut self) {
+        let rows = rows_for(self.keys.len(), self.attempt);
+        self.coeff.clear();
+        self.coeff.resize(rows, 0);
+        self.result.clear();
+        self.result.resize(rows, 0);
+        self.added = 0;
+        self.z.clear();
+        self.solved = rows;
+    }
+
+    /// The next seed, or more rows after [`SEEDS`] of them: the system was inconsistent.
+    fn next_seed(&mut self) {
+        self.seed += 1;
+        if self.seed == SEEDS {
+            self.seed = 0;
+            self.attempt += 1;
+        }
+        self.restart();
+    }
+
+    /// Adds key `k`; `false` when it makes the system inconsistent.
+    fn add(&mut self, k: (u32, u32)) -> bool {
+        let rows = self.coeff.len();
+        let (mut s, mut c, mut r) = row(k, self.seed, rows);
         loop {
-            if coeff[s] == 0 {
-                coeff[s] = c;
-                result[s] = r;
-                break;
+            if self.coeff[s] == 0 {
+                self.coeff[s] = c;
+                self.result[s] = r;
+                return true;
             }
-            c ^= coeff[s];
-            r ^= result[s];
+            c ^= self.coeff[s];
+            r ^= self.result[s];
             if c == 0 {
-                if r != 0 {
-                    return None;
-                }
-                break;
+                return r == 0;
             }
             let tz = c.trailing_zeros() as usize;
             s += tz;
             c >>= tz;
         }
     }
-    let mut z = vec![0u8; rows];
-    for i in (0..rows).rev() {
-        let mut v = result[i];
-        let mut c = coeff[i] >> 1;
+
+    /// Solves row `i`, the rows after it solved.
+    fn solve_row(&mut self, i: usize) {
+        let mut v = self.result[i];
+        let mut c = self.coeff[i] >> 1;
         let mut j = i + 1;
         while c != 0 {
             let tz = c.trailing_zeros() as usize;
             j += tz;
-            v ^= z[j];
+            v ^= self.z[j];
             c >>= tz + 1;
             j += 1;
         }
-        z[i] = if coeff[i] == 0 { 0 } else { v };
+        self.z[i] = if self.coeff[i] == 0 { 0 } else { v };
     }
-    Some(z)
+
+    /// Adds up to `work` keys, or solves up to `work` rows once every key is in. The payload of
+    /// the filter when it is done (see [`build`]).
+    pub(crate) fn step(&mut self, work: usize) -> Option<Vec<u8>> {
+        let work = work.max(1);
+        if self.added < self.keys.len() {
+            let end = self.keys.len().min(self.added.saturating_add(work));
+            while self.added < end {
+                if !self.add(self.keys[self.added]) {
+                    self.next_seed();
+                    return None;
+                }
+                self.added += 1;
+            }
+            return None;
+        }
+        if self.z.is_empty() {
+            self.z.resize(self.coeff.len(), 0);
+        }
+        let stop = self.solved.saturating_sub(work);
+        while self.solved > stop {
+            self.solved -= 1;
+            self.solve_row(self.solved);
+        }
+        if self.solved > 0 {
+            return None;
+        }
+        let mut z = std::mem::take(&mut self.z);
+        z.extend_from_slice(&self.seed.to_le_bytes());
+        z.push(RIBBON);
+        Some(z)
+    }
 }
 
-/// Builds the payload of the filter of `keys` (their hashes).
+/// Builds the payload of the filter of `keys` (their hashes) at once.
+#[cfg(test)]
 pub(crate) fn build(keys: &[(u32, u32)]) -> Vec<u8> {
-    for attempt in 0.. {
-        let rows = rows_for(keys.len(), attempt);
-        for seed in 0..SEEDS {
-            if let Some(mut z) = solve(keys, seed, rows) {
-                z.extend_from_slice(&seed.to_le_bytes());
-                z.push(RIBBON);
-                return z;
-            }
+    let mut b = Builder::new(keys.to_vec());
+    loop {
+        if let Some(z) = b.step(usize::MAX) {
+            return z;
         }
     }
-    unreachable!("the rows grow until the system is consistent")
 }
 
 /// Whether the filter in `payload` (built by [`build`]) may hold the key of `hashes`.
@@ -154,6 +235,111 @@ mod tests {
                 assert!(fp * 100 < probes, "{fp} in {probes}");
             }
         }
+    }
+
+    /// The filter as it was built before [`Builder`]: the whole system at once.
+    fn built_at_once(keys: &[(u32, u32)]) -> Vec<u8> {
+        let solve = |seed: u32, rows: usize| -> Option<Vec<u8>> {
+            let mut coeff = vec![0u64; rows];
+            let mut result = vec![0u8; rows];
+            for &k in keys {
+                let (mut s, mut c, mut r) = row(k, seed, rows);
+                loop {
+                    if coeff[s] == 0 {
+                        coeff[s] = c;
+                        result[s] = r;
+                        break;
+                    }
+                    c ^= coeff[s];
+                    r ^= result[s];
+                    if c == 0 {
+                        if r != 0 {
+                            return None;
+                        }
+                        break;
+                    }
+                    let tz = c.trailing_zeros() as usize;
+                    s += tz;
+                    c >>= tz;
+                }
+            }
+            let mut z = vec![0u8; rows];
+            for i in (0..rows).rev() {
+                let mut v = result[i];
+                let mut c = coeff[i] >> 1;
+                let mut j = i + 1;
+                while c != 0 {
+                    let tz = c.trailing_zeros() as usize;
+                    j += tz;
+                    v ^= z[j];
+                    c >>= tz + 1;
+                    j += 1;
+                }
+                z[i] = if coeff[i] == 0 { 0 } else { v };
+            }
+            Some(z)
+        };
+        for attempt in 0.. {
+            let rows = rows_for(keys.len(), attempt);
+            for seed in 0..SEEDS {
+                if let Some(mut z) = solve(seed, rows) {
+                    z.extend_from_slice(&seed.to_le_bytes());
+                    z.push(RIBBON);
+                    return z;
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// The filter built in steps of `work`, and the steps it took.
+    fn built_in_steps(keys: &[(u32, u32)], work: usize) -> (Vec<u8>, usize) {
+        let mut b = Builder::new(keys.to_vec());
+        let mut steps = 1;
+        loop {
+            if let Some(z) = b.step(work) {
+                return (z, steps);
+            }
+            steps += 1;
+        }
+    }
+
+    /// A filter built in steps is the one built at once, byte for byte, and each step adds or
+    /// solves at most its share.
+    #[test]
+    fn a_filter_built_in_steps_is_the_filter_built_at_once() {
+        for n in [0usize, 1, 63, 64, 1000, 20_000] {
+            let keys: Vec<_> = (0..n).map(|i| hashes(format!("doc:{i}").as_bytes())).collect();
+            let whole = built_at_once(&keys);
+            assert_eq!(build(&keys), whole, "{n} keys at once");
+            for work in [1, 7, 1000] {
+                let (z, steps) = built_in_steps(&keys, work);
+                assert_eq!(z, whole, "{n} keys in steps of {work}");
+                let rows = whole.len() - 5;
+                assert_eq!(steps, n.div_ceil(work) + rows.div_ceil(work), "{n} keys, {work}");
+            }
+        }
+    }
+
+    /// Keys that make the first seed's system inconsistent: the builder starts again with the
+    /// next seed, as the filter built at once does, and every key is found.
+    #[test]
+    fn an_inconsistent_system_starts_again_with_another_seed() {
+        const N: usize = 300;
+        let rows = rows_for(N, 0);
+        // 70 keys whose rows all start at row 0 over 64 columns: they cannot all be independent.
+        let mut keys: Vec<_> = (0u32..)
+            .map(|i| hashes(format!("first:{i}").as_bytes()))
+            .filter(|k| row(*k, 0, rows).0 == 0)
+            .take(70)
+            .collect();
+        keys.extend((0..N - 70).map(|i| hashes(format!("rest:{i}").as_bytes())));
+        let whole = built_at_once(&keys);
+        let (z, _) = built_in_steps(&keys, 16);
+        assert_eq!(z, whole);
+        let (rows, seed) = parse(&z).unwrap();
+        assert!(seed > 0, "the first seed fails");
+        assert!(keys.iter().all(|k| may_contain(&z[..rows], seed, *k)));
     }
 
     #[test]
