@@ -552,6 +552,7 @@ impl Reader {
                 self.failure.get_or_insert(corrupt(&table, s));
                 return;
             };
+            let payload = own_bytes(payload, &bytes);
             // Only the block the read was asked for is held for its reader; the ones read
             // ahead go to the cache.
             if s == i {
@@ -559,6 +560,17 @@ impl Reader {
             }
             self.cache.insert(table.number, s as u32, payload);
         }
+    }
+}
+
+/// `payload` with bytes of its own when it is a part of the bytes of `read` (a block stored
+/// without compression): a cache that kept the part would keep the whole read, the pages around
+/// the block and the blocks read with it.
+pub(crate) fn own_bytes(payload: Bytes, read: &Bytes) -> Bytes {
+    if payload.len() < read.len() && read.as_ptr_range().contains(&payload.as_ptr()) {
+        Bytes::copy_from_slice(&payload)
+    } else {
+        payload
     }
 }
 
@@ -1225,5 +1237,24 @@ impl Scan {
                 return ColumnStep::Step(Step::Failed(e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_block_cut_from_a_larger_read_gets_bytes_of_its_own() {
+        let read = Bytes::from_vec((0..=255u8).cycle().take(3 * 4096).collect());
+        let part = read.slice(100..4196);
+        let owned = own_bytes(part.clone(), &read);
+        assert_eq!(owned, part);
+        assert!(!read.as_ptr_range().contains(&owned.as_ptr()), "a copy, not a part of the read");
+        // The whole read, and bytes from elsewhere (a decompressed block), stay as they are.
+        assert_eq!(own_bytes(read.clone(), &read).as_ptr(), read.as_ptr());
+        let other = Bytes::from_vec(vec![1; 10]);
+        assert_eq!(own_bytes(other.clone(), &read).as_ptr(), other.as_ptr());
     }
 }

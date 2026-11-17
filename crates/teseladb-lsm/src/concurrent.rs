@@ -206,7 +206,9 @@ impl SharedLsm {
     pub fn supply(&self, need: &BlockNeed, bytes: &[u8]) -> Result<(), LsmError> {
         let raw = Bytes::copy_from_slice(bytes);
         let payload =
-            need.table.payload(need.block, &raw).map_err(|_| corrupt(&need.table, need.block))?;        let (file, block) = (need.table.number, need.block);
+            need.table.payload(need.block, &raw).map_err(|_| corrupt(&need.table, need.block))?;
+        let payload = read::own_bytes(payload, &raw);
+        let (file, block) = (need.table.number, need.block);
         let shard = self.inner.shard(file, block);
         // A miss already cost a read of the disk; a moment's retry keeps the block for the next
         // reads instead of dropping it when another thread holds the shard.
