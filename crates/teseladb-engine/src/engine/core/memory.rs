@@ -755,6 +755,7 @@ mod engine_allocator {
     const MADV_HUGEPAGE: c_int = 14;
     const MADV_NOHUGEPAGE: c_int = 15;
     const MADV_DONTDUMP: c_int = 16;
+    const MADV_DONTNEED: c_int = 4;
     const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
     const MPOL_PREFERRED: c_int = 1;
     const MPOL_MF_MOVE: u32 = 1 << 1;
@@ -1939,6 +1940,10 @@ mod engine_allocator {
     /// Number of free span lists (one per power-of-two span size).
     pub const NR_SPAN_LISTS: usize = 32;
 
+    /// The smallest free span whose pages [`release_free_memory`] gives back to the system: a
+    /// huge page, so that a transparent huge page goes whole and is not split.
+    pub const RELEASE_MIN_PAGES: u32 = (HUGE_PAGE_SIZE / PAGE_SIZE) as u32;
+
     /// A shard's whole allocator state: the page array, free span lists, small pools, reclaimers and statistics.
     pub struct CpuPages {
         small_pools: SmallPoolArray<false>,
@@ -1973,6 +1978,14 @@ mod engine_allocator {
         // `*mut CpuPages`, and `!Unpin` keeps the remaining `&mut CpuPages` from asserting
         // uniqueness over the object (as for the crate's intrusive types); it never moves.
         _pin: std::marker::PhantomPinned,
+        /// The free spans of at least [`RELEASE_MIN_PAGES`] pages that the last
+        /// [`CpuPages::release_free_spans`] found, as (first page, pages), in order.
+        release_seen: Vec<(u32, u32)>,
+        /// Those of them whose pages it gave back to the system, in order.
+        release_done: Vec<(u32, u32)>,
+        /// The pool is a shared file mapping (hugetlbfs), whose pages `MADV_DONTNEED` does not
+        /// free: nothing is given back.
+        file_backed: bool,
     }
 
     static CPU_ID_GEN: AtomicU32 = AtomicU32::new(0);
@@ -2002,11 +2015,73 @@ mod engine_allocator {
                 heap_prof_sampler: ManuallyDrop::new(None),
                 sampled_small_pools: SmallPoolArray::new(),
                 _pin: std::marker::PhantomPinned,
+                release_seen: Vec::new(),
+                release_done: Vec::new(),
+                file_backed: false,
             }
         }
 
         fn mem(&self) -> *mut u8 {
             self.memory
+        }
+
+        /// The free spans of at least [`RELEASE_MIN_PAGES`] pages, as (first page, pages), in
+        /// order.
+        fn large_free_spans(&self) -> Vec<(u32, u32)> {
+            let mut spans = Vec::new();
+            for list in &self.free_spans[index_of(RELEASE_MIN_PAGES) as usize..] {
+                let mut idx = list._front;
+                while idx != 0 {
+                    // SAFETY: a list of free spans links pages of this shard's page array by
+                    // index, and a free span's head page holds its size.
+                    let (size, next) = unsafe {
+                        let p = pg(self.pages, idx as usize);
+                        ((*p).span_size, (*p).link._next)
+                    };
+                    spans.push((idx, size));
+                    idx = next;
+                }
+            }
+            spans.sort_unstable();
+            spans
+        }
+
+        /// Gives back to the system the pages of the free spans of at least
+        /// [`RELEASE_MIN_PAGES`] pages that were already free, the same spans, at the previous
+        /// call, and that no call gave back since: the memory a peak used and no longer does,
+        /// which the shard would otherwise keep resident for good. A span the next allocation
+        /// takes is faulted in again, zeroed, page by page; one that stays free costs one
+        /// `madvise`. Returns the bytes of the spans given back.
+        fn release_free_spans(&mut self) -> usize {
+            if self.file_backed || self.memory.is_null() {
+                return 0;
+            }
+            let now = self.large_free_spans();
+            let mut released = 0;
+            let mut done = Vec::with_capacity(now.len());
+            for &(start, pages) in &now {
+                let kept = self.release_done.binary_search(&(start, pages)).is_ok();
+                let stayed = kept || self.release_seen.binary_search(&(start, pages)).is_ok();
+                if !stayed {
+                    continue;
+                }
+                if !kept {
+                    let len = pages as usize * PAGE_SIZE;
+                    // SAFETY: the span lies within the shard's anonymous private mapping and
+                    // is free: the allocator keeps nothing in a free span's memory (its head
+                    // and tail live in the page array), so its contents may become zeros.
+                    let at = unsafe { self.memory.add(start as usize * PAGE_SIZE) };
+                    // SAFETY: as above.
+                    if unsafe { madvise(at.cast(), len, MADV_DONTNEED) } != 0 {
+                        continue;
+                    }
+                    released += len;
+                }
+                done.push((start, pages));
+            }
+            self.release_done = done;
+            self.release_seen = now;
+            released
         }
 
         // The set of allocation sites: the counters are Cells, and hashing and equality read only
@@ -3946,6 +4021,8 @@ mod engine_allocator {
             });
             // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem).
             unsafe { (*get_cpu_mem()).replace_memory_backing(&sys_alloc) }?;
+            // SAFETY: the thread's cpu_mem, one field written (see get_cpu_mem).
+            unsafe { (*get_cpu_mem()).file_backed = true };
         }
         // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem).
         unsafe { (*get_cpu_mem()).resize(total, &sys_alloc) }?;
@@ -4012,6 +4089,20 @@ mod engine_allocator {
     pub fn free_memory() -> usize {
         // SAFETY: the thread's cpu_mem, one field read (see get_cpu_mem).
         unsafe { (*get_cpu_mem()).nr_free_pages as usize * PAGE_SIZE }
+    }
+
+    /// Gives back to the system the pages of the current shard's free spans of at least
+    /// [`RELEASE_MIN_PAGES`] pages that stayed free since the previous call (the same span,
+    /// free at both calls; a span taken and freed again between them counts as free) and that
+    /// no call gave back yet; returns the bytes of those spans (pages never touched count too:
+    /// the system has none of them to give back). Its free memory is unchanged: a span given
+    /// back is faulted in again, zeroed, when it is next allocated. Nothing is given back from
+    /// a pool on hugetlbfs. The reactor calls it at most once a second, when it is about to
+    /// sleep. The thread's pool must be set up.
+    pub fn release_free_memory() -> usize {
+        // SAFETY: the thread's cpu_mem, borrowed for this one call (see get_cpu_mem); it calls
+        // out to nothing but `madvise`.
+        unsafe { (*get_cpu_mem()).release_free_spans() }
     }
 
     /// Frees into this shard's pools the objects other threads freed into its memory (its
@@ -5241,6 +5332,12 @@ mod default_allocator {
     /// Without the engine allocator: always 1 GiB (see [`stats`]).
     pub fn free_memory() -> usize {
         stats().free_memory()
+    }
+
+    /// Without the engine allocator the system's allocator keeps the memory: nothing given
+    /// back here, always 0.
+    pub fn release_free_memory() -> usize {
+        0
     }
 
     /// Without the engine allocator there is no cross-shard list: always false.
