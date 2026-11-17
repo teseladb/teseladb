@@ -73,6 +73,40 @@ struct Part {
 }
 
 impl ServerBackend {
+    /// [`teseladb_wire::commands::Backend::scatter_groups_spans`]: the parts of every span
+    /// (the partitions of a collection, D-186). Parts on several cores go to their cores all at
+    /// once, each folding where its documents are, instead of one after the other on this
+    /// thread; parts on one core go as one span does.
+    pub(super) fn scatter_spans(
+        &mut self,
+        spans: &[(Vec<u8>, Vec<u8>)],
+        program: &Arc<Program>,
+        concern: ReadConcern,
+    ) -> Option<Scattered> {
+        if !self.plain_reads() {
+            return None;
+        }
+        let mut pending = Vec::new();
+        for (s, e) in spans {
+            pending.extend(self.parts_of(s, e)?);
+        }
+        let cores: std::collections::BTreeSet<u16> = pending.iter().map(|p| p.core).collect();
+        if cores.len() < 2 {
+            let mut all = Scattered::default();
+            for (s, e) in spans {
+                let part = self.scatter_together((s, e), program, concern)?;
+                all.parts.extend(part.parts);
+                all.examined += part.examined;
+            }
+            return Some(all);
+        }
+        let Some(found) = self.scatter_parts(pending, program, concern) else {
+            note_fallback(Fallback::Fold);
+            return None;
+        };
+        Some(found)
+    }
+
     /// [`teseladb_wire::commands::Backend::scatter_groups`]: `None` for a read at a command's
     /// mark or with a read preference, a span of one range that goes to its core unless the
     /// program takes columns (010 FR-033), and whenever the program, a core or a leader declines,

@@ -1505,6 +1505,15 @@ impl Backend for ServerBackend {
         Ok(self.scatter_together(span, program, concern))
     }
 
+    fn scatter_groups_spans(
+        &mut self,
+        spans: &[(Vec<u8>, Vec<u8>)],
+        program: &Arc<teseladb_exec::pipeline::Program>,
+        concern: ReadConcern,
+    ) -> Result<Option<teseladb_wire::commands::Scattered>, CommandError> {
+        Ok(self.scatter_spans(spans, program, concern))
+    }
+
     fn fetch_documents(
         &mut self,
         keys: &[Vec<u8>],

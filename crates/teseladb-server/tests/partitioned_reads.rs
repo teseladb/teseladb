@@ -17,7 +17,10 @@ const ROUNDS: i32 = 300;
 fn count_and_sum(c: &mut Client) -> (i64, i64) {
     let matched = Document::new().with("$match", Document::new().with("c", 1));
     let sum = |f: Value| Value::Document(Document::new().with("$sum", f));
-    let spec = Document::new().with("_id", Value::Null).with("n", sum(1.into())).with("v", sum("$v".into()));
+    let spec = Document::new()
+        .with("_id", Value::Null)
+        .with("n", sum(1.into()))
+        .with("v", sum("$v".into()));
     let group = Document::new().with("$group", spec);
     let cmd = Document::new()
         .with("aggregate", "c")
@@ -64,7 +67,9 @@ fn a_client_s_aggregation_sees_each_write_it_was_answered() {
                 .with("u", Document::new().with("$inc", Document::new().with("v", 1)))
                 .with("multi", true);
             let updates = Value::Array(vec![u.into()]);
-            assert!(ok(&c.run("app", Document::new().with("update", "c").with("updates", updates))));
+            assert!(
+                ok(&c.run("app", Document::new().with("update", "c").with("updates", updates)))
+            );
             v += n;
         }
         assert_eq!(count_and_sum(&mut c), (n, v), "round {round}");

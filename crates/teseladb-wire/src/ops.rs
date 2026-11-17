@@ -1232,17 +1232,12 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         // are stored, and their partial groups join the others' (D-186). One that declines sends
         // the caller to read the documents and run the pipeline itself.
         if let Some(spans) = self.partition_spans(span.0, span.1) {
-            let mut all = crate::commands::Scattered::default();
-            for (s, e) in &spans {
-                let Some(part) = self.call(|b| b.scatter_groups((s, e), program, concern))? else {
-                    return Ok(None);
-                };
-                all.parts.extend(part.parts);
-                all.examined += part.examined;
-            }
+            let found = self.call(|b| b.scatter_groups_spans(&spans, program, concern))?;
             self.check()?;
-            self.report.docs += all.examined as u64;
-            return Ok(Some(all));
+            if let Some(s) = &found {
+                self.report.docs += s.examined as u64;
+            }
+            return Ok(found);
         }
         let found = self.call(|b| b.scatter_groups(span, program, concern))?;
         self.check()?;

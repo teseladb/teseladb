@@ -616,6 +616,24 @@ pub trait Backend {
     ) -> Result<Option<Scattered>, CommandError> {
         Ok(None)
     }
+    /// [`Backend::scatter_groups`] over several spans at once (the partitions of a collection,
+    /// D-186): their parts all start before any is awaited. By default one span after the other.
+    fn scatter_groups_spans(
+        &mut self,
+        spans: &[(Vec<u8>, Vec<u8>)],
+        program: &std::sync::Arc<teseladb_exec::pipeline::Program>,
+        concern: ReadConcern,
+    ) -> Result<Option<Scattered>, CommandError> {
+        let mut all = Scattered::default();
+        for (s, e) in spans {
+            let Some(part) = self.scatter_groups((s, e), program, concern)? else {
+                return Ok(None);
+            };
+            all.parts.extend(part.parts);
+            all.examined += part.examined;
+        }
+        Ok(Some(all))
+    }
     /// The documents stored at `keys`, an index scan's entries, read together (010 FR-027): a
     /// backend whose ranges live on several nodes groups them by range and asks each leader for
     /// its batch at once. `filter` is the scan's residual filter in BSON when the leader may
