@@ -35,7 +35,7 @@ mod system;
 pub use system::{LIST_SAMPLED_QUERIES, SHARDED_DATA_DISTRIBUTION};
 
 pub use group::{Fed, PartialGroups};
-pub use scatter::{Input, Program, Scatter};
+pub use scatter::{Input, Program, RowFilter, Scatter};
 pub use shape::projected_expr;
 pub use stages::check_exprs;
 pub use system::{LIST_SEARCH_INDEXES, scale_of};

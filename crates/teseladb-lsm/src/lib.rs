@@ -74,8 +74,8 @@ mod version;
 
 pub use cache::BlockMemory;
 pub use concurrent::{
-    BlockNeed, SharedBackScan, SharedLsm, SharedRead, SharedScan, SharedStep, SharedView,
-    ViewCache, outside_probes,
+    BlockNeed, SharedBackScan, SharedColumnStep, SharedLsm, SharedRead, SharedScan, SharedStep,
+    SharedView, ViewCache, outside_probes,
 };
 pub use config::{Codec, Encryption, LsmConfig};
 pub use shared::Published;

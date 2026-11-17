@@ -413,3 +413,68 @@ fn bytes_that_are_not_a_program_do_not_decode() {
     negative.insert("l", -1i64);
     assert!(program(negative).is_none());
 }
+
+/// The rows of `part` the program's row filter keeps, taken a batch of 64 at a time as a reader
+/// hands them over (010 FR-027).
+fn kept(
+    filter: &teseladb_exec::pipeline::RowFilter,
+    part: &[(Vec<u8>, Vec<u8>)],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    for batch in part.chunks(64) {
+        let bytes: Vec<&[u8]> = batch.iter().map(|(_, b)| b.as_slice()).collect();
+        let keep = filter.keep(&bytes);
+        out.extend(
+            batch.iter().enumerate().filter(|(i, _)| (keep >> i) & 1 == 1).map(|(_, r)| r.clone()),
+        );
+    }
+    out
+}
+
+#[test]
+fn a_program_over_the_rows_its_filter_keeps_gives_what_it_gives_over_all() {
+    for seed in 1..=40u64 {
+        let mut rng = Rng(seed * 0x9E37_79B9);
+        let n = 1 + rng.below(400);
+        let input = docs(&mut rng, n, any);
+        let rows = parts(&mut rng, &input);
+        for stages in pipelines() {
+            for sbe in [false, true] {
+                let pipeline = parse(&stages);
+                let split = pipeline.scatter(&stages, sbe, PLENTY.limit).expect("splits");
+                let filter = split.program().row_filter().expect("its filter parses");
+                let filtered: Vec<Vec<(Vec<u8>, Vec<u8>)>> =
+                    rows.iter().map(|part| kept(&filter, part)).collect();
+                assert_eq!(
+                    outcome(scattered(&stages, &filtered, &PLENTY, sbe)),
+                    outcome(scattered(&stages, &rows, &PLENTY, sbe)),
+                    "seed {seed} {stages:?} {sbe}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_row_filter_keeps_what_matches_and_a_batch_whose_frame_does_not_read() {
+    let stages = vec![
+        Document::new().with("$match", Document::new().with("w", 2)),
+        Document::new().with("$group", Document::new().with("_id", Value::Null)),
+    ];
+    let split = parse(&stages).scatter(&stages, false, PLENTY.limit).expect("splits");
+    let filter = split.program().row_filter().expect("its filter parses");
+    let doc = |w: i32| Document::new().with("_id", 1).with("w", w).to_bytes().expect("small");
+    let (two, three) = (doc(2), doc(3));
+    assert_eq!(filter.keep(&[&three, &two, &three]), 0b010);
+    // A frame that does not read: the whole batch goes to the program, which declines.
+    assert_eq!(filter.keep(&[&three, b"\x01", &two]), 0b111);
+    let none: Vec<&[u8]> = vec![three.as_slice(); 64];
+    assert_eq!(filter.keep(&none), 0);
+    // Without `$match` every document goes.
+    let all = vec![Document::new().with("$group", Document::new().with("_id", Value::Null))];
+    let split = parse(&all).scatter(&all, false, PLENTY.limit).expect("splits");
+    let every = split.program().row_filter().expect("no filter");
+    let many: Vec<&[u8]> = vec![three.as_slice(); 64];
+    assert_eq!(every.keep(&many), u64::MAX);
+    assert_eq!(every.keep(&many[..5]), 0b11111);
+}

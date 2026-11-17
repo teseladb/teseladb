@@ -507,6 +507,59 @@ impl ServerBackend {
         })
     }
 
+    /// As [`ServerBackend::scan_matching_outside`] for an aggregation's part that takes the
+    /// columns `want` (010 FR-033): the data blocks the storage gives as their column blocks come
+    /// whole, the other documents only when `keep` accepts them, all in key order, with the
+    /// documents examined and where the scan goes on. `None` when the read goes to the core.
+    pub(super) fn scan_pieces_outside(
+        &mut self,
+        (start, end): (&[u8], &[u8]),
+        examine: usize,
+        concern: ReadConcern,
+        (keep, prune): (&mut teseladb_wire::commands::Keep<'_>, Prune<'_>),
+        want: Arc<[String]>,
+    ) -> Option<teseladb_range::view::Pieces> {
+        let (g, core, range_end) =
+            unrouted(self.h.routes.span_of(&mut self.outside.routes, start))?;
+        let hi = match range_end.is_empty() || end <= range_end {
+            true => end.to_vec(),
+            false => range_end.to_vec(),
+        };
+        let core = usize::from(core);
+        let (view, begun) = self.view_for_scan(core, g)?;
+        if self.outside.caches.len() <= core {
+            self.outside.caches.resize_with(core + 1, ViewCache::default);
+        }
+        let origin = self.h.origin;
+        let asked = std::cell::Cell::new(None);
+        let now = || {
+            let at = Instant::now();
+            asked.set(Some(at));
+            let since = at.saturating_duration_since(origin);
+            Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
+        };
+        let dir = self.h.data_dir.clone();
+        let Outside { caches, files, .. } = &mut self.outside;
+        let supply = |need: &BlockNeed| {
+            let Some(dir) = dir.as_deref() else { return false };
+            block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
+        };
+        let span = (start, hi.as_slice());
+        let most = (examine, MAX_SCAN_BLOCKS, &begun);
+        let cache = &mut caches[core];
+        let Some(mut read) =
+            view.scan_pieces_begun(cache, span, most, now, concern, supply, (keep, prune), want)
+        else {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        self.tally(core, g, start, asked.get().unwrap_or_else(Instant::now));
+        // It stopped at its number of documents, or at the end of this range's part: the span
+        // goes on in the next range unless that was its end.
+        read.next = read.next.or_else(|| (hi.as_slice() < end).then_some(hi));
+        Some(read)
+    }
+
     /// The live documents of collection `coll` in `[start, end)`, its documents' keys, added up
     /// from the counts each range's view carries, on this thread (H-004 of the native tests,
     /// 005 FR-028); `None` when a range has no view, its counts are estimated or a write holds

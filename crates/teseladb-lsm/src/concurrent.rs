@@ -16,6 +16,7 @@ use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
 
 use crate::cache::BlockCache;
+use crate::columnar::ColumnStep;
 use crate::error::LsmError;
 use crate::read::{self, Blocks, Fetch, Found, Item, Lookup, ReadToken, Scan, Step, corrupt};
 use crate::read_back::BackScan;
@@ -94,6 +95,15 @@ pub enum SharedStep {
     Need(BlockNeed),
     /// The scan failed.
     Failed(LsmError),
+}
+
+/// What a step of a scan from another thread that takes columns gives (010 FR-033).
+#[derive(Debug)]
+pub enum SharedColumnStep {
+    /// A step as [`SharedScan::next`] gives.
+    Step(SharedStep),
+    /// The next documents of the scan, in key order, as the columns of their block.
+    Columns(crate::columnar::Columns),
 }
 
 /// The view one reader thread keeps between its reads ([`SharedLsm::view_cached`]), with the LSM
@@ -384,6 +394,32 @@ impl SharedScan {
     /// Data blocks the scan passed over by their zone maps so far (FR-039).
     pub fn skipped_blocks(&self) -> u64 {
         self.scan.skipped_blocks()
+    }
+
+    /// The scan taking each data block it may as its column block, with the columns of the
+    /// top-level fields `want` (010 FR-033), as the core's [`Scan::with_columns`]:
+    /// [`SharedScan::next_columns`] gives those batches in key order among the other documents.
+    pub fn with_columns(self, want: Arc<[String]>) -> SharedScan {
+        SharedScan { scan: self.scan.with_columns(want) }
+    }
+
+    /// [`SharedScan::next_pruned`] for a scan [`SharedScan::with_columns`]: the next document,
+    /// or the next batch of them as the columns of their block.
+    pub fn next_columns(
+        &mut self,
+        shared: &SharedLsm,
+        prune: Option<&dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool>,
+    ) -> SharedColumnStep {
+        let mut s = Source { inner: &shared.inner, need: None };
+        match self.scan.next_columns_with(&mut s, prune) {
+            ColumnStep::Columns(c) => SharedColumnStep::Columns(c),
+            ColumnStep::Step(Step::Item(i)) => SharedColumnStep::Step(SharedStep::Item(i)),
+            ColumnStep::Step(Step::Done) => SharedColumnStep::Step(SharedStep::Done),
+            ColumnStep::Step(Step::Miss(_)) => {
+                SharedColumnStep::Step(SharedStep::Need(s.need.expect("a miss names its block")))
+            }
+            ColumnStep::Step(Step::Failed(e)) => SharedColumnStep::Step(SharedStep::Failed(e)),
+        }
     }
 
     fn step(

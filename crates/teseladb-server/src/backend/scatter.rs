@@ -5,6 +5,11 @@
 //! (H-051 of the native tests), each part again at once for every range that has more. The
 //! parts come back in key order, which the coordinator merges in.
 //!
+//! A range this node leads is read first from the view its core published, on the client's
+//! thread, and the program runs there (005 FR-028): the documents its filter rules out are not
+//! copied, and the core spends nothing on the aggregation, so the writes of a hot range do not
+//! queue behind its parts. Only a range whose view does not serve the read goes to its core.
+//!
 //! A range this node does not lead gets the program in bytes inside the request its core
 //! forwards to the leader ([`RemoteReq::Pushed`]); the leader runs it on its core over its part
 //! and answers the partial groups in bytes, which merge with those of this node's cores.
@@ -15,14 +20,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use teseladb_io::engine::answer as mpsc;
 
-use teseladb_exec::pipeline::{PartialGroups, Program};
+use teseladb_exec::pipeline::{PartialGroups, Program, RowFilter};
 use teseladb_io::engine::CoreInput;
 use teseladb_range::host::RangeError;
 use teseladb_range::read::ReadConcern;
 use teseladb_range::view::RangeViews;
+use teseladb_stages::Stage;
 use teseladb_wire::commands::Scattered;
 
-use super::{CORE_SCAN_PART, ServerBackend};
+use super::{CORE_SCAN_PART, ServerBackend, stage_since};
 use crate::data::{DataReply, DataReq, Fold, Folded};
 use crate::data_wire::{RemoteReply, RemoteReq};
 use crate::logic::NodeMsg;
@@ -33,10 +39,23 @@ static SCATTERED: AtomicU64 = AtomicU64::new(0);
 /// Parts of those aggregations whose program went to the leader of their range on another node.
 static SENT_AWAY: AtomicU64 = AtomicU64::new(0);
 
+/// Parts of those aggregations read from their range's view and folded on the client's thread.
+static OUTSIDE: AtomicU64 = AtomicU64::new(0);
+/// Most documents one part of an aggregation read on the client's thread examines: the reader
+/// also stops at a megabyte of blocks read from their files (005 FR-033), and the thread offers
+/// to give way between parts.
+const OUTSIDE_PART: usize = 4 * CORE_SCAN_PART;
+
 /// Parts of split aggregations whose program this node sent to the leader of their range on
 /// another node, since the process started (010 FR-034).
 pub fn scattered_parts_sent_away() -> u64 {
     SENT_AWAY.load(Ordering::Relaxed)
+}
+
+/// Parts of split aggregations read from the views of the ranges this node leads and folded on
+/// the client's thread, since the process started (010 FR-034, 005 FR-028).
+pub fn scattered_parts_outside() -> u64 {
+    OUTSIDE.load(Ordering::Relaxed)
 }
 
 /// Aggregations whose `$match`es and partial `$group` ran on the cores that own the ranges, all
@@ -55,11 +74,13 @@ struct Part {
 
 impl ServerBackend {
     /// [`teseladb_wire::commands::Backend::scatter_groups`]: `None` for a read at a command's
-    /// mark or with a read preference, a span of one range unless the program takes columns (010
-    /// FR-033), and whenever a core or a leader declines, a range does not answer or its answer
-    /// does not read; the caller then reads the span.
+    /// mark or with a read preference, a span of one range that goes to its core unless the
+    /// program takes columns (010 FR-033), and whenever the program, a core or a leader declines,
+    /// a range does not answer or its answer does not read; the caller then reads the span. The
+    /// ranges whose views serve the read are folded on this thread first
+    /// ([`ServerBackend::fold_outside`]), the others go to their cores.
     pub(super) fn scatter_together(
-        &self,
+        &mut self,
         (start, end): (&[u8], &[u8]),
         program: &Arc<Program>,
         concern: ReadConcern,
@@ -68,15 +89,105 @@ impl ServerBackend {
             return None;
         }
         let pending = self.parts_of(start, end)?;
-        // One range goes to its core too when the program takes columns (010 FR-033).
-        if pending.is_empty() || (pending.len() < 2 && program.columns().is_none()) {
+        if pending.is_empty() {
             return None;
         }
-        let found = self.scatter_parts(pending, program, concern);
-        if found.is_none() {
+        // The ranges this node leads first, on this thread from their views.
+        let Some((mut parts, mut examined, rest)) = self.fold_outside(pending, program, concern)
+        else {
             note_fallback(Fallback::Fold);
+            return None;
+        };
+        if rest.is_empty() {
+            SCATTERED.fetch_add(1, Ordering::Relaxed);
+            return Some(Scattered { parts, examined });
         }
-        found
+        // One range goes to its core too when the program takes columns (010 FR-033).
+        if parts.is_empty() && rest.len() < 2 && program.columns().is_none() {
+            return None;
+        }
+        let found = self.scatter_parts(rest, program, concern);
+        let Some(found) = found else {
+            note_fallback(Fallback::Fold);
+            return None;
+        };
+        parts.extend(found.parts);
+        examined += found.examined;
+        Some(Scattered { parts, examined })
+    }
+
+    /// Runs `program` on this thread over the parts of `pending`, in key order, while their
+    /// ranges' views serve them (005 FR-028): each part is read from the view with the
+    /// program's filter applied where the documents are read and the blocks its zone maps rule
+    /// out passed over (010 FR-027, 004 FR-039), and folded into its partial groups here. The
+    /// cores of hot ranges then spend nothing on the aggregation and their writes do not queue
+    /// behind its parts, and the parts do not wait for a turn of a busy core. Gives the
+    /// partial groups of the parts read, the documents examined and the parts left, from the
+    /// first whose view did not serve it, for their cores; `None` when the program declines.
+    fn fold_outside(
+        &mut self,
+        pending: Vec<Part>,
+        program: &Arc<Program>,
+        concern: ReadConcern,
+    ) -> Option<(Vec<PartialGroups>, usize, Vec<Part>)> {
+        let mut groups = Vec::new();
+        let mut examined = 0usize;
+        let Some(filter) = program.row_filter() else { return Some((groups, examined, pending)) };
+        // The fields the program reads, when the blocks may come as their columns (010 FR-033).
+        let want: Option<Arc<[String]>> = program.columns().map(Into::into);
+        let mut parts = pending.into_iter();
+        while let Some(mut p) = parts.next() {
+            loop {
+                let span = (p.from.as_slice(), p.stop.as_slice());
+                let read = match leads_here(&self.h.views, &p) {
+                    true => {
+                        self.fold_part_outside(span, (program, &filter, want.as_ref()), concern)?
+                    }
+                    false => None,
+                };
+                let Some((found, n, next)) = read else {
+                    return Some((groups, examined, std::iter::once(p).chain(parts).collect()));
+                };
+                groups.push(found);
+                examined += n;
+                match next.filter(|n| *n < p.stop) {
+                    Some(next) => p.from = next,
+                    None => break,
+                }
+            }
+        }
+        Some((groups, examined, Vec::new()))
+    }
+
+    /// One part of `span` read from its range's view and folded by `program` on this thread
+    /// ([`ServerBackend::fold_outside`]): its partial groups, the documents it examined and where
+    /// the span goes on. `Some(None)` when the view does not serve it; `None` when the program
+    /// declines.
+    fn fold_part_outside(
+        &mut self,
+        span: (&[u8], &[u8]),
+        (program, filter, want): (&Program, &RowFilter, Option<&Arc<[String]>>),
+        concern: ReadConcern,
+    ) -> Option<Option<(PartialGroups, usize, Option<Vec<u8>>)>> {
+        self.yield_between_reads();
+        let began = Instant::now();
+        let mut keep = |batch: &[&[u8]]| filter.keep(batch);
+        let prune = |z: &dyn teseladb_keys::zone::Zones| filter.block_may_match(z);
+        let read = match want {
+            Some(want) => self
+                .scan_pieces_outside(span, OUTSIDE_PART, concern, (&mut keep, &prune), want.clone())
+                .map(|r| {
+                    let (inputs, _, _) = crate::data::inputs_of(&r.pieces, usize::MAX);
+                    (program.run_inputs(&inputs), r.examined, r.next)
+                }),
+            None => self
+                .scan_matching_outside(span, OUTSIDE_PART, concern, (&mut keep, &prune))
+                .map(|m| (program.run(&m.rows), m.examined, m.next)),
+        };
+        let Some((found, examined, next)) = read else { return Some(None) };
+        stage_since(Stage::ScanOutside, began);
+        OUTSIDE.fetch_add(1, Ordering::Relaxed);
+        Some(Some((found?, examined, next)))
     }
 
     /// Runs `program` over the ranges of `pending`, all at once and each in parts until its
