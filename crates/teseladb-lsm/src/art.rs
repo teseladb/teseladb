@@ -1083,11 +1083,11 @@ mod tests {
         let n: u32 = if cfg!(miri) { 60 } else { 3000 };
         let mut m: Art<Counted> = Art::new(BYTES_ORDER);
         for k in 0..n {
-            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+            m.insert(k.to_be_bytes(), Counted(alive.clone()));
         }
         // Written again: the replaced values are retired, and freed by the teardown too.
         for k in 0..n / 2 {
-            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+            m.insert(k.to_be_bytes(), Counted(alive.clone()));
         }
         let before = Arc::strong_count(&alive);
         assert_eq!(before, 1 + n as usize + n as usize / 2);
@@ -1106,7 +1106,7 @@ mod tests {
         // A teardown dropped half way frees the rest.
         let mut m: Art<Counted> = Art::new(BYTES_ORDER);
         for k in 0..n {
-            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+            m.insert(k.to_be_bytes(), Counted(alive.clone()));
         }
         let mut t = m.teardown();
         t.step(5);
