@@ -2890,6 +2890,11 @@ pub mod uring {
     pub const IORING_OP_POLL_ADD: u8 = 6;
     /// Opcode: remove a poll.
     pub const IORING_OP_POLL_REMOVE: u8 = 7;
+    /// `IORING_OP_POLL_ADD` flag (in `len`): post a completion on every wake-up instead of
+    /// once (Linux 5.13).
+    pub const IORING_POLL_ADD_MULTI: u32 = 1 << 0;
+    /// CQE flag: the request stays armed and will post more completions.
+    pub const IORING_CQE_F_MORE: u32 = 1 << 1;
     /// Opcode: `sendmsg`.
     pub const IORING_OP_SENDMSG: u8 = 9;
     /// Opcode: `recvmsg`.
@@ -3684,6 +3689,19 @@ pub mod uring {
         unsafe { (*sqe).rw_flags = poll_mask.to_le() };
     }
 
+    /// A poll that stays armed and posts a completion, flagged `IORING_CQE_F_MORE` while it
+    /// stays armed, on every wake-up of `fd`.
+    ///
+    /// # Safety
+    /// As [`io_uring_prep_poll_add`].
+    pub unsafe fn io_uring_prep_poll_multishot(sqe: *mut IoUringSqe, fd: i32, poll_mask: u32) {
+        // SAFETY: forwarded from the caller.
+        unsafe {
+            io_uring_prep_poll_add(sqe, fd, poll_mask);
+            (*sqe).len = IORING_POLL_ADD_MULTI;
+        }
+    }
+
     ///
     /// # Safety
     /// `sqe` is an entry of a ring, from `io_uring_get_sqe`, not yet submitted; the buffers, iovecs, messages and addresses passed stay valid for the kernel until the request completes.
@@ -4039,6 +4057,11 @@ impl UringPollableFdState {
 pub struct RecurringEventfdOrTimerfdCompletion {
     fd_kc: FdKernelCompletion,
     _armed: bool,
+    /// The poll is queued multishot (it stays armed across completions); cleared for good
+    /// when the kernel rejects multishot polls (before Linux 5.13).
+    _multishot: bool,
+    /// The completion being run came with `IORING_CQE_F_MORE`: the poll is still armed.
+    _more: bool,
 }
 
 impl RecurringEventfdOrTimerfdCompletion {
@@ -4051,9 +4074,25 @@ impl RecurringEventfdOrTimerfdCompletion {
             // SAFETY: guaranteed by the caller.
             fd_kc: unsafe { FdKernelCompletion::new::<T>(fd) },
             _armed: false,
+            _multishot: true,
+            _more: false,
         }
     }
-    fn base_complete_with(&mut self, _res: isize) {
+    /// Records the flags of the completion about to run: with `IORING_CQE_F_MORE` the
+    /// multishot poll stays armed and is not queued again.
+    ///
+    /// # Safety
+    /// `this` is live, with no reference to it live.
+    unsafe fn set_cqe_flags(this: *mut Self, flags: u32) {
+        // SAFETY: the contract above; one field write.
+        unsafe { (*this)._more = flags & IORING_CQE_F_MORE != 0 };
+    }
+    fn base_complete_with(&mut self, res: isize) {
+        // A kernel without multishot polls rejects the request: queue one-shot polls from
+        // now on.
+        if self._multishot && res == -(EINVAL as isize) {
+            self._multishot = false;
+        }
         let mut garbage = [0u8; 8];
         // SAFETY: the buffer is valid for writes of the length passed.
         let ret = match unsafe { self.fd_kc.fd().read(garbage.as_mut_ptr() as *mut c_void, 8) } {
@@ -4064,7 +4103,9 @@ impl RecurringEventfdOrTimerfdCompletion {
         // since we wait for this using both _preempt_io_context and the
         // ring. So don't assert that we read anything.
         engine_assert!(ret.is_none_or(|r| r == 8));
-        self._armed = false;
+        // A multishot poll that the kernel keeps armed needs no new submission; one that
+        // ended (or a one-shot poll) is queued again by `maybe_rearm`.
+        self._armed = std::mem::replace(&mut self._more, false);
     }
     /// Queues the poll again if it is not armed; the completion is a field of `be`, so
     /// both are taken as pointers and never reborrowed at the same time.
@@ -4080,7 +4121,12 @@ impl RecurringEventfdOrTimerfdCompletion {
                 return;
             }
             let sqe = ReactorBackendUring::get_sqe(be);
-            io_uring_prep_poll_add(sqe, (*this).fd_kc.fd().get(), POLLIN as u32);
+            let fd = (*this).fd_kc.fd().get();
+            if (*this)._multishot {
+                io_uring_prep_poll_multishot(sqe, fd, POLLIN as u32);
+            } else {
+                io_uring_prep_poll_add(sqe, fd, POLLIN as u32);
+            }
             io_uring_sqe_set_data(sqe, this.cast::<KernelCompletion>());
             (*this)._armed = true;
             (*be)._has_pending_submissions = true;
@@ -4354,11 +4400,31 @@ impl ReactorBackendUring {
     // Process kernel completions already extracted from the ring.
     // This is needed because we sometimes extract completions without
     // waiting, and sometimes with waiting.
-    fn do_process_ready_kernel_completions(buf: &[*mut IoUringCqe]) {
+    //
+    // The two recurring polls (hrtimer and smp wake-up) are multishot: they learn from the
+    // entry's flags whether the kernel keeps them armed.
+    //
+    // # Safety
+    // As `do_process_kernel_completions_step`.
+    unsafe fn do_process_ready_kernel_completions(this: *mut Self, buf: &[*mut IoUringCqe]) {
+        // SAFETY: the contract above; field addresses only, no reference is formed.
+        let (hrt, smp) = unsafe {
+            (
+                std::ptr::addr_of_mut!((*this)._hrtimer_completion.base),
+                std::ptr::addr_of_mut!((*this)._smp_wakeup_completion),
+            )
+        };
         for &cqe in buf {
             // SAFETY: each pointer was handed out by io_uring_peek_batch_cqe and is still in the ring.
             let cqe = unsafe { &*cqe };
             let completion = cqe_get_data(cqe);
+            if completion == hrt.cast::<KernelCompletion>() {
+                // SAFETY: a member of the live backend, with no reference to it live.
+                unsafe { RecurringEventfdOrTimerfdCompletion::set_cqe_flags(hrt, cqe.flags) };
+            } else if completion == smp.cast::<KernelCompletion>() {
+                // SAFETY: as above.
+                unsafe { RecurringEventfdOrTimerfdCompletion::set_cqe_flags(smp, cqe.flags) };
+            }
             // SAFETY: the completion lives until it is completed.
             unsafe { KernelCompletion::complete_with(completion, cqe.res as isize) };
         }
@@ -4383,7 +4449,8 @@ impl ReactorBackendUring {
         let ready = unsafe {
             std::slice::from_raw_parts(buf.as_ptr().cast::<*mut IoUringCqe>(), n as usize)
         };
-        Self::do_process_ready_kernel_completions(ready);
+        // SAFETY: forwarded; `ready` points into the ring, not into the backend.
+        unsafe { Self::do_process_ready_kernel_completions(this, ready) };
         // SAFETY: as above.
         io_uring_cq_advance(unsafe { &mut (*this)._uring }, n);
         n != 0
@@ -4479,6 +4546,15 @@ impl ReactorBackendUring {
         // expired when it really hasn't, we don't want to block in read(tfd, ...).
         // SAFETY: plain fcntl calls on a descriptor we own.
         unsafe { fcntl(tfd, F_SETFL, fcntl(tfd, F_GETFL) | O_NONBLOCK) };
+        // The wake-up eventfd's multishot poll can post a completion for a write whose count
+        // an earlier completion's read already took (two shards wake this one at nearly the
+        // same time); that completion's read must find the counter empty and return, not wait
+        // for the next wake-up.
+        // SAFETY: plain fcntl calls on the reactor's descriptor, live while the backend is.
+        unsafe {
+            let efd = (*notify).get();
+            fcntl(efd, F_SETFL, fcntl(efd, F_GETFL) | O_NONBLOCK);
+        }
         Ok(node)
     }
 }
@@ -4769,9 +4845,17 @@ impl ReactorBackendUring {
     }
     unsafe fn kernel_submit_work(this: *mut Self) -> bool {
         let mut did_work = false;
-        // SAFETY: the table's contract; the preempting context is reached through `this`,
-        // and the ring and the sink are reborrowed for one call each.
+        // SAFETY: the table's contract; the preempting context and the hrtimer completion are
+        // reached through `this` (`hrt` is offset 0 of the hrtimer completion, as in
+        // `wait_and_process_events`), and the ring and the sink are reborrowed for one call each.
         unsafe {
+            // Keep the hrtimer descriptor watched while the reactor is awake: a reactor that
+            // never sleeps (a poller that is never passive) never reaches
+            // `wait_and_process_events`, so its timers would stop firing once the poll
+            // completed. The same as the linux-aio backend does. The poll is multishot, so
+            // this queues nothing while the kernel keeps it armed.
+            let hrt = std::ptr::addr_of_mut!((*this)._hrtimer_completion.base);
+            RecurringEventfdOrTimerfdCompletion::maybe_rearm(hrt, this);
             did_work |= PreemptIoContext::service_preempting_io(std::ptr::addr_of_mut!(
                 (*this)._preempt_io_context
             ));

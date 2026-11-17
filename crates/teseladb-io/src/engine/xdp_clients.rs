@@ -29,12 +29,15 @@ use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::internal::pollable_fd::PollableFd;
 use teseladb::engine::core::posix::FileDesc;
+use teseladb::engine::core::sleep::sleep_steady;
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::timer::Timer;
 
 use teseladb_tls::{Connection, ServerConfig};
 
-use super::client_port::{ConnInfo, HANDSHAKE_LIMIT, PAUSE_AT, RESUME_AT, Service, Session};
+use super::client_port::{
+    ConnInfo, HANDSHAKE_LIMIT, PAUSE_AT, RESUME_AT, RETRY_AFTER, Ran, Service, Session, run_work,
+};
 use super::post::Wake;
 use super::tls_stream::{Sniff, TLS_HANDSHAKE, server_conn};
 use super::{answer, stacks, wait};
@@ -111,14 +114,28 @@ impl Handler {
     /// Runs the work of connection `token`'s session in an engine thread.
     fn start(&mut self, token: u64, now: Instant) {
         let Some(c) = self.conns.get_mut(&token) else { return };
-        let Some(mut s) = c.session.take() else { return };
+        let Some(s) = c.session.take() else { return };
         let (done, wake) = (Rc::clone(&self.done), Rc::clone(&self.wake));
-        let job = stacks::run(Box::new(move || {
-            let alive = s.run(now);
+        drop(make_coroutine(async move {
+            let (back, how) = run_work(s, now).await;
+            let Some(mut s) = back else { return Ok::<(), ExceptionPtr>(()) };
+            let alive = match how {
+                Ran::Done(alive) => alive,
+                // Its state is not known after a panic: the connection closes.
+                Ran::Panicked => false,
+                // Answered with an error and logged; it waits before it tries again.
+                Ran::NotRun(why) => {
+                    let alive = s.refuse(&why);
+                    if alive {
+                        let _ = sleep_steady(RETRY_AFTER).await;
+                    }
+                    alive
+                }
+            };
             done.borrow_mut().push((token, s, alive));
             wake.wake();
+            Ok(())
         }));
-        drop(job);
     }
 
     /// Hands what the session of `token` answered to the stack; pauses the connection when its
