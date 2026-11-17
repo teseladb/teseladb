@@ -10,7 +10,7 @@
 //! its entries are the documents themselves and reading them all is the cost the statistics
 //! exist to avoid. A field two indexes share is read from the first one.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use teseladb_bson::Value;
 use teseladb_keys::space::KeyBuilder;
@@ -28,6 +28,20 @@ use crate::error::CommandError;
 /// range gets them at most once in that time, however many compactions touch it.
 pub const STATS_EVERY_SECS: u64 = 10;
 
+/// The share of its shard's time the passes take at most: after a pass of `d`, the next one waits
+/// `d · (1 − share) / share`, and never less than [`STATS_EVERY_SECS`]. A pass reads every entry
+/// of the indexes of each range it publishes; in a range a load keeps compacting, passes that
+/// followed each other 10 s apart kept a shard reading all the time.
+pub const STATS_SHARE_PERCENT: u32 = 20;
+
+/// The wait before the next pass after one that took `took`: `every`, or longer for a pass so
+/// long that the passes would take more than [`STATS_SHARE_PERCENT`] of the time.
+#[must_use]
+pub fn next_pass_after(every: Duration, took: Duration) -> Duration {
+    let rest = took.saturating_mul(100 - STATS_SHARE_PERCENT) / STATS_SHARE_PERCENT;
+    every.max(rest)
+}
+
 /// Documents read per call when the backend keeps no count of a collection's documents.
 const COUNT_CHUNK: usize = 1024;
 
@@ -44,7 +58,7 @@ pub fn pass<B: Backend + ?Sized>(backend: &mut B) -> Result<usize, CommandError>
 
 /// [`pass`], calling `pause` between the steps of its reads and builds, where the caller may
 /// give the CPU to other work (023 FR-012): a range of hundreds of thousands of index entries
-/// is minutes of comparisons. Each pass, read and build is timed in the stages `stats_pass`,
+/// is seconds of reads and comparisons. Each pass, read and build is timed in the stages `stats_pass`,
 /// `stats_read` and `stats_build`.
 pub fn pass_pausing<B: Backend + ?Sized>(
     backend: &mut B,

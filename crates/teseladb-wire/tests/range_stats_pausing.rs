@@ -14,6 +14,19 @@ use teseladb_wire::commands::range_stats::{pass, pass_pausing};
 
 const DOCS: i64 = 5000;
 
+#[test]
+fn a_long_pass_waits_longer_before_the_next_one() {
+    use std::time::Duration;
+    use teseladb_wire::commands::range_stats::next_pass_after;
+    let every = Duration::from_secs(10);
+    // A short pass: the next one comes at the usual time.
+    assert_eq!(next_pass_after(every, Duration::from_millis(300)), every);
+    assert_eq!(next_pass_after(every, Duration::from_millis(2500)), every);
+    // A pass of 27 s takes at most a fifth of the time: 108 s before the next.
+    assert_eq!(next_pass_after(every, Duration::from_secs(27)), Duration::from_secs(108));
+    assert_eq!(next_pass_after(Duration::ZERO, Duration::ZERO), Duration::ZERO);
+}
+
 /// The value of `e` of document `i`, as the documents written give it.
 fn e_value(i: i64) -> Value {
     match i % 6 {

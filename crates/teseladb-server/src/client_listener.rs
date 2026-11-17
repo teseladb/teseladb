@@ -707,14 +707,18 @@ impl ClientListener {
                     teseladb::engine::core::thread::Thread::maybe_yield();
                 }
             };
+            let mut wait = every;
             while !stop.stopped() {
-                stop.pause(every);
+                stop.pause(wait);
                 if stop.stopped() {
                     break;
                 }
                 // A range whose statistics could not be read waits for the next pass.
+                let started = std::time::Instant::now();
                 let _ = range_stats::pass_pausing(&mut backend, &mut pause);
                 teseladb_wire::commands::Backend::end_operation(&mut backend);
+                // A long pass waits longer before the next one (STATS_SHARE_PERCENT).
+                wait = range_stats::next_pass_after(every, started.elapsed());
             }
         });
         let task = crate::client_tasks::spawn_background(shard(2), statistics);
