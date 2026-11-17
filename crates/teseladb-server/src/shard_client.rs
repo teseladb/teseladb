@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use teseladb::engine::core::coroutine::make_coroutine;
@@ -140,17 +140,10 @@ pub fn block_on<T: Send + 'static>(
     // engines (D4): a node engine that starts waits for the exchanges under way on it, and one
     // that stops makes the exchanges posted to it fail instead of reaching no engine.
     let lease = teseladb_io::engine::lease_engine(cfg!(not(test)))?;
-    let (tx, rx) = mpsc::sync_channel::<Result<T, ExceptionPtr>>(1);
-    let posted = lease.post(move || {
-        run_in_background(f().then_wrapped(move |r: Future<T>| {
-            let _ = tx.send(r.get());
-            teseladb::engine::core::future::make_ready_future(())
-        }));
-    });
-    if !posted {
+    let Some(answer) = lease.submit(f) else {
         return Err(io::Error::other("the engine stopped"));
-    }
-    let answer = rx.recv();
+    };
+    let answer = answer.recv();
     drop(lease);
     match answer {
         Ok(Ok(v)) => Ok(v),

@@ -141,6 +141,15 @@ impl EngineLease {
     pub fn post(&self, f: impl FnOnce() + Send + 'static) -> bool {
         ShardPost::new(0, self.gate.clone()).post(f)
     }
+
+    /// Runs the future `f` makes on shard 0 and gives the channel of its result, as
+    /// `alien::submit_to` does; `None` (and `f` dropped) once the engine stopped.
+    pub fn submit<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> teseladb::engine::core::future::Future<T> + Send + 'static,
+    ) -> Option<alien::StdFuture<T>> {
+        ShardPost::new(0, self.gate.clone()).submit(f)
+    }
 }
 
 impl Drop for EngineLease {

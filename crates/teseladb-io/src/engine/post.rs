@@ -102,6 +102,23 @@ impl ShardPost {
         true
     }
 
+    /// Runs the future `f` makes on the shard and gives the channel of its result
+    /// (`alien::submit_to`), from a thread that is not a shard; `None` (and `f` dropped) once
+    /// the engine stopped.
+    pub(crate) fn submit<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> teseladb::engine::core::future::Future<T> + Send + 'static,
+    ) -> Option<alien::StdFuture<T>> {
+        if !self.gate.enter() {
+            return None;
+        }
+        // The process's default instance is the node's engine's while the gate is open.
+        #[allow(deprecated)]
+        let answer = alien::submit_to_default(self.shard, f);
+        self.gate.leave();
+        Some(answer)
+    }
+
     /// Hands `input` to the core of the shard.
     pub(crate) fn post_input<M: Send + 'static>(
         &self,
