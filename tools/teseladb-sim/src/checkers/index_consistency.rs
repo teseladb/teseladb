@@ -39,6 +39,7 @@ pub fn check(state: &RangeState) -> Result<(), Violation> {
     let ready = IndexSet {
         tenant: state.indexes.tenant,
         collection: state.indexes.collection,
+        partitions: state.indexes.partitions,
         indexes: state
             .indexes
             .indexes
@@ -112,8 +113,12 @@ mod tests {
     }
 
     fn state(doc: &str, held_from: &str) -> RangeState {
-        let indexes =
-            IndexSet { tenant: 0, collection: 3, indexes: vec![(A, def("a")), (B, def("b"))] };
+        let indexes = IndexSet {
+            tenant: 0,
+            collection: 3,
+            partitions: teseladb_keys::partition::Partitions::single(3),
+            indexes: vec![(A, def("a")), (B, def("b"))],
+        };
         let pk = PrimaryKey::id(RawValue::Int32(1));
         let bytes = extjson::parse(doc).unwrap().to_bytes().unwrap();
         let held_bytes = extjson::parse(held_from).unwrap().to_bytes().unwrap();
@@ -192,7 +197,12 @@ mod tests {
         let entries = entries.into_iter().map(|(k, bits)| (k, entry_value(&wild, &pk, &bits)));
         let entries = entries.collect();
         let mut s = RangeState {
-            indexes: IndexSet { tenant: 0, collection: 3, indexes: vec![(A, wild)] },
+            indexes: IndexSet {
+                tenant: 0,
+                collection: 3,
+                partitions: teseladb_keys::partition::Partitions::single(3),
+                indexes: vec![(A, wild)],
+            },
             ready: BTreeMap::from([(A, Some(hlc(1)))]),
             at: hlc(2),
             docs: vec![(bytes, pk)],

@@ -171,7 +171,12 @@ impl Indexes {
             defs.push((id, def));
             rules.push(IndexRule { id, spec, buckets: 0, delete_only: false });
         }
-        let set = IndexSet { tenant: 0, collection: COLLECTION, indexes: defs };
+        let set = IndexSet {
+            tenant: 0,
+            collection: COLLECTION,
+            partitions: teseladb_keys::partition::Partitions::single(COLLECTION),
+            indexes: defs,
+        };
         let mut entries = BTreeMap::new();
         for id in 0..DOCS {
             let pk = primary_key(id);
