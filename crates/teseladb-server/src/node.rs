@@ -1280,7 +1280,13 @@ impl Node {
                 task,
                 {
                     let place = place.clone();
-                    move || open_core(spec, &place)
+                    // A core that dies while it opens fails the start as that core, not as an
+                    // engine that stopped: the engine goes on and the node stops its cores.
+                    move || {
+                        let opened = std::panic::AssertUnwindSafe(|| open_core(spec, &place));
+                        std::panic::catch_unwind(opened)
+                            .unwrap_or_else(|_| Err(NodeError::Config(format!("core {k} failed"))))
+                    }
                 },
                 |_logic, _disk: ShardDisk, _gone| (),
             );
