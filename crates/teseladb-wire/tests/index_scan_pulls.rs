@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Mem, field};
+use common::{Mem, doc, field};
 use teseladb_bson::{Document, Value, extjson};
 
 /// Documents of the collection: `_id` i, `a` = i, `b` = i mod 7.
@@ -86,6 +86,9 @@ fn a_range_longer_than_a_read_gives_the_documents_of_the_collection_scan_in_orde
     let by_index = found(&mut m, &format!(r#"{filter},"hint":"a_1""#));
     let natural = found(&mut m, &format!(r#"{filter},"hint":{{"$natural":1}}"#));
     assert_eq!(ids(&by_index), wanted(|i| (100..2900).contains(&i)));
+    // The collection scan goes by the buckets of the documents: the same documents, by `_id`.
+    let mut natural = natural;
+    natural.sort_by_key(|d| int(field(d, "_id")));
     assert_eq!(by_index, natural);
     assert_eq!(examined(&mut m, &format!(r#"{filter},"hint":"a_1""#)), (2800, 2800));
     // Backward, by the sort the index gives.
@@ -145,6 +148,28 @@ fn several_long_intervals_come_in_the_order_of_the_index_both_ways() {
 }
 
 #[test]
+fn a_scan_that_checks_its_keys_over_a_long_range_walks_each_of_them() {
+    let mut m = loaded();
+    // A range of `b` and then `a`: the scan of `{b: 1, a: -1}` checks each key's `a`.
+    let filter = r#""filter":{"b":{"$gte":2,"$lte":5},"a":{"$lt":1000}}"#;
+    let hinted = format!(r#"{filter},"hint":"b_1_a_-1""#);
+    let got = found(&mut m, &hinted);
+    let mut expected = wanted(|i| (2..=5).contains(&(i % 7)) && i < 1000);
+    expected.sort_by_key(|i| (i % 7, -i));
+    assert_eq!(ids(&got), expected);
+    // Each document, the first key of `b` 3, 4 and 5 (outside, a seek each) and the key of `b`
+    // 6 that ends the scan.
+    let n = i64::try_from(expected.len()).expect("a count");
+    assert_eq!(examined(&mut m, &hinted), (n + 4, n));
+    let backward = found(&mut m, &format!(r#"{filter},"sort":{{"b":-1,"a":1}},"hint":"b_1_a_-1""#));
+    expected.reverse();
+    assert_eq!(ids(&backward), expected);
+    let few = found(&mut m, &format!(r#"{hinted},"limit":10"#));
+    expected.reverse();
+    assert_eq!(ids(&few), expected[..10].to_vec());
+}
+
+#[test]
 fn a_long_range_of_id_reads_the_buckets_in_order_both_ways() {
     let mut m = loaded();
     let filter = r#""filter":{"_id":{"$gte":10,"$lt":2990}}"#;
@@ -186,7 +211,8 @@ fn an_aggregation_and_a_count_over_a_long_range_add_up_what_the_documents_hold()
         assert_eq!(int(field(g, "n")), i64::try_from(members.len()).expect("a count"));
         assert_eq!(int(field(g, "s")), members.iter().map(|i| i64::from(*i)).sum::<i64>());
     }
-    let r = run(&mut m, r#"{"count":"c","query":{"a":{"$gte":100,"$lt":2900},"b":{"$ne":0}}}"#);
+    let query = json(r#"{"a":{"$gte":100,"$lt":2900},"b":{"$ne":0}}"#);
+    let r = m.run("p", doc(&[("count", Value::from("c")), ("query", Value::Document(query))]));
     let n = wanted(|i| (100..2900).contains(&i) && i % 7 != 0).len();
     assert_eq!(int(field(&r, "n")), i64::try_from(n).expect("a count"));
 }
@@ -200,6 +226,8 @@ fn competing_plans_over_long_ranges_give_the_documents_of_the_collection_scan() 
     let natural = found(&mut m, &format!(r#"{filter},"hint":{{"$natural":1}}"#));
     let mut got_ids = ids(&got);
     got_ids.sort_unstable();
-    assert_eq!(got_ids, ids(&natural));
+    let mut natural_ids = ids(&natural);
+    natural_ids.sort_unstable();
+    assert_eq!(got_ids, natural_ids);
     assert_eq!(got_ids, wanted(|i| i >= 200 && (i % 7 == 2 || i % 7 == 5)));
 }
