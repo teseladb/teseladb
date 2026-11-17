@@ -20,3 +20,7 @@ teseladb-keys = { path = "../teseladb-keys" }
 teseladb-lz4 = { workspace = true }
 teseladb-raftlog = { workspace = true }
 teseladb-types = { workspace = true }
+
+[[bench]]
+name = "scan_merge"
+harness = false
