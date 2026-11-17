@@ -39,11 +39,13 @@ use crate::engine::post::ShardPost;
 const IDLE: Duration = Duration::from_millis(100);
 /// How long it waits before trying again on a full disk.
 const DISK_FULL_RETRY: Duration = Duration::from_secs(1);
-/// The stack of the writer's engine thread. The engine's default (128 KiB, as the reference
-/// engine's) is too small for the writer's frames in a debug build, which has no guard page
-/// below it: the node aborted at the writer's first wait (a future's state found already set
-/// in `set_urgent_state`), and does not with this stack. It has room in every build.
-const WRITER_STACK: usize = 1 << 20;
+/// The stack of the writer's engine thread, the engine's default (128 KiB, as the reference
+/// engine's, from the shard's memory and without a guard page in a release build). The writer
+/// itself runs on a stack of its own ([`crate::engine::stacks::deep`]): in a debug build its
+/// frames went past the engine thread's (the node aborted at the writer's first wait, a future's
+/// state found already set in `set_urgent_state`), and 1 MiB of the shard's memory only moved
+/// the limit.
+const WRITER_STACK: usize = crate::engine::stacks::ENGINE_STACK;
 
 /// What a core asks of the writer.
 pub enum Req {
@@ -62,6 +64,8 @@ pub struct Shared {
     stop: AtomicBool,
     disk_full: AtomicBool,
     syncs: AtomicU64,
+    /// The bytes of stack the writer found below it when it started.
+    room: AtomicU64,
 }
 
 impl Shared {
@@ -257,11 +261,17 @@ impl DeviceLog {
         let sent = post.post(move || {
             let attr = ThreadAttributes { sched_group: None, stack_size: WRITER_STACK };
             drop(in_thread_with(attr, move || {
-                let opened = match open_disk(disk) {
-                    Ok(d) => d,
-                    Err(e) => return drop(started_tx.send(Err(e))),
-                };
-                run(opened, log, cores, cfg, (&s, &bound), started_tx, stopped_tx);
+                crate::engine::stacks::deep(move || {
+                    s.room.store(
+                        teseladb_sys::deep_stack::room_here().unwrap_or(0) as u64,
+                        Ordering::Relaxed,
+                    );
+                    let opened = match open_disk(disk) {
+                        Ok(d) => d,
+                        Err(e) => return drop(started_tx.send(Err(e))),
+                    };
+                    run(opened, log, cores, cfg, (&s, &bound), started_tx, stopped_tx);
+                });
             }));
         });
         let gone = || io::Error::other("the engine stopped");
@@ -288,6 +298,13 @@ impl DeviceLog {
     #[must_use]
     pub fn recovered_files(&self) -> usize {
         self.recovered_files
+    }
+
+    /// The bytes of stack the writer had below it when it started: it runs on a stack of its own
+    /// with a guard below, not on its engine thread's ([`WRITER_STACK`]).
+    #[must_use]
+    pub fn writer_stack_room(&self) -> u64 {
+        self.shared.room.load(Ordering::Relaxed)
     }
 
     /// Syncs of the log since it started.

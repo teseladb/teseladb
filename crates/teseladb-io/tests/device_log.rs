@@ -142,11 +142,26 @@ mod cases {
         drop(log);
     }
 
+    /// The writer runs on a stack of its own with a guard below, not on its engine thread's 128 KiB
+    /// of the shard's memory, which has no guard page in a release build and which the writer's
+    /// frames went past in a debug one.
+    fn the_writer_runs_on_a_deep_stack_of_its_own(e: &NodeEngine) {
+        let (log, ports) = start(e, LogDisk::Memory(Box::new(MemDisk::new())), Arc::default());
+        let room = log.writer_stack_room();
+        drop(ports);
+        assert!(log.stop().is_some());
+        assert!(room >= 1 << 20, "the writer had {room} bytes of stack below it");
+    }
+
     /// Runs every case in one engine of two shards.
     pub fn run() {
         let e = NodeEngine::start(&EngineConfig { shards: 2, ..EngineConfig::default() })
             .expect("the engine starts");
-        let cases: [(&str, fn(&NodeEngine)); 3] = [
+        let cases: [(&str, fn(&NodeEngine)); 4] = [
+            (
+                "the_writer_runs_on_a_deep_stack_of_its_own",
+                the_writer_runs_on_a_deep_stack_of_its_own,
+            ),
             (
                 "cores_writing_at_once_share_the_syncs_and_find_their_entries_again",
                 cores_writing_at_once_share_the_syncs_and_find_their_entries_again,

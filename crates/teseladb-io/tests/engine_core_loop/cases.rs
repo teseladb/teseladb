@@ -50,6 +50,7 @@ pub fn run() {
         ("a_core_reaches_another_core_from_its_shard", a_core_reaches_another_core),
         ("the_logic_is_told_the_runtime_sends_no_files", the_logic_is_told_no_file_sends),
         ("a_core_is_built_on_a_deep_stack", a_core_is_built_on_a_deep_stack),
+        ("a_core_s_first_turn_runs_on_a_deep_stack", a_core_s_first_turn_runs_on_a_deep_stack),
     ];
     // `CASES=a,b` runs only those.
     let only = std::env::var("CASES").ok();
@@ -494,6 +495,25 @@ fn a_core_is_built_on_a_deep_stack(e: &NodeEngine) {
     drop(core.join().unwrap());
     let room = room.load(Ordering::SeqCst);
     assert!(room >= 1 << 20, "{room} bytes of stack for the core's recovery");
+}
+
+/// The driver's first turn runs where the core was built: a coroutine runs until it first waits
+/// on the stack that made it, so the first turn ran on the engine thread's 128 KiB even with the
+/// recovery on a deep stack, and in a build with stack guards the node faulted there (the LSM's
+/// first schedule, from the logic's `poll_io`).
+fn a_core_s_first_turn_runs_on_a_deep_stack(e: &NodeEngine) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let room = Arc::new(AtomicUsize::new(usize::MAX));
+    let seen = room.clone();
+    let h = hello(74, &free_port().to_string());
+    let core = start_core_built(e, 0, &h, Duration::from_millis(5), None, move || {
+        (Toy { first_poll_room: Some(seen), ..Toy::default() }, MemDisk::new())
+    });
+    assert!(core.sender().send(CoreInput::Stop).is_ok());
+    drop(core.join().unwrap());
+    let room = room.load(Ordering::SeqCst);
+    assert!(room != usize::MAX, "the logic was polled");
+    assert!(room >= 1 << 20, "{room} bytes of stack for the core's first turn");
 }
 
 fn the_logic_is_told_no_file_sends(e: &NodeEngine) {

@@ -86,6 +86,27 @@ fn a_background_task_runs_in_the_background_group_until_it_is_stopped() {
     assert!(start.elapsed() < Duration::from_secs(5));
 }
 
+#[test]
+fn a_background_task_runs_on_a_deep_stack_of_its_own() {
+    use teseladb_server::client_tasks::spawn_background;
+
+    // Its engine thread's own stack comes from the shard's memory, with no guard page in a
+    // release build: the task runs on a stack with a guard below instead.
+    // The engine runs (and has made its groups) once a shard answered.
+    block_on(teseladb_io::engine::disk::IoGroups::get_or_create).expect("the groups");
+    let (tx, rx) = answer::channel::<Option<usize>>();
+    let task = spawn_background(
+        0,
+        Box::new(move |_| {
+            let _ = tx.send(teseladb_sys::deep_stack::room_here());
+        }),
+    )
+    .expect("an engine runs");
+    let room = rx.recv_timeout(Duration::from_secs(10)).expect("the task ran");
+    assert!(room.is_some_and(|r| r >= 1 << 20), "room below the task: {room:?}");
+    assert!(task.stop());
+}
+
 /// Recurses `depth` times with a frame of about 1 KiB each.
 #[inline(never)]
 fn deep(depth: usize) -> usize {

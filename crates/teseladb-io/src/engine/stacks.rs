@@ -56,6 +56,19 @@ pub fn stack_size() -> usize {
     STACK.load(Ordering::Relaxed)
 }
 
+/// Runs `f` on a stack of its own of [`stack_size`] bytes with a guard below
+/// ([`teseladb_sys::deep_stack::run`]), and gives back what it returns; from such a stack it runs
+/// where it is. Work an engine thread does beyond a few frames goes through it: the engine
+/// thread's own stack is [`ENGINE_STACK`] of the shard's memory with no guard page in a release
+/// build, so a call that went past it would write over the heap blocks beside it instead of
+/// faulting. A call may park its engine thread meanwhile.
+pub fn deep<R>(f: impl FnOnce() -> R) -> R {
+    let mut f = Some(f);
+    let mut out = None;
+    teseladb_sys::deep_stack::run(stack_size(), &mut |_| out = f.take().map(|f| f()));
+    out.expect("the deep stack runs its call once")
+}
+
 type Job = Box<dyn FnOnce()>;
 
 /// The end of one job, which its caller awaits.

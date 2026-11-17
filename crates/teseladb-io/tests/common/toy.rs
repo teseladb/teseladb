@@ -86,6 +86,9 @@ pub struct Toy {
     pub file_sends: Option<bool>,
     /// Every frame received, with its sender.
     pub frames: Vec<(NodeId, PeerMsg)>,
+    /// Takes, at the first [`CoreLogic::poll_io`], the bytes of stack below it on a stack of
+    /// `teseladb_sys::deep_stack` (0 elsewhere).
+    pub first_poll_room: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 pub fn ack(req: u64) -> PeerMsg {
@@ -130,6 +133,9 @@ impl CoreLogic for Toy {
     }
 
     fn poll_io(&mut self, _now: Nanos) -> Option<(IoOp, IoClass)> {
+        if let Some(room) = self.first_poll_room.take() {
+            room.store(teseladb_sys::deep_stack::room_here().unwrap_or(0), Ordering::SeqCst);
+        }
         if self.io.is_empty() || (self.one_by_one && self.in_flight > 0) {
             return None;
         }
