@@ -12,6 +12,8 @@ use std::sync::Arc;
 use teseladb_raftlog::cache::ContentCache;
 use teseladb_types::Bytes;
 
+use crate::sst::reader::COLUMN_SLOT;
+
 /// Where the cache keeps the bytes of the blocks it takes (012 FR-032): the node places them on
 /// pages of 2 MiB when the system has them reserved. Without one, a block stays where it was read.
 pub trait BlockMemory: Send + Sync {
@@ -25,9 +27,10 @@ const META: u32 = u32::MAX;
 /// The cache.
 pub(crate) struct BlockCache {
     cache: ContentCache<(u64, u32)>,
-    /// The slot of each cached block, by file and block: a file's blocks go at once
-    /// ([`BlockCache::forget`]) without asking for each block it may have.
-    files: HashMap<u64, HashMap<u32, u32>>,
+    slots: HashMap<(u64, u32), u32>,
+    /// How many blocks of each file are cached (its meta bytes included): a file with none is
+    /// passed over when it goes.
+    files: HashMap<u64, u32>,
     /// Files that left the current version ([`BlockCache::retire`]) whose blocks this cache no
     /// longer takes.
     retired: HashSet<u64>,
@@ -47,12 +50,20 @@ impl std::fmt::Debug for BlockCache {
     }
 }
 
+/// The slots a file's blocks may take: its data blocks, from 0, and their column blocks, from
+/// [`COLUMN_SLOT`].
+pub(crate) fn file_slots(blocks: usize) -> impl Iterator<Item = u32> {
+    let n = u32::try_from(blocks).unwrap_or(u32::MAX);
+    (0..n).chain((0..n).map(|b| COLUMN_SLOT as u32 + b))
+}
+
 impl BlockCache {
     /// An empty cache of `budget` bytes.
     pub(crate) fn new(budget: u64) -> BlockCache {
         let cache = ContentCache::new(budget);
         BlockCache {
             cache,
+            slots: HashMap::new(),
             files: HashMap::new(),
             retired: HashSet::new(),
             hits: 0,
@@ -61,17 +72,15 @@ impl BlockCache {
         }
     }
 
-    fn slot(&self, file: u64, block: u32) -> Option<u32> {
-        self.files.get(&file).and_then(|blocks| blocks.get(&block)).copied()
-    }
-
-    fn unlist(&mut self, (file, block): (u64, u32)) -> Option<u32> {
-        let blocks = self.files.get_mut(&file)?;
-        let slot = blocks.remove(&block);
-        if blocks.is_empty() {
-            self.files.remove(&file);
+    fn unlist(&mut self, key: (u64, u32)) -> Option<u32> {
+        let slot = self.slots.remove(&key)?;
+        if let Some(n) = self.files.get_mut(&key.0) {
+            *n -= 1;
+            if *n == 0 {
+                self.files.remove(&key.0);
+            }
         }
-        slot
+        Some(slot)
     }
 
     /// Keeps the blocks it takes from now on in `memory`.
@@ -92,7 +101,7 @@ impl BlockCache {
     /// The payload of block `block` of file `file`, if cached (a hit). A miss is counted by the
     /// reader when it asks the disk for the block ([`BlockCache::note_miss`], FR-013).
     pub(crate) fn get(&mut self, file: u64, block: u32) -> Option<Bytes> {
-        let found = self.slot(file, block).and_then(|s| self.cache.get(s));
+        let found = self.slots.get(&(file, block)).and_then(|s| self.cache.get(*s));
         if found.is_some() {
             self.hits += 1;
         }
@@ -102,7 +111,7 @@ impl BlockCache {
     /// Whether block `block` of file `file` is cached, without counting a hit: what a read ahead
     /// leaves out (FR-044).
     pub(crate) fn contains(&self, file: u64, block: u32) -> bool {
-        self.slot(file, block).is_some()
+        self.slots.contains_key(&(file, block))
     }
 
     /// Counts one block read from the disk.
@@ -122,7 +131,8 @@ impl BlockCache {
         for gone in evicted {
             self.unlist(gone);
         }
-        self.files.entry(key.0).or_default().insert(key.1, slot);
+        self.slots.insert(key, slot);
+        *self.files.entry(key.0).or_insert(0) += 1;
     }
 
     /// Caches the payload of a block, unless its file is retired ([`BlockCache::retire`]).
@@ -138,28 +148,24 @@ impl BlockCache {
         self.put((file, META), meta, true);
     }
 
-    /// Drops the blocks of a file that left the current version, while views that still hold
-    /// it keep it open; `refuse` keeps this cache from taking its blocks again, which a reader
-    /// of such a view then reads from the disk. Its meta bytes, which the file holds as long as
-    /// it is open, stay counted until [`BlockCache::forget`].
-    pub(crate) fn retire(&mut self, file: u64, refuse: bool) {
-        let Some(blocks) = self.files.remove(&file) else {
-            if refuse {
-                self.retired.insert(file);
-            }
+    /// Drops the cached blocks among `slots` of file `file`.
+    pub(crate) fn drop_blocks(&mut self, file: u64, slots: impl IntoIterator<Item = u32>) {
+        if !self.files.contains_key(&file) {
             return;
-        };
-        let mut meta = None;
-        for (block, slot) in blocks {
-            if block == META {
-                meta = Some(slot);
-            } else {
+        }
+        for b in slots {
+            if let Some(slot) = self.unlist((file, b)) {
                 self.cache.remove(slot);
             }
         }
-        if let Some(slot) = meta {
-            self.files.entry(file).or_default().insert(META, slot);
-        }
+    }
+
+    /// Drops the blocks of a file of `blocks` data blocks that left the current version, while
+    /// views that still hold it keep it open; `refuse` keeps this cache from taking its blocks
+    /// again, which a reader of such a view then reads from the disk. Its meta bytes, which the
+    /// file holds as long as it is open, stay counted until [`BlockCache::forget`].
+    pub(crate) fn retire(&mut self, file: u64, blocks: usize, refuse: bool) {
+        self.drop_blocks(file, file_slots(blocks));
         if refuse {
             self.retired.insert(file);
         }
@@ -170,20 +176,18 @@ impl BlockCache {
         self.retired.contains(&file)
     }
 
-    /// Forgets every block of a file that is going away, its meta bytes too.
-    pub(crate) fn forget(&mut self, file: u64) {
+    /// Forgets every block of a file of `blocks` data blocks that is going away: its column
+    /// blocks and its meta bytes too.
+    pub(crate) fn forget(&mut self, file: u64, blocks: usize) {
         self.retired.remove(&file);
-        for (_, slot) in self.files.remove(&file).into_iter().flatten() {
-            self.cache.remove(slot);
-        }
+        self.drop_blocks(file, file_slots(blocks).chain([META]));
     }
 
     /// Bytes of the cached blocks (meta bytes left out) of the files `live` says no.
     pub(crate) fn bytes_outside(&self, live: impl Fn(u64) -> bool) -> u64 {
-        let blocks = self.files.iter().filter(|(file, _)| !live(**file));
-        blocks
-            .flat_map(|(_, b)| b.iter())
-            .filter(|(b, _)| **b != META)
+        self.slots
+            .iter()
+            .filter(|((file, block), _)| *block != META && !live(*file))
             .map(|(_, s)| self.cache.len_of(*s))
             .sum()
     }
@@ -217,7 +221,7 @@ mod tests {
         // Replacing a block keeps one slot for it.
         c.insert(1, 3, Bytes::from_vec(vec![5; 100]));
         assert_eq!(c.get(1, 3).unwrap()[0], 5);
-        c.forget(1);
+        c.forget(1, 4);
         assert!(!c.contains(1, META));
         assert!(!c.contains(1, 3));
         assert_eq!(c.used(), 0);
@@ -235,10 +239,10 @@ mod tests {
             c.insert(file, column + 3, Bytes::from_vec(vec![2; 50]));
         }
         assert_eq!(c.bytes_outside(|f| f == 2), 150, "file 1's blocks, without its meta");
-        c.forget(1);
+        c.forget(1, 4);
         assert!(!c.contains(1, 0) && !c.contains(1, column + 3) && !c.contains(1, META));
         assert_eq!((c.used(), c.files.len()), (160, 1));
-        c.forget(2);
+        c.forget(2, 4);
         assert_eq!((c.used(), c.files.len()), (0, 0));
     }
 
@@ -252,21 +256,21 @@ mod tests {
             c.insert(file, column + 3, Bytes::from_vec(vec![2; 50]));
         }
         assert_eq!(c.bytes_outside(|f| f == 2), 150, "file 1's blocks, without its meta");
-        c.retire(1, true);
+        c.retire(1, 4, true);
         assert!(!c.contains(1, 0) && !c.contains(1, column + 3) && c.contains(1, META));
         assert_eq!(c.used(), 10 + 10 + 150);
         // A reader of an old view reads the block again: the cache does not take it back.
         c.insert(1, 0, Bytes::from_vec(vec![1; 100]));
         assert!(!c.contains(1, 0));
         // A cache that takes them (the shared one) keeps it until the file goes.
-        c.retire(2, false);
+        c.retire(2, 4, false);
         c.insert(2, 0, Bytes::from_vec(vec![1; 100]));
         assert!(c.contains(2, 0));
-        c.forget(1);
-        c.forget(2);
+        c.forget(1, 4);
+        c.forget(2, 4);
         assert_eq!((c.used(), c.files.len(), c.retired.len()), (0, 0, 0));
         // A file retired before it had a block in the cache is refused all the same.
-        c.retire(5, true);
+        c.retire(5, 1, true);
         c.insert(5, 0, Bytes::from_vec(vec![1; 100]));
         assert_eq!(c.used(), 0);
     }

@@ -26,8 +26,8 @@ impl Lsm {
                 free.iter().flat_map(|t| std::iter::once(t).chain(t.history.as_ref())).collect();
             let numbers: Vec<u64> = gone.iter().map(|t| t.number).collect();
             for t in gone {
-                self.reader.cache.forget(t.number);
-                self.shared.forget(t.number);
+                self.reader.cache.forget(t.number, t.blocks());
+                self.shared.forget(t.number, t.blocks());
             }
             return Some(Job::Delete(Script::delete(&self.cfg, &numbers)));
         }
@@ -114,8 +114,8 @@ impl Lsm {
     /// disk, and its blocks would otherwise hold memory of the caches until it goes.
     fn retire(&mut self, t: Arc<Table>) {
         for f in std::iter::once(&t).chain(t.history.as_ref()) {
-            self.reader.cache.retire(f.number, true);
-            self.shared.retire(f.number);
+            self.reader.cache.retire(f.number, f.blocks(), true);
+            self.shared.retire(f.number, f.blocks());
         }
         self.obsolete.push(t);
     }
