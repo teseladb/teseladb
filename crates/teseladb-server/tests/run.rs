@@ -192,17 +192,21 @@ fn start_with_only_a_configuration_file() {
     assert!(d.0.join("data").join("node.meta").exists());
 }
 
-/// The program installs its stop handler before it runs anything; one it cannot install ends it
-/// with 1 and says why (001 FR-017).
+/// A command that runs an engine installs its stop handler before it runs anything; one it
+/// cannot install ends it with 1 and says why (001 FR-017). A command without an engine needs
+/// none (023 FR-031: shard 0 handles the stop signals).
 #[test]
 fn the_program_stops_when_it_cannot_handle_stop_signals() {
-    let args = vec!["--version".to_string()];
-    let (mut out, mut err) = (Vec::new(), Vec::new());
-    let ok = || Ok(());
-    assert_eq!(program(&args, &mut out, &mut err, &ok, &|| true), 0);
-    assert_eq!(String::from_utf8(out).unwrap(), version_text());
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let version = vec!["--version".to_string()];
     let refused = || Err(std::io::Error::other("refused"));
+    for install in [&(|| Ok(())) as &dyn Fn() -> std::io::Result<()>, &refused] {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(program(&version, &mut out, &mut err, install, &|| true), 0);
+        assert_eq!(String::from_utf8(out).unwrap(), version_text());
+    }
+    let data = Dir::new("signals");
+    let args: Vec<String> = start_args(&data.0, &[]).iter().map(|s| s.to_string()).collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
     assert_eq!(program(&args, &mut out, &mut err, &refused, &|| true), 1);
     assert!(out.is_empty());
     let err = String::from_utf8(err).unwrap();
