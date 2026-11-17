@@ -298,6 +298,13 @@ pub mod websocket {
                     let header = FrameHeader::new(self._buffer.as_bytes());
                     self._header = Some(header);
                     self._buffer = Sstring::new();
+                    // A new frame starts with no payload. The connection takes the payload
+                    // of data frames only, so a control frame's (a ping's) would otherwise
+                    // stay here and the next frame would be copied into it: the original
+                    // (websocket/parser.cc) echoes the 13 bytes of a ping's payload with the
+                    // first bytes of the next message over them, and writes a longer message
+                    // past the end of that buffer.
+                    self._result = BuffT::empty_buffer();
 
                     // https://datatracker.ietf.org/doc/html/rfc6455#section-5.1
                     // We must close the connection if data isn't masked.

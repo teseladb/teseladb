@@ -141,6 +141,12 @@ name = "cov4_err_dns_test"
 path = "tests/entry/cov4_err_dns_test.rs"
 harness = false
 
+# The application template's options and failed starts, one engine per case.
+[[test]]
+name = "cov4_rest_app_test"
+path = "tests/entry/cov4_rest_app_test.rs"
+harness = false
+
 # The microbenchmarks; each includes the runner of benches/common/perf_tests.rs and prints
 # its results table.
 [[bench]]
