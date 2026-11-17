@@ -462,7 +462,8 @@ mod tests {
 
     #[test]
     fn regions_are_block_aligned_and_rotate() {
-        let mut w = WalWriter::new(0, 1, 3 * BLOCK as u64);
+        // The regions' sizes in blocks are those of the records in clear.
+        let mut w = WalWriter::new(0, 1, 3 * BLOCK as u64).with_compression(false);
         let mut next = ids();
         let r = w.close_batch(1, &mut next, 0);
         assert_eq!(r.prepare.len(), 1);
@@ -606,9 +607,10 @@ mod tests {
         let (plain_bytes, plain) = region_of(false);
         assert!(is_compressed_region(&packed));
         assert!(!is_compressed_region(&plain));
-        assert_eq!((packed_bytes, plain_bytes), (BLOCK as u64, 2 * BLOCK as u64));
         let mut want = Vec::new();
         rec.encode_into(&mut want);
+        let in_clear = (record_len(25) + want.len()).next_multiple_of(BLOCK) as u64;
+        assert_eq!((packed_bytes, plain_bytes), (BLOCK as u64, in_clear));
         assert_eq!(&plain[..want.len()], &want[..]);
         assert_eq!(decompress_region(&packed), Some(want));
     }

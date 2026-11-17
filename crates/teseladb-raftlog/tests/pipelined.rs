@@ -17,7 +17,8 @@ fn entry(index: u64, len: usize) -> LogEntry {
 }
 
 fn pipelined(depth: usize) -> StorageConfig {
-    StorageConfig { max_inflight_batches: depth, ..small_cfg() }
+    // The batches are counted against the segment's size as they are written: in clear.
+    StorageConfig { max_inflight_batches: depth, compress_wal: false, ..small_cfg() }
 }
 
 /// A store with group `G` created and on disk.

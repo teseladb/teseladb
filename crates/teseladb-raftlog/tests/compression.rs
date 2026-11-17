@@ -78,8 +78,9 @@ fn compressed_regions_are_smaller_and_recover_the_same_entries() {
     let mut plain = MemDisk::new();
     let packed_bytes = write(&small_cfg(), &mut packed, 200, doc);
     let plain_bytes = write(&plain_cfg(), &mut plain, 200, doc);
-    // Each batch of ten documents takes four blocks as it is and one compressed.
-    assert!(packed_bytes * 3 < plain_bytes, "{packed_bytes} vs {plain_bytes}");
+    // Each batch of ten documents takes three blocks as it is and one compressed; the
+    // segment's header block is the same in both.
+    assert!(packed_bytes * 5 < plain_bytes * 2, "{packed_bytes} vs {plain_bytes}");
     let want: Vec<LogEntry> = (1..=200).map(|i| entry(i, doc(i))).collect();
     assert_eq!(recovered(&small_cfg(), &mut packed, 200), (want.clone(), 200));
     assert_eq!(recovered(&plain_cfg(), &mut plain, 200), (want.clone(), 200));
@@ -133,7 +134,7 @@ fn sealed_regions_are_compressed_first_and_recover() {
         let mut b = MemDisk::new();
         let packed = write(&sealed, &mut a, 100, doc);
         let plain = write(&sealed_plain, &mut b, 100, doc);
-        assert!(packed * 3 < plain, "{mode:?}: {packed} vs {plain}");
+        assert!(packed * 5 < plain * 2, "{mode:?}: {packed} vs {plain}");
         // Nothing of the documents is in clear in the segments.
         for p in a.list(&paths::wal_dir(0)).expect("list succeeds") {
             let bytes = a.read_all(&p).expect("read_all succeeds");

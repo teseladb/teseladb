@@ -204,7 +204,8 @@ fn idle_group_state_survives_wal_release() {
 
 #[test]
 fn release_floor_holds_back_the_wal() {
-    let cfg = small_cfg();
+    // The segments fill by the bytes written in clear.
+    let cfg = StorageConfig { compress_wal: false, ..small_cfg() };
     let mut disk = MemDisk::new();
     let mut s = recover(&cfg, &mut disk);
     let mut now = Nanos::ZERO;
