@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future};
+use teseladb::engine::core::preempt::need_preempt;
 use teseladb::engine::core::reactor::yield_;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint, Timer};
@@ -30,6 +31,10 @@ use crate::service::ServiceClass;
 
 /// How soon a core tries again to queue WAL operations for the device log when its queue was full.
 const LOG_QUEUE_RETRY: Nanos = Nanos::from_millis(1);
+/// How long a turn hands messages to the logic before it lets the shard run its other tasks, once
+/// the engine asks for preemption: the engine's task quota (`--task-quota-ms`). The quota the turn
+/// finds used up may have gone to the tasks before it, so the turn's own time counts.
+const TURN_QUOTA: Duration = Duration::from_micros(500);
 /// Longest wait between two looks at a stopping core's disk, so that an executor that died
 /// while the core waits for it is noticed.
 const STOP_SETTLE_POLL: Duration = Duration::from_millis(10);
@@ -183,12 +188,13 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
     }
 
     /// Waits for the next turn: until something arrives or the deadline passes. A core with
-    /// background requests, or with disk results nothing will announce, only lets the shard run
-    /// its other tasks.
+    /// messages its last turn left, background requests, or disk results nothing will announce,
+    /// only lets the shard run its other tasks.
     async fn sleep(&mut self) {
         let now = self.now();
         let deadline = self.deadline(now);
-        if !self.background.is_empty() || self.disk.ready() || deadline <= now {
+        let left = !self.inputs.is_empty() || !self.background.is_empty();
+        if left || self.disk.ready() || deadline <= now {
             yield_now().await;
             return;
         }
@@ -244,9 +250,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             self.logic.on_io_done(done, IoClass::Log, now);
         }
         self.net.inputs(&mut self.logic, now);
-        for (queued, input) in std::mem::take(&mut self.inputs) {
-            self.on_input(queued, input);
-        }
+        self.take_inputs();
         self.run_background();
         let now = self.now();
         if now >= self.next_tick {
@@ -265,6 +269,28 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             let busy = self.now().0.saturating_sub(woke.0);
             teseladb_stages::record(teseladb_stages::Stage::CoreStep, busy);
         }
+    }
+
+    /// Hands the messages that arrived to the logic, in order, until the turn has used up its task
+    /// quota (at least one): the rest wait for the next turn, which comes once the shard ran its
+    /// other tasks. What the turn's messages asked of the disk, the device log and the network
+    /// goes out at its end, so a turn with many messages (scans of thousands of documents among
+    /// writes) no longer holds the writes it took first until it took them all.
+    fn take_inputs(&mut self) {
+        let from = Instant::now();
+        let mut all = std::mem::take(&mut self.inputs);
+        let mut inputs = all.drain(..);
+        for (queued, input) in inputs.by_ref() {
+            self.on_input(queued, input);
+            // The quota may have gone to the tasks before the turn: the turn's own messages
+            // count. A stopping core takes all, as its last turn.
+            if need_preempt() && from.elapsed() >= TURN_QUOTA && !self.stopped {
+                break;
+            }
+        }
+        let rest: Vec<_> = inputs.collect();
+        // The buffer goes back for the next turn's inputs when all were taken.
+        self.inputs = if rest.is_empty() { all } else { rest };
     }
 
     fn on_input(&mut self, queued: Instant, input: CoreInput<L::Msg>) {
@@ -289,7 +315,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
 
     /// Runs one background request if nothing new waits (012 FR-030).
     fn run_background(&mut self) {
-        if self.background.is_empty() || !self.inbox.is_empty() {
+        if self.background.is_empty() || !self.inbox.is_empty() || !self.inputs.is_empty() {
             return;
         }
         let (queued, m) = self.background.pop_front().expect("a background request");
