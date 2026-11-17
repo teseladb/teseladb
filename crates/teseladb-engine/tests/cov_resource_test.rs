@@ -92,6 +92,9 @@ fn an_explicit_total_must_fit() {
     assert!(e.to_string().contains("insufficient physical memory"), "{e}");
 }
 
+// The planner of a build without hwloc: one I/O queue topology, for device 0, whatever the
+// configuration names, and no NUMA map (the reference's allocate() without hwloc).
+#[cfg(not(feature = "hwloc"))]
 #[test]
 fn allocation_gives_each_cpu_a_shard_and_one_io_group() {
     let mut c = config(Some(0), Some(64 * MIB), 0, 2);
@@ -113,6 +116,55 @@ fn allocation_gives_each_cpu_a_shard_and_one_io_group() {
     c.cpu_set = Cpuset::from([0]);
     assert!(allocate(&mut c).is_err());
 
+    assert!(nr_processing_units(&mut c) >= 1);
+}
+
+// The planner over hwloc: every CPU gets a shard and its share of the memory, an I/O queue
+// topology exists for each device the configuration names (none otherwise), and the NUMA map
+// covers the CPUs (the reference's allocate() with hwloc).
+#[cfg(feature = "hwloc")]
+#[test]
+fn allocation_over_hwloc_follows_the_configured_devices() {
+    let mut c = config(Some(0), Some(64 * MIB), 0, 2);
+    c.cpu_set = Cpuset::from([0, 1]);
+    let r = allocate(&mut c).unwrap();
+    let cpus: Vec<u32> = r.cpus.iter().map(|cpu| cpu.cpu_id).collect();
+    assert_eq!(cpus, [0, 1]);
+    for cpu in &r.cpus {
+        assert_eq!(cpu.mem.iter().map(|m: &Memory| m.bytes).sum::<usize>(), 32 * MIB);
+    }
+    assert!(r.ioq_topology.is_empty(), "no device was configured");
+    assert!(!r.numa_node_id_to_cpuset.is_empty());
+    assert!(r.numa_node_id_to_cpuset.values().any(|set| set.contains(&0)));
+
+    let mut c = config(Some(0), Some(64 * MIB), 0, 2);
+    c.cpu_set = Cpuset::from([0, 1]);
+    c.io_queues = vec![7];
+    let r = allocate(&mut c).unwrap();
+    assert_eq!(r.ioq_topology.len(), 1);
+    let topo = &r.ioq_topology[&7];
+    assert_eq!(topo.queues.len(), 2);
+    assert_eq!(topo.shard_to_group.len(), 2);
+    assert_eq!(topo.shards_in_group.iter().sum::<u32>(), 2);
+
+    // One I/O group for both shards: the second joins the first one's group.
+    c.num_io_groups = 1;
+    let r = allocate(&mut c).unwrap();
+    let topo = &r.ioq_topology[&7];
+    assert_eq!(topo.shard_to_group, [0, 0]);
+    assert_eq!(topo.shards_in_group[0], 2);
+    // More groups than shards are cut down to one per shard.
+    c.num_io_groups = 5;
+    let r = allocate(&mut c).unwrap();
+    let topo = &r.ioq_topology[&7];
+    let mut groups = topo.shard_to_group.clone();
+    groups.sort_unstable();
+    assert_eq!(groups, [0, 1]);
+
+    // Asking for more memory than the machine has fails.
+    let mut c = config(Some(0), Some(1 << 50), 0, 1);
+    c.cpu_set = Cpuset::from([0]);
+    assert!(allocate(&mut c).is_err());
     assert!(nr_processing_units(&mut c) >= 1);
 }
 

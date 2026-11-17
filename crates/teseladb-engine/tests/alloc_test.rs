@@ -776,6 +776,23 @@ mod engine_allocator_tests {
             ret
         }
 
+        /// Fills the slice with `malloc_wrapper(size)` blocks from one call site, which every
+        /// expansion of the macro makes a site of its own. The reference keeps its loops whole
+        /// with `#pragma nounroll`: an unrolled loop calls from several addresses, and each
+        /// becomes an allocation site of its own, and so does a peeled first iteration. Here
+        /// the index passes through `black_box` at the start and on every step, so the compiler
+        /// knows neither the trip count nor the first iteration, and the loop stays whole.
+        macro_rules! fill_from_one_call_site {
+            ($ptrs:expr, $size:expr) => {{
+                let ptrs: &mut [*mut u8] = $ptrs;
+                let mut i = std::hint::black_box(0usize);
+                while i < ptrs.len() {
+                    ptrs[i] = malloc_wrapper($size);
+                    i = std::hint::black_box(i + 1);
+                }
+            }};
+        }
+
         /// The text form of an allocation site.
         fn site_str(site: &memory::AllocationSite) -> String {
             format!("allocation_site[count: {}, size: {}]", site.count.get(), site.size.get())
@@ -797,12 +814,8 @@ mod engine_allocator_tests {
             let count: usize = 100;
             let mut ptrs: Vec<*mut u8> = vec![std::ptr::null_mut(); count];
             memory::set_heap_profiling_sampling_rate(100);
-            for ptr in ptrs.iter_mut().take(count / 2) {
-                *ptr = malloc_wrapper(10);
-            }
-            for ptr in ptrs.iter_mut().skip(count / 2) {
-                *ptr = malloc_wrapper(10);
-            }
+            fill_from_one_call_site!(&mut ptrs[..count / 2], 10);
+            fill_from_one_call_site!(&mut ptrs[count / 2..], 10);
 
             let get_samples = || {
                 let stats0 = memory::sampled_memory_profile();
@@ -859,12 +872,8 @@ mod engine_allocator_tests {
 
             memory::set_heap_profiling_sampling_rate(1000000);
 
-            for ptr in ptrs.iter_mut().take(count / 2) {
-                *ptr = malloc_wrapper(100000);
-            }
-            for ptr in ptrs.iter_mut().skip(count / 2) {
-                *ptr = malloc_wrapper(100000);
-            }
+            fill_from_one_call_site!(&mut ptrs[..count / 2], 100000);
+            fill_from_one_call_site!(&mut ptrs[count / 2..], 100000);
 
             // NB: the test framework allocate
             memory::set_heap_profiling_sampling_rate(0);
@@ -967,9 +976,7 @@ mod engine_allocator_tests {
 
             memory::set_heap_profiling_sampling_rate(sample_rate);
 
-            for ptr in ptrs.iter_mut() {
-                *ptr = malloc_wrapper(10);
-            }
+            fill_from_one_call_site!(&mut ptrs[..], 10);
 
             // NB: the test framework allocates
             memory::set_heap_profiling_sampling_rate(0);
@@ -1033,6 +1040,250 @@ mod engine_allocator_tests {
             make_ready_future(())
         });
     } // ENGINE_HEAPPROF
+
+    // Every allocation entry point that consults the allocation failure injector fails when
+    // it fires, the way the reference's `try_trigger_error_injector()` callers do: the
+    // C entry points and the non-throwing object allocations return null (posix_memalign
+    // ENOMEM, its out-pointer untouched), realloc leaves the old block live, and none of them
+    // reaches the allocator (no allocation is counted, and no failure either, as the
+    // reference's injected failures happen before `allocate`).
+    #[cfg(feature = "alloc_failure_injection")]
+    mod injection {
+        use std::ffi::c_void;
+
+        use super::{aligned_alloc, free, malloc, memalign, posix_memalign, realloc};
+        use teseladb::engine::core::future::make_ready_future;
+        use teseladb::engine::core::memory;
+        use teseladb::engine::util::alloc_failure_injector::memory::local_failure_injector;
+        use teseladb::engine::util::critical_alloc_section::memory::ScopedCriticalAllocSection;
+        use teseladb::engine_test_case;
+
+        unsafe extern "C" {
+            fn calloc(nmemb: usize, size: usize) -> *mut c_void;
+        }
+
+        /// ENOMEM on Linux.
+        const ENOMEM: i32 = 12;
+
+        /// Cancels the injector's scheduled failure when dropped, also when a check fails: the
+        /// test cases share the shard, and with it the injector.
+        struct Disarm;
+
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                local_failure_injector().cancel();
+            }
+        }
+
+        /// `malloc(size)`, kept by the compiler (see [`with_next_point_failing`]).
+        fn kept_malloc(size: usize) -> *mut c_void {
+            // SAFETY: malloc has no preconditions.
+            std::hint::black_box(unsafe { malloc(std::hint::black_box(size)) })
+        }
+
+        /// Runs `f` with the injector set to fail the next allocation point, and checks that
+        /// `f` met it and that the allocator did not count an allocation failure. (The
+        /// injector's failure is a caught panic, whose payload is itself allocated, so the
+        /// allocation count is not checked.)
+        /// The result is passed through `black_box`: the compiler knows the C allocation
+        /// functions and may otherwise drop a call whose block is only compared with null.
+        fn with_next_point_failing<T>(name: &str, f: impl FnOnce() -> T) -> T {
+            let before = memory::stats();
+            let _disarm = Disarm;
+            local_failure_injector().fail_after(0);
+            let r = std::hint::black_box(f());
+            let after = memory::stats();
+            assert!(local_failure_injector().failed(), "{name}: the injector did not fire");
+            assert_eq!(
+                after.failed_allocations(),
+                before.failed_allocations(),
+                "{name}: counted as an allocation failure"
+            );
+            r
+        }
+
+        engine_test_case!(test_injected_failure_in_c_entry_points, {
+            // SAFETY: (every call below) the C allocation functions have no preconditions for
+            // these arguments; they return null here, which nothing dereferences.
+            unsafe {
+                assert!(with_next_point_failing("malloc", || malloc(16)).is_null());
+                assert!(with_next_point_failing("calloc", || calloc(4, 16)).is_null());
+                assert!(
+                    with_next_point_failing("realloc(null)", || realloc(std::ptr::null_mut(), 16))
+                        .is_null()
+                );
+                assert!(with_next_point_failing("memalign", || memalign(64, 16)).is_null());
+                assert!(
+                    with_next_point_failing("aligned_alloc", || aligned_alloc(64, 64)).is_null()
+                );
+                assert!(
+                    with_next_point_failing("__libc_malloc", || memory::__libc_malloc(16))
+                        .is_null()
+                );
+                assert!(
+                    with_next_point_failing("__libc_calloc", || memory::__libc_calloc(2, 8))
+                        .is_null()
+                );
+                assert!(
+                    with_next_point_failing("__libc_memalign", || memory::__libc_memalign(32, 8))
+                        .is_null()
+                );
+            }
+            make_ready_future(())
+        });
+
+        engine_test_case!(test_injected_failure_in_posix_memalign_keeps_the_out_pointer, {
+            let marker = 0x5a5a_usize as *mut c_void;
+            let mut p = marker;
+            // SAFETY: `p` is a local out-pointer; 64 is a power of two multiple of a pointer.
+            let r = with_next_point_failing("posix_memalign", || unsafe {
+                posix_memalign(&mut p, 64, 100)
+            });
+            assert_eq!(r, ENOMEM);
+            assert_eq!(p, marker, "posix_memalign wrote its out-pointer on an injected failure");
+            let mut q = marker;
+            // SAFETY: as above.
+            let r = with_next_point_failing("__libc_posix_memalign", || unsafe {
+                memory::__libc_posix_memalign(&mut q, 64, 100)
+            });
+            assert_eq!(r, ENOMEM);
+            assert_eq!(q, marker);
+            // With the injector idle the same call succeeds.
+            // SAFETY: as above; the block is freed once.
+            unsafe {
+                assert_eq!(posix_memalign(&mut p, 64, 100), 0);
+                assert!(!p.is_null() && (p as usize).is_multiple_of(64));
+                free(p);
+            }
+            make_ready_future(())
+        });
+
+        // An aligned buffer whose posix_memalign fails with ENOMEM is a BadAlloc error, as the
+        // reference's allocate_aligned_buffer throws std::bad_alloc.
+        engine_test_case!(test_injected_failure_in_an_aligned_buffer_is_bad_alloc, {
+            use teseladb::engine::core::future::BadAlloc;
+            let r = with_next_point_failing("allocate_aligned_buffer_impl", || {
+                memory::allocate_aligned_buffer_impl(4096, 4096)
+            });
+            match r {
+                Err(e) => assert!(e.is::<BadAlloc>(), "failed with {e:?}"),
+                Ok(p) => panic!("allocated {p:p} under the injector"),
+            }
+            let p = memory::allocate_aligned_buffer_impl(4096, 4096).expect("no injection");
+            assert!((p as usize).is_multiple_of(4096));
+            // SAFETY: a live block from posix_memalign, freed once.
+            unsafe { free(p) };
+            make_ready_future(())
+        });
+
+        engine_test_case!(test_injected_failure_in_realloc_keeps_the_block, {
+            for (old, new) in [(16usize, 64usize), (64, 16), (40000, 80000), (80000, 100)] {
+                // SAFETY: malloc has no preconditions; the block is written within its size.
+                let p = unsafe { malloc(old) } as *mut u8;
+                assert!(!p.is_null());
+                // SAFETY: `p` holds `old` bytes.
+                unsafe { std::ptr::write_bytes(p, 0x3c, old) };
+                // SAFETY: `p` is a live block of this allocator.
+                let q = with_next_point_failing("realloc", || unsafe {
+                    realloc(p as *mut c_void, new)
+                });
+                assert!(q.is_null(), "realloc({old} -> {new}) succeeded under the injector");
+                // SAFETY: the failed realloc left `p` live with its `old` bytes.
+                let bytes = unsafe { std::slice::from_raw_parts(p, old) };
+                assert!(
+                    bytes.iter().all(|&b| b == 0x3c),
+                    "realloc({old} -> {new}) touched the block"
+                );
+                // SAFETY: as above.
+                let q = with_next_point_failing("__libc_realloc", || unsafe {
+                    memory::__libc_realloc(p as *mut c_void, new)
+                });
+                assert!(q.is_null());
+                // SAFETY: `p` is still live; freed once.
+                unsafe { free(p as *mut c_void) };
+            }
+            make_ready_future(())
+        });
+
+        engine_test_case!(test_injected_failure_in_nothrow_object_allocations, {
+            assert!(
+                with_next_point_failing("operator_new_nothrow", || memory::operator_new_nothrow(8))
+                    .is_null()
+            );
+            assert!(
+                with_next_point_failing("operator_new_aligned_nothrow", || {
+                    memory::operator_new_aligned_nothrow(8, 64, std::ptr::null())
+                })
+                .is_null()
+            );
+            assert!(
+                with_next_point_failing("operator_new_array_aligned_nothrow", || {
+                    memory::operator_new_array_aligned_nothrow(8, 64, std::ptr::null())
+                })
+                .is_null()
+            );
+            // The array form without alignment does not consult the injector, as in the
+            // reference (`operator new[](size_t, std::nothrow_t)` is a plain `allocate`).
+            let disarm = Disarm;
+            local_failure_injector().fail_after(0);
+            let p = std::hint::black_box(memory::operator_new_array_nothrow(8));
+            assert!(!local_failure_injector().failed());
+            drop(disarm);
+            assert!(!p.is_null());
+            memory::operator_delete_array_nothrow(p);
+            make_ready_future(())
+        });
+
+        // A critical allocation section suppresses the injection: the allocation succeeds and
+        // the scheduled failure stays pending until the section ends.
+        engine_test_case!(test_injected_failure_suppressed_in_critical_section, {
+            let disarm = Disarm;
+            local_failure_injector().fail_after(0);
+            let p = {
+                let _cs = ScopedCriticalAllocSection::new();
+                kept_malloc(32)
+            };
+            assert!(!p.is_null());
+            assert!(!local_failure_injector().failed());
+            // The injector is still armed: this call meets it and returns null.
+            let q = kept_malloc(32);
+            assert!(q.is_null());
+            assert!(local_failure_injector().failed());
+            drop(disarm);
+            // SAFETY: `p` is live; freed once.
+            unsafe { free(p) };
+            make_ready_future(())
+        });
+
+        // The injector counts the allocation points of the C entry points: N plain mallocs
+        // are N points, and `fail_after(k)` fails exactly the k-th one from now.
+        engine_test_case!(test_injected_failure_counts_allocation_points, {
+            let inj = local_failure_injector();
+            let start = inj.alloc_count();
+            let mut ptrs = Vec::with_capacity(8);
+            let mut counted_before_failure = 0;
+            let disarm = Disarm;
+            inj.fail_after(5);
+            for i in 0..8 {
+                if i == 5 {
+                    counted_before_failure = inj.alloc_count() - start;
+                }
+                ptrs.push(kept_malloc(24));
+            }
+            drop(disarm);
+            let failed: Vec<usize> =
+                ptrs.iter().enumerate().filter(|(_, p)| p.is_null()).map(|(i, _)| i).collect();
+            assert_eq!(failed, vec![5], "the wrong allocations failed");
+            // (The failure is a caught panic, whose report may allocate through the C entry
+            // points too, so only the points before it are counted exactly.)
+            assert_eq!(counted_before_failure, 5, "allocation points counted");
+            for p in ptrs {
+                // SAFETY: each pointer is null or a live block, freed once.
+                unsafe { free(p) };
+            }
+            make_ready_future(())
+        });
+    }
 } // #ifndef ENGINE_DEFAULT_ALLOCATOR
 
 engine_test_case!(test_large_allocation_warning_off_by_one, {

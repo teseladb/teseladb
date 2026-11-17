@@ -9,6 +9,7 @@ use crate::engine::core::circular_buffer::CircularBuffer;
 use crate::engine::core::future::{
     ExceptionPtr, Future, Promise, make_exception_future, make_ready_future,
 };
+use crate::engine::util::alloc_failure_injector::memory::catch_alloc_failure;
 
 /// Asynchronous single-producer single-consumer queue with limited capacity.
 /// There can be at most one producer-side and at most one consumer-side operation active at any time.
@@ -205,9 +206,15 @@ impl<T: 'static> Queue<T> {
                 me.notify_not_empty();
             })
         } else {
-            self.q.push_back(data);
-            self.notify_not_empty();
-            make_ready_future(())
+            // A failed allocation of the buffer fails the future, as in the reference (which
+            // catches it around the push): the buffer is unchanged and the item is dropped.
+            match catch_alloc_failure(|| self.q.push_back(data)) {
+                Ok(()) => {
+                    self.notify_not_empty();
+                    make_ready_future(())
+                }
+                Err(e) => make_exception_future(e),
+            }
         }
     }
 

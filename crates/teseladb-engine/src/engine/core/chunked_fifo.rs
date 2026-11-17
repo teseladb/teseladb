@@ -32,6 +32,11 @@ struct Chunk<T, const N: usize> {
 impl<T, const N: usize> Chunk<T, N> {
     #[inline]
     fn alloc() -> *mut Self {
+        // An allocation point of the failure injector, as the reference's `new chunk` is: with
+        // the `alloc_failure_injection` feature the injector can make it fail here, by panicking
+        // with `BadAlloc`, before the fifo has changed (both callers take the chunk first).
+        // Nothing without the feature.
+        crate::engine::util::alloc_failure_injector::memory::on_alloc_point();
         Box::into_raw(Box::new(Chunk {
             items: [const { MaybeUninit::uninit() }; N],
             next: ptr::null_mut(),

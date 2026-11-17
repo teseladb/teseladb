@@ -211,6 +211,26 @@ pub mod memory {
         local_failure_injector().on_alloc_point();
     }
 
+    /// Runs `f`, turning a failure it raises into an error: what the reference's
+    /// `try { ... } catch (...) { return current_exception_as_future(); }` around a call that
+    /// allocates from the engine's containers gives. Only the failure injector makes those
+    /// allocations fail by unwinding (a real failure aborts the process), so without the
+    /// `alloc_failure_injection` feature this is a plain call of `f`.
+    #[inline(always)]
+    pub fn catch_alloc_failure<R>(
+        f: impl FnOnce() -> R,
+    ) -> Result<R, crate::engine::core::future::ExceptionPtr> {
+        #[cfg(feature = "alloc_failure_injection")]
+        {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .map_err(crate::engine::core::future::ExceptionPtr::from_panic)
+        }
+        #[cfg(not(feature = "alloc_failure_injection"))]
+        {
+            Ok(f())
+        }
+    }
+
     /// Runs `func` repeatedly with allocation failures.
     ///
     /// In the first run allocations fail immediately; in each subsequent run the failure

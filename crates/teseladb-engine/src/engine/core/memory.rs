@@ -1789,6 +1789,86 @@ mod engine_allocator {
         }
     }
 
+    // The size classes and the pool geometry are computed by `const fn`s that the shard pools
+    // only ever evaluate at compile time; these tests run them at run time and check the
+    // table they produce.
+    #[cfg(test)]
+    mod size_class_tests {
+        use super::*;
+
+        #[test]
+        fn size_classes_grow_and_hold_every_request() {
+            let mut previous = 0;
+            for idx in 0..NR_SMALL_POOLS as u32 {
+                let size = SmallPool::idx_to_size(idx);
+                assert!(size >= previous, "class {idx} ({size}) below the class before");
+                if size as usize > MAX_ALIGN_T_ALIGN {
+                    assert!((size as usize).is_multiple_of(MAX_ALIGN_T_ALIGN), "class {idx}");
+                }
+                previous = size;
+            }
+            // Every small request maps to a class that holds it (the allocation paths raise a
+            // request to the size of a free-list link first).
+            for request in size_of::<FreeObject>() as u32..=MAX_SMALL_ALLOCATION as u32 {
+                let idx = SmallPool::size_to_idx(request);
+                assert!((idx as usize) < NR_SMALL_POOLS, "request {request}: class {idx}");
+                assert!(SmallPool::idx_to_size(idx) >= request, "request {request}: class {idx}");
+            }
+            assert_eq!(
+                SmallPool::idx_to_size(NR_SMALL_POOLS as u32 - 1) as usize,
+                MAX_SMALL_ALLOCATION
+            );
+            assert_eq!(MAX_SMALL_ALLOCATION, 4 * PAGE_SIZE);
+        }
+
+        #[test]
+        fn pools_pick_spans_that_hold_their_objects() {
+            for idx in 0..NR_SMALL_POOLS as u32 {
+                let size = SmallPool::idx_to_size(idx);
+                for sampled in [false, true] {
+                    // Never dropped: a pool's drop returns its objects to the thread's
+                    // cpu_pages, which this pool is not part of (as the shards' pools,
+                    // held in ManuallyDrop).
+                    let pool = ManuallyDrop::new(SmallPool::new(size, sampled));
+                    let fallback = pool._span_sizes.fallback as usize;
+                    let preferred = pool._span_sizes.preferred as usize;
+                    // The fallback is the smallest span that holds one object, the preferred
+                    // one holds at least four (or is the fallback).
+                    assert!(fallback * PAGE_SIZE >= size as usize);
+                    assert!(fallback == 1 || (fallback - 1) * PAGE_SIZE < size as usize);
+                    assert!(preferred == fallback || preferred * PAGE_SIZE / size as usize >= 4);
+                    assert!(pool._max_free >= 100 && pool._min_free == pool._max_free / 2);
+                    assert_eq!(pool.object_size(), size);
+                    assert!(pool._free.is_null() && pool._free_count == 0);
+                }
+            }
+            // The run-time table is the one the shards start with.
+            let pools = SmallPoolArray::<false>::default();
+            for idx in 0..NR_SMALL_POOLS as u32 {
+                // SAFETY: `pools` is live and `idx` in range.
+                let pool =
+                    unsafe { &*SmallPoolArray::<false>::get(&raw const pools as *mut _, idx) };
+                assert_eq!(pool.object_size(), SmallPool::idx_to_size(idx));
+            }
+            std::mem::forget(pools);
+        }
+
+        #[test]
+        fn a_new_shard_pool_owns_nothing_yet() {
+            // Never dropped, as the shards' own (see above).
+            let mem = Box::new(ManuallyDrop::new(CpuPages::new()));
+            assert!(!mem.is_initialized());
+            assert!(mem.memory.is_null() && mem.pages.is_null());
+            assert_eq!((mem.nr_pages, mem.nr_free_pages, mem.cpu_id), (0, 0, u32::MAX));
+            assert_eq!(mem.min_free_pages as usize, 20_000_000 / PAGE_SIZE);
+            assert_eq!(mem.large_allocation_warning_threshold, usize::MAX);
+            assert!(mem.reclaimers.is_empty() && mem.reclaim_hook.is_none());
+            assert!(mem.xcpu_freelist.0.load(Ordering::Relaxed).is_null());
+            assert!(mem.alloc_site_list_head.is_null());
+            std::mem::forget(mem);
+        }
+    }
+
     /// The largest size served by the small pools (16 KiB, four pages); larger requests take
     /// whole spans.
     pub const MAX_SMALL_ALLOCATION: usize =
@@ -3670,6 +3750,7 @@ mod engine_allocator {
     /// picked for the block.
     #[inline(always)]
     fn free_aligned_size(align: usize, size: usize) -> usize {
+        #[cfg_attr(engine_heapprof, allow(unused_mut))]
         let mut size = aligned_class_size(align, size);
         #[cfg(not(engine_heapprof))]
         {

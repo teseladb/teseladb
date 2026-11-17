@@ -4702,9 +4702,17 @@ impl Reactor {
     /// Whether `pathname` is accessible with `flags` (on the syscall thread).
     pub fn file_accessible(&mut self, pathname: &str, flags: AccessFlags) -> Future<bool> {
         const EACCES: i32 = 13;
-        // Allocating memory for a sstring can throw, hence the futurize_invoke
-        let p1 = Sstring::from(pathname);
-        let p2 = p1.clone();
+        // Allocating memory for a sstring can throw, hence the futurize_invoke: a failed
+        // allocation of the copies fails the future instead.
+        let copies = std::panic::catch_unwind(|| {
+            let p1 = Sstring::from(pathname);
+            let p2 = p1.clone();
+            (p1, p2)
+        });
+        let (p1, p2) = match copies {
+            Ok(copies) => copies,
+            Err(p) => return make_exception_future(ExceptionPtr::from_panic(p)),
+        };
         self.thread_pool()
             .submit::<SyscallResult<i32>, _>(move || {
                 let aflags = flags.bits();
@@ -6085,6 +6093,13 @@ impl Reactor {
     /// Queues `t` at the back of its scheduling group's task queue.
     #[inline]
     pub fn add_task(&mut self, t: TaskPtr) {
+        // The queue may grow here, and nothing can handle a failure: the reference's add_task
+        // is noexcept, so a failed allocation terminates there. The growth is a critical
+        // allocation, which the failure injector never fails (a real failure aborts), as in
+        // add_urgent_task: a failure injected here would unwind out of the scheduling of a
+        // ready promise, in the middle of its state change.
+        let _section =
+            crate::engine::util::critical_alloc_section::memory::ScopedCriticalAllocSection::new();
         // SAFETY: `t` is a live task handed to the reactor.
         let sg = unsafe { t.group() };
         let q = self.task_queue_of(sg);

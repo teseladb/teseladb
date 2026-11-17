@@ -297,11 +297,17 @@ impl ExceptionPtr {
 
     /// The exception of a caught panic (`std::current_exception()` inside `catch (...)`
     /// when the "throw" was a Rust panic): a panic that carried an `ExceptionPtr` gives
-    /// it back; any other becomes a [`RuntimeError`] with the panic message (the text of
-    /// a `&str` or `String` payload, `"unknown panic"` otherwise).
+    /// it back; a [`BadAlloc`] payload (an allocation failure, as the allocation failure
+    /// injector raises it) stays a [`BadAlloc`], as a caught `std::bad_alloc` does; any other
+    /// becomes a [`RuntimeError`] with the panic message (the text of a `&str` or `String`
+    /// payload, `"unknown panic"` otherwise).
     pub fn from_panic(payload: Box<dyn StdAny + Send>) -> ExceptionPtr {
         let payload = match payload.downcast::<ExceptionPtr>() {
             Ok(ep) => return *ep,
+            Err(p) => p,
+        };
+        let payload = match payload.downcast::<BadAlloc>() {
+            Ok(_) => return ExceptionPtr::new(BadAlloc),
             Err(p) => p,
         };
         let msg = match payload.downcast::<String>() {

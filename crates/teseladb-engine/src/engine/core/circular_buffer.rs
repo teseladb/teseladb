@@ -205,6 +205,11 @@ impl<T> CircularBuffer<T> {
         if layout.size() == 0 {
             return NonNull::dangling();
         }
+        // An allocation point of the failure injector, as the reference's allocator is (its
+        // storage comes from `operator new`, which consults the injector): with the
+        // `alloc_failure_injection` feature the injector can make it fail here, by panicking
+        // with `BadAlloc`, before the buffer has changed. Nothing without the feature.
+        crate::engine::util::alloc_failure_injector::memory::on_alloc_point();
         // SAFETY: layout has a non-zero size.
         let p = unsafe { alloc::alloc(layout) } as *mut T;
         NonNull::new(p).unwrap_or_else(|| alloc::handle_alloc_error(layout))

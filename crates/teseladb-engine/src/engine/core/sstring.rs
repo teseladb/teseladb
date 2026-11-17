@@ -33,11 +33,13 @@ pub type Sstring = BasicSstring<15, true>;
 pub mod internal {
     use super::*;
 
-    /// Reports a failed allocation for a string: aborts through
-    /// [`std::alloc::handle_alloc_error`].
+    /// Reports a failed allocation for a string: raises
+    /// [`BadAlloc`](crate::engine::core::future::BadAlloc) (a panic with that payload, which
+    /// [`ExceptionPtr::from_panic`] turns back into a `BadAlloc`), as the reference throws
+    /// `std::bad_alloc`. The string being built is left in a state its drop accepts.
     #[cold]
     pub fn throw_bad_alloc() -> ! {
-        std::alloc::handle_alloc_error(std::alloc::Layout::new::<u8>())
+        std::panic::panic_any(crate::engine::core::future::BadAlloc)
     }
 
     /// The error of an operation whose result would exceed `u32::MAX` bytes.
@@ -184,13 +186,15 @@ impl<const MAX: usize, const NUL: bool> BasicSstring<MAX, NUL> {
                 s.u.internal.size = size as i8;
             }
         } else {
-            // SAFETY: switching to the external representation; malloc() result checked.
+            // SAFETY: switching to the external representation; malloc() result checked. The
+            // block is taken before `s` turns external, so a failure leaves `s` the empty
+            // internal string, which its drop accepts.
             unsafe {
-                s.u.internal.size = -1;
                 let p = malloc(size + Self::padding()) as *mut u8;
                 if p.is_null() {
                     internal::throw_bad_alloc();
                 }
+                s.u.internal.size = -1;
                 s.u.external.str = p;
                 s.u.external.size = size as u32;
                 if NUL {
@@ -697,13 +701,14 @@ impl<const MAX: usize, const NUL: bool> Clone for BasicSstring<MAX, NUL> {
         }
         let n = self.size();
         let mut s = Self { u: Self::empty_contents() };
-        // SAFETY: building the external representation of a copy; malloc() result checked.
+        // SAFETY: building the external representation of a copy; malloc() result checked
+        // before `s` turns external (see `with_len`).
         unsafe {
-            s.u.internal.size = -1;
             let p = malloc(n + Self::padding()) as *mut u8;
             if p.is_null() {
                 internal::throw_bad_alloc();
             }
+            s.u.internal.size = -1;
             std::ptr::copy_nonoverlapping(self.u.external.str, p, n + Self::padding());
             s.u.external.str = p;
             s.u.external.size = n as u32;

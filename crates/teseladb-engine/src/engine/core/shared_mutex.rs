@@ -8,8 +8,9 @@
 use crate::engine::core::chunked_fifo::ChunkedFifo;
 use crate::engine::core::do_with::Lockable;
 use crate::engine::core::future::{
-    Future, Futurize, FuturizeT, Promise, futurize_invoke, make_ready_future,
+    Future, Futurize, FuturizeT, Promise, futurize_invoke, make_exception_future, make_ready_future,
 };
+use crate::engine::util::alloc_failure_injector::memory::catch_alloc_failure;
 
 struct Waiter {
     pr: Promise<()>,
@@ -54,8 +55,17 @@ impl SharedMutex {
         if self.try_lock_shared() {
             return make_ready_future(());
         }
-        self.waiters.push_back(Waiter { pr: Promise::new(), for_write: false });
-        self.waiters.back_mut().pr.get_future()
+        self.wait(Waiter { pr: Promise::new(), for_write: false })
+    }
+
+    /// Queues `w` and returns its future; a failed allocation of the queue fails the future
+    /// instead, as the reference's lock functions catch it around the queueing (the mutex is
+    /// unchanged).
+    fn wait(&mut self, w: Waiter) -> Future<()> {
+        match catch_alloc_failure(|| self.waiters.push_back(w)) {
+            Ok(()) => self.waiters.back_mut().pr.get_future(),
+            Err(e) => make_exception_future(e),
+        }
     }
 
     /// Tries to lock the mutex for shared access without waiting.
@@ -87,8 +97,7 @@ impl SharedMutex {
         if self.try_lock() {
             return make_ready_future(());
         }
-        self.waiters.push_back(Waiter { pr: Promise::new(), for_write: true });
-        self.waiters.back_mut().pr.get_future()
+        self.wait(Waiter { pr: Promise::new(), for_write: true })
     }
 
     /// Tries to lock the mutex for exclusive access without waiting.

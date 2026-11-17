@@ -334,6 +334,37 @@ fn test_compares_left_hand_not_string() {
     assert!(lt_string);
 }
 
+// A failed allocation of a long string raises BadAlloc, as the reference throws
+// `std::bad_alloc`, and leaves nothing to free: building and copying a string that does not
+// fit inline both fail cleanly, and the next attempt succeeds.
+#[cfg(feature = "alloc_failure_injection")]
+#[test]
+fn test_allocation_failure_raises_bad_alloc() {
+    use teseladb::engine::core::future::BadAlloc;
+    use teseladb::engine::util::alloc_failure_injector::memory::local_failure_injector;
+
+    let long = "a string longer than the inline capacity";
+    let fails = |f: &dyn Fn() -> Sstring| {
+        local_failure_injector().fail_after(0);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        local_failure_injector().cancel();
+        match r {
+            Ok(_) => panic!("the allocation did not fail"),
+            Err(p) => assert!(p.is::<BadAlloc>(), "the failure is not a BadAlloc"),
+        }
+    };
+    fails(&|| Sstring::from(long));
+    let original = Sstring::from(long);
+    fails(&|| original.clone());
+    assert_eq!(original.clone(), *long);
+    // Inline strings allocate nothing, so the injector does not reach them.
+    local_failure_injector().fail_after(0);
+    let short = Sstring::from("short");
+    assert!(!local_failure_injector().failed());
+    local_failure_injector().cancel();
+    assert_eq!(short, *"short");
+}
+
 #[test]
 fn test_fmt() {
     // Debug formatting of a value and of an empty vector of values.

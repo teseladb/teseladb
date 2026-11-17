@@ -140,6 +140,42 @@ engine_thread_test_case!(allocation_failure_settings, {
     assert!(stats().failed_allocations() > failed_before);
 });
 
+// A failed allocation is reported at the level its kind selects (none: debug; critical: error
+// inside a critical allocation section, which only the alloc_failure_injection build tracks,
+// debug outside; all: error), with the failing backtrace on the engine_memory logger at debug
+// level. Each failure is counted and none aborts.
+engine_thread_test_case!(allocation_failures_are_reported_by_kind, {
+    use teseladb::engine::util::critical_alloc_section::memory::ScopedCriticalAllocSection;
+    use teseladb::engine::util::log::{LogLevel, global_logger_registry};
+    let memory_logger = teseladb::engine::core::sstring::Sstring::from("engine_memory");
+    let level = global_logger_registry().get_logger_level(&memory_logger).unwrap();
+    global_logger_registry().set_logger_level(&memory_logger, LogLevel::Debug).unwrap();
+    let fail = || {
+        let before = stats().failed_allocations();
+        // SAFETY: malloc has no preconditions; the request cannot be met.
+        let p = std::hint::black_box(unsafe { malloc(isize::MAX as usize - 4096) });
+        assert!(p.is_null());
+        assert_eq!(stats().failed_allocations(), before + 1);
+    };
+    for kind in ["none", "critical", "all"] {
+        set_dump_memory_diagnostics_on_alloc_failure_kind_str(kind);
+        fail();
+        let _section = ScopedCriticalAllocSection::new();
+        fail();
+    }
+    // posix_memalign reports the failure as ENOMEM, with a null block.
+    unsafe extern "C" {
+        fn posix_memalign(out: *mut *mut c_void, align: usize, size: usize) -> i32;
+    }
+    let mut out = 0x5a5a_usize as *mut c_void;
+    // SAFETY: `out` is a local out-pointer; 64 is a power of two multiple of a pointer.
+    let r = unsafe { posix_memalign(&mut out, 64, isize::MAX as usize - 4096) };
+    assert_eq!(r, 12, "ENOMEM");
+    assert!(out.is_null(), "the out-pointer holds the failed (null) block");
+    set_dump_memory_diagnostics_on_alloc_failure_kind_str("critical");
+    global_logger_registry().set_logger_level(&memory_logger, level).unwrap();
+});
+
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(p: *mut c_void);

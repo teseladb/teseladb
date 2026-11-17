@@ -163,6 +163,19 @@ engine_test_case!(abc, {
     })
 });
 
+// An allocation failure raised inside a thread keeps its type: the reference's thread catches
+// the `std::bad_alloc` with `std::current_exception()`, so the future fails with a bad_alloc
+// that `handle_exception_type<std::bad_alloc>` intercepts. Here the failure is a panic whose
+// payload is `BadAlloc` (what the allocation failure injector raises).
+engine_test_case!(test_thread_bad_alloc_keeps_its_type, {
+    use teseladb::engine::core::future::BadAlloc;
+    thread_async(move || -> Result<(), ExceptionPtr> { std::panic::panic_any(BadAlloc) })
+        .then_wrapped(|f: teseladb::engine::core::future::Future<()>| {
+            let e = f.get().expect_err("the thread must fail");
+            assert!(e.is::<BadAlloc>(), "the thread failed with {e} instead of BadAlloc");
+        })
+});
+
 engine_test_case!(test_thread_custom_stack_size, {
     let x = Sstring::from("x");
     let y = Sstring::from("y");
