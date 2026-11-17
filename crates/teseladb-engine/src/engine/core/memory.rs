@@ -1940,9 +1940,11 @@ mod engine_allocator {
     /// Number of free span lists (one per power-of-two span size).
     pub const NR_SPAN_LISTS: usize = 32;
 
-    /// The smallest free span whose pages [`release_free_memory`] gives back to the system: a
-    /// huge page, so that a transparent huge page goes whole and is not split.
-    pub const RELEASE_MIN_PAGES: u32 = (HUGE_PAGE_SIZE / PAGE_SIZE) as u32;
+    /// The smallest free span whose pages [`release_free_memory`] gives back to the system:
+    /// 64 KiB. Spans of a huge page and up were not enough: after the one-node load the shards'
+    /// memory held 1110 MiB resident for 516 MiB allocated, its free memory cut in smaller spans
+    /// by the blocks still live. A transparent huge page with a span given back is split.
+    pub const RELEASE_MIN_PAGES: u32 = (64 << 10) / PAGE_SIZE as u32;
 
     /// A shard's whole allocator state: the page array, free span lists, small pools, reclaimers and statistics.
     pub struct CpuPages {
