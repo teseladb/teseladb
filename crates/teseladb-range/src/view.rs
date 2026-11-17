@@ -488,6 +488,11 @@ fn keep_batch(
 }
 
 impl RangeView {
+    /// The mark the view reads at: that of the last entry it applied.
+    pub fn applied_mark(&self) -> Hlc {
+        self.applied
+    }
+
     /// A scan begins: what it has to see. It reads this view if the view
     /// [`holds`](RangeView::holds) that, or a later view of the range that does (FR-034).
     pub fn begin(&self) -> Begun {

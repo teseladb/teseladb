@@ -244,6 +244,11 @@ impl ServerBackend {
         if waited && !view.holds(&begun) {
             self.outside.gave_up = Some((g, Instant::now() + VIEW_WAIT));
         }
+        // A view below the session's last commit may lack it: a transaction across ranges is
+        // answered by the range of its record, not by this one; the scan goes to the core.
+        if view.applied_mark() < self.across_committed {
+            return None;
+        }
         Some((view, begun))
     }
 
@@ -257,6 +262,12 @@ impl ServerBackend {
         let (g, core) = unrouted(self.h.routes.route_of(&mut self.outside.routes, key))?;
         let core = usize::from(core);
         let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
+        // A view below the session's last commit may lack it: a transaction across ranges is
+        // answered by the range of its record, not by this one (D-186).
+        if view.applied_mark() < self.across_committed {
+            DECLINED.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         let Some((value, at)) = self.serve(core, &view, key, concern) else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
