@@ -1329,6 +1329,10 @@ impl Evaluation {
     }
 }
 
+/// The latched keys up to which a mutation finds a key by going through them in order; past it,
+/// by a map of their places.
+const LINEAR_LOOKUP: usize = 16;
+
 impl Bound {
     /// What the mutation writes and answers on the versions `current` of the keys `latch`, at
     /// mark `mark`. Without a mark (005 FR-035: an evaluation prepared ahead of the write) it
@@ -1340,8 +1344,21 @@ impl Bound {
         current: &[Option<(u8, &[u8])>],
         mark: Option<Hlc>,
     ) -> Result<Evaluation, MutationError> {
+        // The place of each latched key, its first one, so that a write of many documents finds
+        // each of them without going through all the others.
+        let places = (latch.len() > LINEAR_LOOKUP).then(|| {
+            let mut m = std::collections::HashMap::with_capacity(latch.len());
+            for (i, k) in latch.iter().enumerate() {
+                m.entry(k.as_slice()).or_insert(i);
+            }
+            m
+        });
         let lookup = |k: &[u8]| {
-            latch.iter().position(|x| x == k).and_then(|i| current.get(i).copied().flatten())
+            let i = match &places {
+                Some(m) => m.get(k).copied(),
+                None => latch.iter().position(|x| x == k),
+            };
+            i.and_then(|i| current.get(i).copied().flatten())
         };
         let enforce = !matches!(self.mutation, DocMutation::Backfill { .. });
         let checker = Checker::new(self.rules(), enforce);
