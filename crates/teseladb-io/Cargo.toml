@@ -60,6 +60,10 @@ name = "engine_restart"
 harness = false
 
 [[test]]
+name = "engine_client_turn"
+harness = false
+
+[[test]]
 name = "engine_probe"
 harness = false
 

@@ -63,7 +63,6 @@ const TURN_WAIT: Duration = Duration::from_secs(600);
 const CLIENT_MEMORY: u64 = 256 << 20;
 
 /// The engine of the process (D4: one at a time) as the threads that are not shards see it.
-#[derive(Default)]
 struct Process {
     /// Whether an engine holds the turn, from its start until its thread ended.
     running: bool,
@@ -86,8 +85,8 @@ fn process() -> std::sync::MutexGuard<'static, Process> {
 
 /// The process's turn to run an engine, from its start until its thread ended. Starts in
 /// threads of their own (the tests of one binary) take turns instead of racing for the
-/// process's single `alien` instance. A client engine ([`lease_engine`]) gives its turn up to a start
-/// once its leases are gone.
+/// process's single `alien` instance. A client engine ([`lease_engine`]) gives its turn up to a
+/// start once its leases are gone.
 struct Turn;
 
 impl Turn {
@@ -176,7 +175,8 @@ pub fn lease_engine(start_client: bool) -> io::Result<EngineLease> {
             }
             p.running = true;
             drop(p);
-            let cfg = EngineConfig { shards: 1, memory: Some(CLIENT_MEMORY), ..EngineConfig::default() };
+            let cfg =
+                EngineConfig { shards: 1, memory: Some(CLIENT_MEMORY), ..EngineConfig::default() };
             // On failure the turn goes back with the dropped `Turn`.
             let engine = NodeEngine::start_with(&cfg, Turn, false)?;
             p = process();
