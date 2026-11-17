@@ -10,6 +10,9 @@
 //!   a target;
 //! - `lsm.get_disk`: a point read whose block comes from the disk (the page cache may serve
 //!   it), without a target;
+//! - `lsm.get_disk_shared`: the point read over the published view with its block read from the
+//!   file in an engine thread, as a client worker reads it (the engine's DMA reads, which skip
+//!   the page cache unless the engine keeps it: [`super::on_engine`]), without a target;
 //! - `lsm.compaction_mb_s`: one compaction of every file, without a target;
 //! - `lsm.get_cached_shared`: the cached point read from another thread over the published view,
 //!   at most 10 % above `lsm.get_cached` at p50 (FR-026, SC-008);
@@ -17,14 +20,12 @@
 //!   of eight reader threads while the core writes and publishes; eight give at least six times
 //!   what one gives (SC-008).
 
-use std::collections::HashMap;
-use std::fs::File;
 use std::hint::black_box;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+use teseladb_io::engine::block_files::BlockFiles;
 use teseladb_keys::Hlc;
 use teseladb_lsm::{BlockNeed, Lookup, Lsm, LsmConfig, SharedLsm, SharedRead, Step, ViewCache};
 use teseladb_raftlog::{Disk, MemDisk};
@@ -150,13 +151,14 @@ fn write_batch(
     Ok(ns)
 }
 
-/// A reader on another thread (FR-026): the published view, and the blocks it misses read from
-/// their files, as a connection's thread reads them.
+/// A reader over the published view (FR-026), and the blocks it misses read from their files as
+/// a client worker reads them ([`BlockFiles`]): on a thread of its own with `pread`, in an engine
+/// thread with the engine's DMA reads.
 struct SharedReader {
     shared: SharedLsm,
     view: ViewCache,
     root: PathBuf,
-    files: HashMap<String, File>,
+    files: BlockFiles,
 }
 
 impl SharedReader {
@@ -165,7 +167,7 @@ impl SharedReader {
             shared,
             view: ViewCache::default(),
             root: root.to_path_buf(),
-            files: HashMap::new(),
+            files: BlockFiles::default(),
         }
     }
 
@@ -187,22 +189,24 @@ impl SharedReader {
 
     /// The bytes `need` names, up to the end of the file.
     fn read(&mut self, need: &BlockNeed) -> Vec<u8> {
-        let root = &self.root;
-        let f = self.files.entry(need.path.clone()).or_insert_with(|| {
-            File::open(root.join(&need.path)).unwrap_or_else(|e| panic!("{}: {e}", need.path))
-        });
-        let mut buf = vec![0; usize::try_from(need.len).unwrap_or(0)];
-        let mut got = 0;
-        while got < buf.len() {
-            match f.read_at(&mut buf[got..], need.offset + got as u64) {
-                Ok(0) => break,
-                Ok(n) => got += n,
-                Err(e) => panic!("{}: {e}", need.path),
-            }
-        }
-        buf.truncate(got);
-        buf
+        let len = usize::try_from(need.len).unwrap_or(0);
+        self.files
+            .read(&self.root, &need.path, need.offset, len)
+            .unwrap_or_else(|e| panic!("{}: {e}", need.path))
     }
+}
+
+/// The point read over the published view with every block read from its file, in the
+/// scenario's engine thread as a client worker reads it (005 FR-028, 023 FR-010): its DMA reads
+/// go through the shard's I/O queue. `lsm` has no block cache.
+fn shared_disk_latency(args: &Args, lsm: &Lsm, root: &Path) -> Histogram {
+    lsm.publish();
+    let mut reader = SharedReader::new(lsm.shared(), root);
+    let mut next = 0;
+    super::per_op(args.warmup, args.duration, || {
+        next = (next + 997) % KEYS;
+        black_box(reader.get(&key(next)));
+    })
 }
 
 /// Point reads per second of `readers` threads over `KEYS` while the core writes new keys and
@@ -363,6 +367,8 @@ fn run_here(args: &Args) -> Result<Report, String> {
         black_box(get(&mut cold, &mut disk, &key(next), &clock));
     });
     report.latency("lsm.get_disk", &from_disk, None, None);
+    let shared_disk = shared_disk_latency(args, &cold, &dir.path.join("read"));
+    report.latency("lsm.get_disk_shared", &shared_disk, None, None);
     // Three more files of overwrites, then one compaction of everything.
     for round in 2..5 {
         for i in 0..KEYS / 2 {
@@ -510,6 +516,7 @@ mod tests {
             "lsm.scan_1000_cached.p50",
             "lsm.scan_1000_hot.p50",
             "lsm.get_disk.p50",
+            "lsm.get_disk_shared.p50",
             "lsm.compaction_mb_s",
         ] {
             assert!(r.metrics.iter().any(|m| m.name == name), "{name}");

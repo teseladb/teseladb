@@ -98,6 +98,10 @@ pub fn spawn_off_shard(f: impl FnOnce() + Send + 'static) {
 /// An engine thread about to park, by its number on its shard.
 pub(crate) use rt::Parking;
 
+/// Waits in an engine thread for an engine future, saving the command's state meanwhile.
+#[cfg(target_os = "linux")]
+pub(crate) use rt::get_saved;
+
 /// Registers the running engine thread to park; it parks with [`finish_park`] or gives up with
 /// [`cancel_park`]. Only in an engine thread.
 pub(crate) fn begin_park() -> Parking {
@@ -134,7 +138,7 @@ mod rt {
 
     use teseladb::engine::core::alien;
     use teseladb::engine::core::coroutine::make_coroutine;
-    use teseladb::engine::core::future::ExceptionPtr;
+    use teseladb::engine::core::future::{ExceptionPtr, Future};
     use teseladb::engine::core::reactor::engine_is_ready;
     use teseladb::engine::core::reactor::internal_misc::run_in_background;
     use teseladb::engine::core::shard_id::this_shard_id;
@@ -153,11 +157,22 @@ mod rt {
         (engine_is_ready() && Thread::running_in_thread()).then(this_shard_id)
     }
 
+    /// The result of `f`, waited for in this engine thread, with the command's thread-local
+    /// state saved while the thread is parked (the shard's other engine threads run meanwhile).
+    pub(crate) fn get_saved<T: 'static>(f: Future<T>) -> Result<T, ExceptionPtr> {
+        let saved = HOOKS.get().map(|h| (h, (h.save)()));
+        let got = f.get();
+        if let Some((h, state)) = saved {
+            (h.restore)(state);
+        }
+        got
+    }
+
     pub(super) fn off_shard<T: Send + 'static>(
         f: Box<dyn FnOnce() -> T + Send>,
     ) -> std::io::Result<T> {
         if engine_thread_shard().is_some() {
-            return super::super::blocking::offload(f).get().map_err(|e| {
+            return get_saved(super::super::blocking::offload(f)).map_err(|e| {
                 let text = match e.downcast_ref::<std::io::Error>() {
                     Some(io) => io.to_string(),
                     None => format!("{e:?}"),
