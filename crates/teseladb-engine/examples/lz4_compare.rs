@@ -434,7 +434,7 @@ pub(crate) fn main() {
         }
         "check" => {
             let theirs = fs::read(dir.join("theirs.bin")).expect("theirs.bin");
-            let (mut bad, mut other) = (0, 0);
+            let (mut bad, mut other, mut bad_pieces) = (0, 0, 0);
             for (rec, b) in records(&theirs).into_iter().zip(&blocks) {
                 let size = u32::from_le_bytes(rec[..4].try_into().unwrap()) as usize;
                 if lz4::decompress_block(&rec[4..], size).as_deref() != Ok(&b[..]) {
@@ -443,8 +443,26 @@ pub(crate) fn main() {
                 if lz4::compress_block(b) != rec[4..] {
                     other += 1;
                 }
+                // The block in pieces of 1000 bytes, as frames arrive in buffers, with the size
+                // record in front.
+                let pieces: Vec<&[u8]> = rec.chunks(1000).collect();
+                let mut out = vec![0u8; size];
+                // SAFETY: `out` has `size` bytes, apart from the record.
+                let got = unsafe {
+                    lz4::pieces::decompress_safe_pieces(
+                        &pieces,
+                        4,
+                        rec.len() - 4,
+                        out.as_mut_ptr(),
+                        size,
+                    )
+                };
+                if got != Ok(size) || out != b[..] {
+                    bad_pieces += 1;
+                }
             }
             println!("ours decompressing theirs: {bad} blocks differ of {}", blocks.len());
+            println!("ours decompressing theirs in pieces: {bad_pieces} blocks differ");
             println!("ours compressing as theirs: {other} blocks not byte for byte the same");
             let data = blocks.concat();
             check_stream(dir, "stream_theirs.bin", "stream_ours.bin", &data);

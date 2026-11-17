@@ -228,6 +228,57 @@ pub(crate) fn with_reusable_buffers<R>(f: impl FnOnce(&mut ReusableBuffers) -> R
     REUSABLE_BUFFERS.with(|b| f(unsafe { &mut *b.get() }))
 }
 
+impl lz4::pieces::Piece for TemporaryBuffer<u8> {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+/// `decompress` of a frame of several buffers: what the reference does after copying them into
+/// one reusable buffer, on the buffers as they are (`lz4::pieces`), so the frame is not copied
+/// before it is decoded. The output, the errors and the buffer accounting are the same.
+fn decompress_fragments(
+    fragments: &[TemporaryBuffer<u8>],
+    size: usize,
+) -> Result<RcvBuf, ExceptionPtr> {
+    let failure = |what: &'static str| {
+        ExceptionPtr::new(crate::engine::core::future::RuntimeError::new(what))
+    };
+    let mut head = [0u8; 4];
+    if !lz4::pieces::gather(fragments, 0, &mut head) {
+        return Err(failure("RPC frame LZ4 decompression failure"));
+    }
+    let dst_size = u32::from_le_bytes(head);
+    if dst_size == 0 {
+        return Err(failure(
+            "RPC frame LZ4 decompression failure: decompressed size cannot be zero",
+        ));
+    }
+    let src_size = size - size_of::<u32>();
+    with_reusable_buffers(|b| {
+        let dst =
+            b.compressed_data.with_reserved::<RcvBuf>(dst_size as usize, |dst: *mut u8| {
+                // SAFETY: `dst` holds dst_size bytes and is none of the fragments.
+                let decoded = unsafe {
+                    lz4::pieces::decompress_safe_pieces(
+                        fragments,
+                        size_of::<u32>(),
+                        src_size,
+                        dst,
+                        dst_size as usize,
+                    )
+                };
+                if decoded.is_err() {
+                    return Err(failure("RPC frame LZ4 decompression failure"));
+                }
+                Ok(dst_size as usize)
+            })?;
+        after_buffer_use(b);
+        Ok(dst)
+    })
+}
+
 #[inline]
 fn after_buffer_use(b: &mut ReusableBuffers) {
     let c = b.buffer_use_count;
@@ -285,6 +336,9 @@ impl Compressor for Lz4Compressor {
     fn decompress(&mut self, data: RcvBuf) -> Result<RcvBuf, ExceptionPtr> {
         if data.size < 4 {
             return Ok(RcvBuf::default());
+        }
+        if let Bufs::Many(fragments) = &data.bufs {
+            return decompress_fragments(fragments, data.size as usize);
         }
         with_reusable_buffers(|b| {
             let ReusableBuffers { compressed_data, decompressed_data, .. } = b;
@@ -356,11 +410,14 @@ mod tests {
             for frame in frames {
                 let compressed = c.compress(8, frame).unwrap();
                 let body = bytes(&compressed.bufs)[8..].to_vec();
-                let back = c.decompress(RcvBuf::from_buffers(
-                    body.chunks(70_000).map(TemporaryBuffer::copy_from).collect(),
-                    body.len(),
-                ));
-                assert_eq!(bytes(&back.unwrap().bufs), data);
+                // In buffers of any size, the size in front cut too.
+                for piece in [70_000, 1000, 3] {
+                    let back = c.decompress(RcvBuf::from_buffers(
+                        body.chunks(piece).map(TemporaryBuffer::copy_from).collect(),
+                        body.len(),
+                    ));
+                    assert_eq!(bytes(&back.unwrap().bufs), data);
+                }
             }
         }
         // A size of 0 and a damaged block are refused.
@@ -368,5 +425,13 @@ mod tests {
         assert!(c.decompress(zero).is_err());
         let damaged = RcvBuf::from_buffer(TemporaryBuffer::copy_from(&[9, 0, 0, 0, 0x90]));
         assert!(c.decompress(damaged).is_err());
+        let in_two = |a: &[u8], b: &[u8]| {
+            RcvBuf::from_buffers(
+                vec![TemporaryBuffer::copy_from(a), TemporaryBuffer::copy_from(b)],
+                a.len() + b.len(),
+            )
+        };
+        assert!(c.decompress(in_two(&[9, 0], &[0, 0, 0x90])).is_err());
+        assert!(c.decompress(in_two(&[0, 0], &[0, 0, 0])).is_err());
     }
 }
