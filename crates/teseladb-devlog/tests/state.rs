@@ -985,6 +985,52 @@ fn a_copy_forward_reads_apart_and_what_comes_meanwhile_wins() {
     assert!(!files(&mut disk).iter().any(|p| p == &teseladb_devlog::format::segment_path(file)));
 }
 
+/// Under a write load the log takes at most about twice what its cores still hold, plus the files
+/// it always keeps: a core that held its WAL for a while left the oldest files more than half
+/// live, and those, never copied forward, kept every newer file behind them, however empty (the
+/// one-node load kept 6.6 GiB of log for 2 GiB held).
+#[test]
+fn the_log_stays_within_twice_what_is_held_under_a_write_load() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    let mut model = Model::new();
+    let mut rng = Rng::new(7);
+    // Core 1 keeps its one segment: what it wrote stays live. First it writes most of what the
+    // log takes, so that its oldest files stay more than half live.
+    s.create(1, 1, 0);
+    model.insert((1, 1), Vec::new());
+    let mut held = 0u64;
+    let block = varied(3000);
+    let mut most = 0usize;
+    for w in 1..400u64 {
+        s.create(0, w, 0);
+        s.write(0, w, 0, &block);
+        if w > 1 {
+            s.remove(0, w - 1);
+        }
+        // Core 1 writes three times what core 0 does for a while, then a twentieth of it.
+        let len = if w < 40 { 9000 } else { 150 };
+        let data: Vec<u8> = (0..len).map(|_| rng.range(1, 250) as u8).collect();
+        s.write(1, 1, held, &data);
+        put(&mut model, (1, 1), held, &data);
+        held += len as u64;
+        s.sync(0, sync_op(w));
+        assert!(s.flush(&mut disk).iter().all(|(_, d)| matches!(d, IoDone::Ok(_))));
+        let bound = 2 * held + (KEPT_FILES as u64 + 3) * file_bytes;
+        let taken = files(&mut disk).len() as u64 * file_bytes;
+        most = most.max(files(&mut disk).len());
+        assert!(taken <= bound, "step {w}: {taken} bytes of log for {held} held");
+    }
+    model.insert((0, 399), block.clone());
+    assert!(most > KEPT_FILES, "the log grew past the files it keeps: {most}");
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    for (key, want) in &model {
+        assert_eq!(&again.read(&mut disk, key.0, key.1).unwrap(), want, "{key:?}");
+    }
+}
+
 /// A read of a copy forward that fails stops the log, as the read did when it ran in the writer.
 #[test]
 fn a_failed_read_of_a_copy_forward_stops_the_log() {

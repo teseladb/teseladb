@@ -575,7 +575,11 @@ impl LogState {
         Ok(data.to_vec())
     }
 
-    /// The oldest file, if it is time to copy forward what it still holds.
+    /// The oldest file, if it is time to copy forward what it still holds: once it is at most half
+    /// live, or whatever it holds once the log takes more than twice what its files hold live
+    /// plus the files it keeps. Files go oldest first, so one more than half live kept every
+    /// newer file behind it however empty: a core that held its WAL a while left 6.6 GiB of log
+    /// for 2 GiB held in the one-node load.
     fn copy_due(&self) -> Option<u64> {
         let mut old = self.files.keys().copied().filter(|f| Some(*f) != self.active);
         let oldest = old.next()?;
@@ -583,7 +587,16 @@ impl LogState {
             return None;
         }
         let f = &self.files[&oldest];
-        (f.refs > 0 && f.live * 2 <= self.file_bytes).then_some(oldest)
+        let due = f.refs > 0 && (f.live * 2 <= self.file_bytes || self.bloated());
+        due.then_some(oldest)
+    }
+
+    /// Whether the files of the log take more than twice the bytes they hold live, plus
+    /// [`KEPT_FILES`] files.
+    fn bloated(&self) -> bool {
+        let (taken, live) =
+            self.files.values().fold((0u64, 0u64), |(t, l), f| (t + f.size, l + f.live));
+        taken > 2 * live + KEPT_FILES as u64 * self.file_bytes
     }
 
     /// The reads that copy forward what the oldest file still holds, once it is time to and no
