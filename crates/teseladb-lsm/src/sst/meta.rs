@@ -6,12 +6,16 @@
 //!           · [values(varint) · bytes(varint)*] · [zone_off(varint) · zone_len(varint)]
 //!           · [shapes(varint) · shape(length-prefixed)*] · [columns_off(varint) · columns_len(varint)]
 //! footer := filter_off · filter_len · props_off · props_len · index_off · index_len (u64 LE)
-//!           · encryption(32 bytes) · version(u32 LE = 1) · magic "TSLSST01"
+//!           · encryption(32 bytes) · version(u32 LE, 1 or 2) · magic "TSLSST01"
 //!           · padding(32 bytes) · crc32c(u32 LE), 128 bytes
 //! ```
 //!
 //! Without encryption, `encryption` and `padding` are zeros. With it (013 FR-015) they hold the
 //! file's data key wrapped with the master key: its first 32 bytes, then its last 32.
+//!
+//! Version 2 is version 1 whose index may hold, for a block whose last key is long, a short key
+//! at or above it and below the next block's first key ([`super::separator`]); a file whose
+//! index holds only last keys is written as version 1, and both read.
 //!
 //! ```text
 //! ```
@@ -28,8 +32,10 @@ use crate::entry::RangeTombstone;
 
 /// Bytes of the footer.
 pub(crate) const FOOTER: usize = 128;
-/// Format version.
+/// Format version of a file whose index holds each block's last key.
 pub(crate) const VERSION: u32 = 1;
+/// Format version of a file whose index may hold short keys in place of long last keys.
+pub(crate) const VERSION_SHORT_KEYS: u32 = 2;
 const MAGIC: &[u8; 8] = b"TSLSST01";
 
 /// Properties of a file.
@@ -204,6 +210,8 @@ pub(crate) struct Footer {
     pub(crate) index: Handle,
     /// The data key wrapped with the master key, in a file that is encrypted.
     pub(crate) wrapped: Option<[u8; WRAPPED_KEY_LEN]>,
+    /// Whether its index may hold short keys (version 2).
+    pub(crate) short_keys: bool,
 }
 
 /// Where the two halves of the wrapped key go.
@@ -225,7 +233,8 @@ impl Footer {
         for (i, w) in words.iter().enumerate() {
             out[8 * i..8 * i + 8].copy_from_slice(&w.to_le_bytes());
         }
-        out[80..84].copy_from_slice(&VERSION.to_le_bytes());
+        let version = if self.short_keys { VERSION_SHORT_KEYS } else { VERSION };
+        out[80..84].copy_from_slice(&version.to_le_bytes());
         out[84..92].copy_from_slice(MAGIC);
         if let Some(w) = &self.wrapped {
             for (half, at) in w.chunks(HALF).zip(WRAPPED_AT) {
@@ -246,9 +255,11 @@ impl Footer {
         if crc32c(&b[..FOOTER - 4]) != crc {
             return Err(Bad);
         }
-        if u32::from_le_bytes(b[80..84].try_into().map_err(|_| Bad)?) != VERSION {
-            return Err(Bad);
-        }
+        let short_keys = match u32::from_le_bytes(b[80..84].try_into().map_err(|_| Bad)?) {
+            VERSION => false,
+            VERSION_SHORT_KEYS => true,
+            _ => return Err(Bad),
+        };
         let mut w = [0u8; WRAPPED_KEY_LEN];
         for (half, at) in w.chunks_mut(HALF).zip(WRAPPED_AT) {
             half.copy_from_slice(&b[at..at + HALF]);
@@ -256,7 +267,7 @@ impl Footer {
         let wrapped = w.iter().any(|x| *x != 0).then_some(w);
         let word = |i: usize| u64::from_le_bytes(b[8 * i..8 * i + 8].try_into().expect("8 bytes"));
         let handle = |i: usize| Handle { offset: word(i), len: word(i + 1) };
-        Ok(Footer { filter: handle(0), props: handle(2), index: handle(4), wrapped })
+        Ok(Footer { filter: handle(0), props: handle(2), index: handle(4), wrapped, short_keys })
     }
 }
 
@@ -348,6 +359,7 @@ mod tests {
             props: Handle { offset: 8192, len: 70 },
             index: Handle { offset: 12_288, len: 300 },
             wrapped: None,
+            short_keys: false,
         };
         let b = f.encode();
         assert_eq!(Footer::decode(&b), Ok(f));
@@ -357,9 +369,13 @@ mod tests {
             bad[i] ^= 1;
             assert_eq!(Footer::decode(&bad), Err(Bad), "byte {i}");
         }
-        // A correct checksum over a newer version.
+        // Version 2, whose index may hold short keys, and a correct checksum over a newer one.
+        let short = Footer { short_keys: true, ..f };
+        let b2 = short.encode();
+        assert_eq!(u32::from_le_bytes(b2[80..84].try_into().unwrap()), 2);
+        assert_eq!(Footer::decode(&b2), Ok(short));
         let mut other = b;
-        other[80] = 2;
+        other[80] = 3;
         let crc = crc32c(&other[..FOOTER - 4]);
         other[FOOTER - 4..].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Footer::decode(&other), Err(Bad));

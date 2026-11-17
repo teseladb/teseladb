@@ -1209,6 +1209,7 @@ pub(crate) fn record_answer(
             | RangeError::Overloaded
             | RangeError::Unsatisfiable
             | RangeError::TooLarge
+            | RangeError::ExceededMemory { .. }
             | RangeError::SnapshotTooOld
             | RangeError::Mutation(_)),
         ) => {

@@ -34,6 +34,7 @@ use crate::ingest::FileRef;
 use crate::jobs::END_STEP;
 use crate::jobs::{
     ManifestFile, Next, Outcome, STEP_BYTES, ValueSink, attach_values, file_metas, write_at,
+    write_end,
 };
 use crate::manifest::Edit;
 use crate::range_tombstone;
@@ -707,18 +708,16 @@ impl CompactJob {
         let Closing { out: o, pieces } = self.closing.pop_front().expect("checked above");
         let find = |n| o.known.get(&n).expect("a value file the output refers to").clone();
         let numbers = o.writer.value_numbers();
-        let (at, chunk, mut table) =
+        let (chunks, mut table) =
             o.writer.finish(o.number, pieces).expect("an output has versions or tombstones");
         attach_values(&mut table, &numbers, find);
-        self.queued.push_back(write_at(o.number, at, chunk));
-        self.queued.push_back(IoOp::Sync { file: file_id(o.number), batch: 0 });
+        write_end(o.number, chunks, &mut self.queued);
         if let Some((number, h)) = o.history {
             let numbers = h.value_numbers();
-            let (at, chunk, mut history) =
+            let (chunks, mut history) =
                 h.finish(number, Vec::new()).expect("a history file has versions");
             attach_values(&mut history, &numbers, find);
-            self.queued.push_back(write_at(number, at, chunk));
-            self.queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+            write_end(number, chunks, &mut self.queued);
             table.history = Some(Arc::new(history));
         }
         self.finished.push(table);
