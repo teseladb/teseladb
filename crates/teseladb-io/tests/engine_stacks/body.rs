@@ -150,7 +150,7 @@ impl Service for LinesPort {
 /// When no engine thread of the shard runs and none can be made (here: no address space for
 /// a stack that large), a connection's request is answered with the session's error instead of
 /// the connection closing without a word; once threads can be made again, it is served.
-fn a_request_no_thread_can_run_is_answered_with_an_error() {
+fn a_request_no_thread_can_run_is_answered_with_an_error(engine: &NodeEngine) {
     let refused = Arc::new(AtomicUsize::new(0));
     let port =
         start_port(&[SocketAddr::from(([127, 0, 0, 1], 0))], Arc::new(LinesPort(refused.clone())))
@@ -164,7 +164,17 @@ fn a_request_no_thread_can_run_is_answered_with_an_error() {
     assert_eq!(answer, "ok\n");
     // No idle thread is left, and a new one cannot have its stack.
     stacks::set_stack_size(1 << 60);
-    assert!(wait::post(0, Box::new(stacks::close_here)));
+    // The thread that served "one" goes back to the pool after its answer left: closing the
+    // idle ones once could come before it, and it would serve "two".
+    let start = Instant::now();
+    let close = || {
+        stacks::close_here();
+        stacks::threads_here()
+    };
+    while !matches!(engine.run_on(0, close), Ok(0)) {
+        assert!(start.elapsed() < T, "the shard's engine threads end");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     c.write_all(b"two\n").unwrap();
     answer.clear();
     reader.read_line(&mut answer).unwrap();
@@ -207,6 +217,6 @@ pub fn main() {
     assert_eq!(seen.waiting, COMMANDS - seen.threads, "{seen:?}");
     assert!(seen.took >= 2 * HOLD, "the commands that waited ran after the first ones");
     println!("many_commands_at_once_run_on_a_small_shard: ok");
-    a_request_no_thread_can_run_is_answered_with_an_error();
+    a_request_no_thread_can_run_is_answered_with_an_error(&engine);
     engine.stop();
 }

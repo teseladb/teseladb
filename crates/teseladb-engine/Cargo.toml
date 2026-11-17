@@ -145,6 +145,11 @@ path = "tests/entry/cov4_err_disk_test.rs"
 harness = false
 
 [[test]]
+name = "perf_aio_allocating_write"
+path = "tests/entry/perf_aio_allocating_write.rs"
+harness = false
+
+[[test]]
 name = "cov4_err_net_test"
 path = "tests/entry/cov4_err_net_test.rs"
 harness = false
@@ -175,6 +180,11 @@ harness = false
 [[bench]]
 name = "fstream_perf"
 path = "benches/entry/fstream_perf.rs"
+harness = false
+
+[[bench]]
+name = "syscall_handoff_perf"
+path = "benches/entry/syscall_handoff_perf.rs"
 harness = false
 
 [[bench]]

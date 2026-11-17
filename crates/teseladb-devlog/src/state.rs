@@ -35,13 +35,63 @@ pub const WRITE_AHEAD: usize = 1 << 20;
 /// takes whole blocks.
 pub const AHEAD_RECORDS: usize = 4;
 
-/// Bytes of a WAL segment held at one place of a file of the log.
+/// Bytes of a file between two pieces still held that a copy forward reads along rather than
+/// starting another read.
+pub const COPY_GAP: u64 = 64 << 10;
+/// Most bytes one read of a copy forward takes.
+pub const COPY_READ: u64 = 1 << 20;
+
+/// The shortest run of one byte at the end of a write that goes as a `FILL` frame: below it the
+/// frame's head costs about what the bytes do.
+pub const FILL_MIN: usize = 64;
+
+/// Bytes of a WAL segment held at one place of a file of the log, or a run of one byte that a
+/// `FILL` frame of that file put there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Extent {
     end: u64,
     file: u64,
     /// Where its first byte is in the file.
     pos: u64,
+    /// The byte of a `FILL`: the file holds the frame, not the bytes.
+    fill: Option<u8>,
+}
+
+impl Extent {
+    /// Bytes of the file it keeps live, `len` of its bytes.
+    fn live(&self, len: u64) -> u64 {
+        if self.fill.is_some() { 0 } else { len }
+    }
+}
+
+/// What the log wrote since it started, for the node's metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LogStats {
+    /// Records written.
+    pub records: u64,
+    /// Bytes of the records, padding included.
+    pub record_bytes: u64,
+    /// Zeros after the records, to the next block.
+    pub padding_bytes: u64,
+    /// Bytes of WAL segments that `FILL` frames stood for.
+    pub filled_bytes: u64,
+    /// Bytes copied forward from the oldest file.
+    pub copied_bytes: u64,
+    /// Bytes read from the log to copy them.
+    pub copy_read_bytes: u64,
+    /// Files made.
+    pub files_made: u64,
+    /// Files made while a record waited for them.
+    pub files_made_waiting: u64,
+    /// The cores' syncs a sync of the log answered.
+    pub synced_requests: u64,
+}
+
+/// The trailing run of one byte of `data` long enough for a `FILL`: where it starts and its byte.
+fn trailing_run(data: &[u8]) -> Option<(usize, u8)> {
+    let &last = data.last()?;
+    let run = data.iter().rev().take_while(|b| **b == last).count();
+    (run >= FILL_MIN).then_some((data.len() - run, last))
 }
 
 /// A core's WAL segment.
@@ -77,6 +127,7 @@ struct Pending {
     arg: u64,
     len: u64,
     data_at: usize,
+    fill: Option<u8>,
 }
 
 /// The answers of a flush: for each core, the operations now durable (or failed).
@@ -122,6 +173,41 @@ pub struct LogState {
     stamped: std::collections::VecDeque<(u64, u64)>,
     /// The highest bound in a durable record, or found on recovery.
     durable_bound: u64,
+    stats: LogStats,
+    /// The next file, made ahead of the record that needs it ([`LogState::spare_job`]).
+    spare: Option<Spare>,
+    /// Files made ahead whose turn passed while they were being made: once made, they hold
+    /// nothing and go as any empty file.
+    passed: Vec<(u64, FileId)>,
+    /// The file whose copy forward is being read ([`LogState::copy_job`]).
+    copying: Option<u64>,
+}
+
+/// The reads that copy forward what the oldest file still holds ([`LogState::copy_job`]).
+#[derive(Debug)]
+pub struct CopyJob {
+    /// The file.
+    pub file: u64,
+    /// Its reads, each with its place in the list as its token.
+    pub reads: Vec<IoOp>,
+}
+
+/// A file made ahead, off the writer's path: its header and its name are durable once `ready`.
+#[derive(Clone, Copy, Debug)]
+struct Spare {
+    seq: u64,
+    id: FileId,
+    ready: bool,
+}
+
+/// The operations that make the next file of the log ahead of time, to run in order apart from
+/// the writer's; their outcome goes to [`LogState::spare_done`].
+#[derive(Debug)]
+pub struct SpareJob {
+    /// The file's number.
+    pub seq: u64,
+    /// Its creation, its header's write, its sync and its directory's.
+    pub ops: Vec<IoOp>,
 }
 
 fn ok(done: IoDone) -> Result<Option<Bytes>, IoErrno> {
@@ -165,6 +251,10 @@ impl LogState {
             bound: 0,
             stamped: std::collections::VecDeque::new(),
             durable_bound: 0,
+            stats: LogStats::default(),
+            spare: None,
+            passed: Vec::new(),
+            copying: None,
         };
         let mut paths: Vec<(u64, std::path::PathBuf)> = match disk.list(Path::new(format::DIR)) {
             Ok(v) => {
@@ -207,7 +297,9 @@ impl LogState {
                         continue;
                     }
                     let pos = base + f.data_at as u64;
-                    s.apply(f.kind, (f.core, f.segment), f.arg, (seq, pos, u64::from(f.len)));
+                    let fill = (f.kind == FrameKind::Fill).then_some(f.fill);
+                    let place = (seq, pos, u64::from(f.len));
+                    s.apply(f.kind, (f.core, f.segment), f.arg, place, fill);
                 }
                 expected = Some(r.flush + 1);
                 at += r.len;
@@ -281,10 +373,24 @@ impl LogState {
         self.body.len()
     }
 
+    /// What the log wrote since it started.
+    #[must_use]
+    pub fn stats(&self) -> LogStats {
+        self.stats
+    }
+
     fn frame(&mut self, kind: FrameKind, core: u16, wal: u64, arg: u64, data: &[u8]) {
         let data_at = self.body.len() + format::FRAME_HEAD;
         format::push_frame(&mut self.body, kind, core, wal, arg, data);
-        self.pending.push(Pending { kind, core, wal, arg, len: data.len() as u64, data_at });
+        let len = data.len() as u64;
+        self.pending.push(Pending { kind, core, wal, arg, len, data_at, fill: None });
+    }
+
+    fn fill(&mut self, core: u16, wal: u64, arg: u64, len: u32, byte: u8) {
+        let data_at = self.body.len() + format::FRAME_HEAD;
+        format::push_fill(&mut self.body, core, wal, arg, len, byte);
+        let (kind, len) = (FrameKind::Fill, u64::from(len));
+        self.pending.push(Pending { kind, core, wal, arg, len, data_at, fill: Some(byte) });
     }
 
     /// WAL segment `wal` of `core` exists, with at least `len` bytes.
@@ -292,9 +398,21 @@ impl LogState {
         self.frame(FrameKind::Create, core, wal, len, &[]);
     }
 
-    /// `data` at `offset` of WAL segment `wal` of `core`.
+    /// `data` at `offset` of WAL segment `wal` of `core`. A long run of one byte at its end (the
+    /// padding of a WAL batch) goes as a `FILL` frame.
     pub fn write(&mut self, core: u16, wal: u64, offset: u64, data: &[u8]) {
-        self.frame(FrameKind::Write, core, wal, offset, data);
+        match trailing_run(data)
+            .and_then(|(at, b)| Some((at, b, u32::try_from(data.len() - at).ok()?)))
+        {
+            Some((at, byte, run)) => {
+                if at > 0 {
+                    self.frame(FrameKind::Write, core, wal, offset, &data[..at]);
+                }
+                self.fill(core, wal, offset + at as u64, run, byte);
+                self.stats.filled_bytes += u64::from(run);
+            }
+            None => self.frame(FrameKind::Write, core, wal, offset, data),
+        }
     }
 
     /// WAL segment `wal` of `core` ends at `len`.
@@ -335,14 +453,14 @@ impl LogState {
         let mut refs = Vec::new();
         for (s, e) in hit {
             w.extents.remove(&s);
-            refs.push((e.file, e.end - s, false));
+            refs.push((e.file, e.live(e.end - s), false));
             if s < start {
                 w.extents.insert(s, Extent { end: start, ..e });
-                refs.push((e.file, start - s, true));
+                refs.push((e.file, e.live(start - s), true));
             }
             if e.end > end {
-                w.extents.insert(end, Extent { end: e.end, file: e.file, pos: e.pos + (end - s) });
-                refs.push((e.file, e.end - end, true));
+                w.extents.insert(end, Extent { pos: e.pos + (end - s), ..e });
+                refs.push((e.file, e.live(e.end - end), true));
             }
         }
         for (file, bytes, add) in refs {
@@ -361,6 +479,7 @@ impl LogState {
         key: (u16, u64),
         arg: u64,
         (file, pos, len): (u64, u64, u64),
+        fill: Option<u8>,
     ) {
         match kind {
             FrameKind::Create => {
@@ -372,13 +491,14 @@ impl LogState {
                 }
                 self.add_ref(file, 0);
             }
-            FrameKind::Write => {
+            FrameKind::Write | FrameKind::Fill => {
                 self.cut(key, arg, arg + len);
                 let w = self.wals.entry(key).or_default();
                 w.len = w.len.max(arg + len);
                 if len > 0 {
-                    w.extents.insert(arg, Extent { end: arg + len, file, pos });
-                    self.add_ref(file, len);
+                    let e = Extent { end: arg + len, file, pos, fill };
+                    w.extents.insert(arg, e);
+                    self.add_ref(file, e.live(len));
                 }
             }
             FrameKind::Truncate => {
@@ -426,8 +546,13 @@ impl LogState {
         let mut out = vec![0u8; len];
         let parts: Vec<(u64, Extent)> = w.extents.iter().map(|(s, e)| (*s, *e)).collect();
         for (s, e) in parts {
-            let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
             let at = usize::try_from(s).map_err(|_| IoErrno::Io)?;
+            let end = usize::try_from(e.end).map_err(|_| IoErrno::Io)?;
+            if let Some(b) = e.fill {
+                out[at..end].fill(b);
+                continue;
+            }
+            let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
             out[at..at + data.len()].copy_from_slice(&data);
         }
         Ok(out)
@@ -450,26 +575,86 @@ impl LogState {
         Ok(data.to_vec())
     }
 
-    /// Copies forward what is still needed of the oldest file, if it is time to.
-    fn copy_oldest(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
-        let old: Vec<u64> =
-            self.files.keys().copied().filter(|f| Some(*f) != self.active).collect();
-        if !self.tidy || old.len() < KEPT_FILES {
-            return Ok(());
+    /// The oldest file, if it is time to copy forward what it still holds.
+    fn copy_due(&self) -> Option<u64> {
+        let mut old = self.files.keys().copied().filter(|f| Some(*f) != self.active);
+        let oldest = old.next()?;
+        if !self.tidy || old.count() + 1 < KEPT_FILES {
+            return None;
         }
-        let oldest = old[0];
         let f = &self.files[&oldest];
-        if f.refs == 0 || f.live * 2 > self.file_bytes {
-            return Ok(());
+        (f.refs > 0 && f.live * 2 <= self.file_bytes).then_some(oldest)
+    }
+
+    /// The reads that copy forward what the oldest file still holds, once it is time to and no
+    /// copy is in flight: few and long (bytes of the file within [`COPY_GAP`] of each other go in
+    /// one read of at most [`COPY_READ`] bytes), to run apart from the writer's operations; what
+    /// they read goes to [`LogState::copy_done`]. Each read's token is its place in the list.
+    pub fn copy_job(&mut self) -> Option<CopyJob> {
+        if self.failed.is_some() || self.copying.is_some() {
+            return None;
         }
+        let file = self.copy_due()?;
+        let mut held: Vec<(u64, u64)> = self
+            .wals
+            .values()
+            .flat_map(|w| w.extents.iter())
+            .filter(|(_, e)| e.file == file && e.fill.is_none())
+            .map(|(s, e)| (e.pos, e.pos + (e.end - s)))
+            .collect();
+        held.sort_unstable();
+        let mut spans: Vec<(u64, u64)> = Vec::new();
+        for (start, end) in held {
+            match spans.last_mut() {
+                Some(last) if start <= last.1 + COPY_GAP && end - last.0 <= COPY_READ => {
+                    last.1 = last.1.max(end);
+                }
+                _ => spans.push((start, end)),
+            }
+        }
+        let id = self.files[&file].id;
+        let mut reads = Vec::with_capacity(spans.len());
+        for (token, (start, end)) in spans.into_iter().enumerate() {
+            let len = u32::try_from(end - start).ok()?;
+            reads.push(IoOp::ReadAt { file: id, offset: start, len, token: token as u64 });
+        }
+        self.copying = Some(file);
+        Some(CopyJob { file, reads })
+    }
+
+    /// What the reads of the [`CopyJob`] of `file` read (each at its offset), or the first error:
+    /// the bytes the file still holds go forward in the next record, ahead of what it holds. A
+    /// file that went meanwhile needs nothing; a read that failed stops the log, as any failed
+    /// operation of the writer does, and gives the answers of what waited.
+    pub fn copy_done(&mut self, file: u64, read: Result<Vec<(u64, Bytes)>, IoErrno>) -> Answers {
+        if self.copying != Some(file) {
+            return Vec::new();
+        }
+        self.copying = None;
+        if self.failed.is_some() || !self.files.contains_key(&file) {
+            return Vec::new();
+        }
+        match read.and_then(|mut spans| {
+            spans.sort_unstable_by_key(|(at, _)| *at);
+            self.copy_forward(file, &spans)
+        }) {
+            Ok(()) => Vec::new(),
+            Err(errno) => self.fail(errno),
+        }
+    }
+
+    /// Puts in front of the flush being built a frame for each `CREATE`, data extent and run that
+    /// file `file` still holds, the data taken from `spans` (bytes read at each offset of it).
+    fn copy_forward(&mut self, file: u64, spans: &[(u64, Bytes)]) -> Result<(), IoErrno> {
+        self.stats.copy_read_bytes += spans.iter().map(|(_, b)| b.len() as u64).sum::<u64>();
         let mut parts = Vec::new();
         let mut creates = Vec::new();
         for (key, w) in &self.wals {
-            if w.created_in == Some(oldest) {
+            if w.created_in == Some(file) {
                 creates.push((*key, w.len));
             }
             for (s, e) in &w.extents {
-                if e.file == oldest {
+                if e.file == file {
                     parts.push((*key, *s, *e));
                 }
             }
@@ -481,8 +666,20 @@ impl LogState {
             self.create(core, wal, len);
         }
         for ((core, wal), s, e) in parts {
-            let data = self.read_at(disk, e.file, e.pos, e.end - s)?;
-            self.write(core, wal, s, &data);
+            let len = e.end - s;
+            if let Some(b) = e.fill {
+                self.fill(core, wal, s, u32::try_from(len).map_err(|_| IoErrno::Io)?, b);
+                continue;
+            }
+            // Every extent of an old file lies within one extent it had when the reads were
+            // made: extents only shrink and split.
+            let at = spans.partition_point(|(p, _)| *p <= e.pos);
+            let (p, data) = at.checked_sub(1).map(|i| &spans[i]).ok_or(IoErrno::Io)?;
+            let from = usize::try_from(e.pos - p).map_err(|_| IoErrno::Io)?;
+            let to = from + usize::try_from(len).map_err(|_| IoErrno::Io)?;
+            let bytes = data.get(from..to).ok_or(IoErrno::Io)?.to_vec();
+            self.stats.copied_bytes += len;
+            self.frame(FrameKind::Write, core, wal, s, &bytes);
         }
         let shift = self.body.len();
         self.body.extend_from_slice(&body);
@@ -491,9 +688,29 @@ impl LogState {
         Ok(())
     }
 
+    /// Runs the [`CopyJob`] due, if one is, on `disk` now: for the callers that do not run it
+    /// apart.
+    fn copy_now(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
+        let Some(job) = self.copy_job() else { return Ok(()) };
+        self.copying = None;
+        let mut spans = Vec::with_capacity(job.reads.len());
+        for op in job.reads {
+            let IoOp::ReadAt { offset, len, .. } = op else { continue };
+            match ok(disk.execute(op))? {
+                Some(data) if data.len() == len as usize => spans.push((offset, data)),
+                _ => return Err(IoErrno::Io),
+            }
+        }
+        self.copy_forward(job.file, &spans)
+    }
+
     /// Makes file `seq` for a record of `need` bytes, with its header and its name durable before
     /// any record goes into it: a file without a valid header then holds nothing.
     fn new_file(&mut self, disk: &mut dyn Disk, need: u64) -> Result<u64, IoErrno> {
+        // A file still being made ahead comes before this one: it holds nothing.
+        if let Some(sp) = self.spare.take() {
+            self.pass(sp);
+        }
         let seq = self.next_file;
         let size = self.file_bytes.max(BLOCK + need);
         let id = self.new_id();
@@ -502,6 +719,8 @@ impl LogState {
         let made = ok(disk.execute(IoOp::Create { file: id, path, prealloc: size }));
         self.disk_full = matches!(made, Err(IoErrno::NoSpace));
         made?;
+        self.stats.files_made += 1;
+        self.stats.files_made_waiting += 1;
         self.next_file += 1;
         let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: None };
         self.files.insert(seq, file);
@@ -516,6 +735,88 @@ impl LogState {
         Ok(seq)
     }
 
+    /// The operations that make the next file ahead, once the active one is half full and no file
+    /// is being made ahead: the record that opens it then neither creates a file nor syncs the
+    /// log's directory while the cores wait. `None` when it is not time to.
+    pub fn spare_job(&mut self) -> Option<SpareJob> {
+        if self.failed.is_some() || self.spare.is_some() || self.disk_full {
+            return None;
+        }
+        let f = &self.files[&self.active?];
+        if f.used * 2 < f.size {
+            return None;
+        }
+        let seq = self.next_file;
+        self.next_file += 1;
+        let id = self.new_id();
+        self.spare = Some(Spare { seq, id, ready: false });
+        let path = format::segment_path(seq);
+        let header = Bytes::from_vec(format::segment_header(seq));
+        let ops = vec![
+            IoOp::Create { file: id, path, prealloc: self.file_bytes },
+            IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 },
+            IoOp::Sync { file: id, batch: 0 },
+            IoOp::SyncDir { path: format::DIR.into() },
+        ];
+        Some(SpareJob { seq, ops })
+    }
+
+    /// The outcome of the [`SpareJob`] of file `seq`: `Ok` once all its operations succeeded, or
+    /// the first error. A file that could not be made is made when a record needs it, as without
+    /// one made ahead; one whose turn passed meanwhile holds nothing and goes in its turn.
+    pub fn spare_done(&mut self, seq: u64, made: Result<(), IoErrno>) {
+        if let Some(sp) = self.spare.as_mut().filter(|sp| sp.seq == seq) {
+            match made {
+                Ok(()) => sp.ready = true,
+                Err(_) => self.spare = None,
+            }
+            return;
+        }
+        let Some(at) = self.passed.iter().position(|(s, _)| *s == seq) else { return };
+        let (seq, id) = self.passed.swap_remove(at);
+        if made.is_ok() {
+            self.insert_empty(seq, id);
+        }
+    }
+
+    /// A file made ahead whose turn passed: it goes once made, or now if it is.
+    fn pass(&mut self, sp: Spare) {
+        if sp.ready {
+            self.insert_empty(sp.seq, sp.id);
+        } else {
+            self.passed.push((sp.seq, sp.id));
+        }
+    }
+
+    /// Keeps file `seq`, made with its header and nothing else, until the oldest files go.
+    fn insert_empty(&mut self, seq: u64, id: FileId) {
+        let size = self.file_bytes;
+        let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: Some(0) };
+        self.files.insert(seq, file);
+    }
+
+    /// The file made ahead, as the active one, if it is made and the record of `need` bytes fits.
+    fn take_spare(&mut self, need: u64) -> Option<u64> {
+        let sp = self.spare.filter(|sp| sp.ready)?;
+        self.spare = None;
+        if BLOCK + need > self.file_bytes {
+            self.pass(sp);
+            return None;
+        }
+        let file = LogFile {
+            id: sp.id,
+            size: self.file_bytes,
+            used: BLOCK,
+            refs: 0,
+            live: 0,
+            freed_at: None,
+        };
+        self.files.insert(sp.seq, file);
+        self.active = Some(sp.seq);
+        self.stats.files_made += 1;
+        Some(sp.seq)
+    }
+
     /// Writes the flush being built as one record, unsynced.
     fn write_out(&mut self, disk: &mut dyn Disk) -> Result<(), IoErrno> {
         let write = self.place(disk)?;
@@ -527,15 +828,33 @@ impl LogState {
     fn place(&mut self, disk: &mut dyn Disk) -> Result<IoOp, IoErrno> {
         // Every record carries the bound in force (D-172): the newest record has it even when the
         // files that had it went.
+        let unbound = self.body.len();
         if self.bound > 0 {
             format::push_frame(&mut self.body, FrameKind::Bound, 0, 0, self.bound, &[]);
-            self.stamped.push_back((self.next_flush, self.bound));
         }
         let record = format::record(self.next_flush, &self.body);
         let need = record.len() as u64;
         let fits = self.active.is_some_and(|a| self.files[&a].used + need <= self.files[&a].size);
-        let seq =
-            if fits { self.active.expect("an active file") } else { self.new_file(disk, need)? };
+        let seq = if fits {
+            self.active.expect("an active file")
+        } else if let Some(seq) = self.take_spare(need) {
+            seq
+        } else {
+            match self.new_file(disk, need) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    // The record waits for the next try, which stamps it again.
+                    self.body.truncate(unbound);
+                    return Err(e);
+                }
+            }
+        };
+        if self.bound > 0 {
+            self.stamped.push_back((self.next_flush, self.bound));
+        }
+        self.stats.records += 1;
+        self.stats.record_bytes += need;
+        self.stats.padding_bytes += need - (HEAD + self.body.len()) as u64;
         let (id, at) = {
             let f = &self.files[&seq];
             (f.id, f.used)
@@ -545,7 +864,7 @@ impl LogState {
         let base = at + HEAD as u64;
         for p in std::mem::take(&mut self.pending) {
             let place = (seq, base + p.data_at as u64, p.len);
-            self.apply(p.kind, (p.core, p.wal), p.arg, place);
+            self.apply(p.kind, (p.core, p.wal), p.arg, place, p.fill);
         }
         let flush = self.next_flush;
         for f in self.files.values_mut() {
@@ -627,7 +946,9 @@ impl LogState {
             }
             return Ok(Vec::new());
         }
-        self.copy_oldest(disk)?;
+        if all {
+            self.copy_now(disk)?;
+        }
         if !self.body.is_empty() {
             ops.push(self.place(disk)?);
         }
@@ -668,6 +989,7 @@ impl LogState {
             return Vec::new();
         }
         self.syncs += 1;
+        self.stats.synced_requests += self.syncing.len() as u64;
         self.durable = self.sync_upto;
         while let Some(&(flush, bound)) = self.stamped.front()
             && flush <= self.durable

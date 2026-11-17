@@ -42,6 +42,10 @@ pub fn run() {
         ("an_overloaded_core_refuses_new_requests", an_overloaded_core_refuses_new_requests),
         ("a_core_that_keeps_up_refuses_nothing", a_core_that_keeps_up_refuses_nothing),
         ("document_operations_go_ahead_of_long_scans", document_operations_go_ahead_of_scans),
+        (
+            "a_long_turn_gives_the_shard_back_between_messages",
+            a_long_turn_gives_the_shard_back_between_messages,
+        ),
         ("background_requests_waiting_at_a_stop_are_answered", background_at_a_stop_answered),
         ("a_core_reaches_another_core_from_its_shard", a_core_reaches_another_core),
         ("the_logic_is_told_the_runtime_sends_no_files", the_logic_is_told_no_file_sends),
@@ -430,6 +434,25 @@ fn document_operations_go_ahead_of_scans(e: &NodeEngine) {
     assert_eq!(t.served, vec![1, 2, 101, 102, 103]);
     // Each scan's wait in the background queue is timed (012 FR-015).
     assert!(teseladb_stages::count(teseladb_stages::Stage::BackgroundWait) >= waits + 3);
+}
+
+fn a_long_turn_gives_the_shard_back_between_messages(e: &NodeEngine) {
+    // Ten messages of 5 ms each arrive at once: the turn takes them one task quota at a time, so
+    // a task of the core's shard queued meanwhile runs after one or two of them, not after the 50
+    // ms of all ten; and every message is taken, in order.
+    let a = start(e, 0, 24, Toy::default());
+    for _ in 0..10 {
+        send(&a, Cmd::Stall(Duration::from_millis(5)));
+    }
+    send(&a, Cmd::Request(1));
+    send(&a, Cmd::Request(2));
+    thread::sleep(Duration::from_millis(2));
+    let asked = Instant::now();
+    e.run_on(0, || ()).unwrap();
+    let waited = asked.elapsed();
+    let (t, _, _) = stop(e, a);
+    assert_eq!(t.served, vec![1, 2]);
+    assert!(waited < Duration::from_millis(25), "the shard's task waited {waited:?}");
 }
 
 fn background_at_a_stop_answered(e: &NodeEngine) {

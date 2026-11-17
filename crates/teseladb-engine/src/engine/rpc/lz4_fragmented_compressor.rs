@@ -136,6 +136,9 @@ impl Lz4FragmentedCompressor {
                     lz4_compressbound(size_left),
                     0,
                 );
+                // The reset the next frame starts with, done now while the block is at hand:
+                // for a short block it clears only the entries the block wrote.
+                stream.reset_stream_after_block((*src).get(), size_left);
                 write_le::<u32>(header, LAST_CHUNK_FLAG | size_left as u32);
                 dst.trim(head_space + CHUNK_HEADER_SIZE + compressed_size);
                 return SndBuf::from_buffer(dst);
@@ -409,6 +412,33 @@ impl Lz4FragmentedCompressor {
                 dst_buffers[last].get_write().add(std::mem::replace(dst_offset, *dst_offset + size))
             };
 
+            // A chunk that straddles two fragments is decoded where it is (`lz4::pieces`)
+            // instead of being copied into `chunk_buffer` first: the same result, one copy less.
+            let all: &[TemporaryBuffer<u8>] = match &data.bufs {
+                Bufs::One(b) => std::slice::from_ref(b),
+                Bufs::Many(v) => v,
+            };
+            let straddles =
+                |src: *const TemporaryBuffer<u8>, src_offset: usize, src_left: usize, n| {
+                    n <= src_left && (*src).size() - src_offset < n
+                };
+            // Moves the read position `n` bytes on, as `copy_src` does, without copying.
+            let skip_src = |src: &mut *const TemporaryBuffer<u8>,
+                            src_offset: &mut usize,
+                            src_left: &mut usize,
+                            mut n: usize| {
+                *src_left -= n;
+                while n != 0 {
+                    if *src_offset == (**src).size() {
+                        *src = src.add(1);
+                        *src_offset = 0;
+                    }
+                    let this_size = n.min((**src).size() - *src_offset);
+                    n -= this_size;
+                    *src_offset += this_size;
+                }
+            };
+
             // Intermediate chunks
             let mut header_value = read_header(&mut src, &mut src_offset, &mut src_left)
                 .ok_or_else(|| cut_short(0))?;
@@ -417,24 +447,34 @@ impl Lz4FragmentedCompressor {
                 if chunk_buffer.size() < header_value as usize {
                     *chunk_buffer = TemporaryBuffer::new(header_value as usize);
                 }
-                let src_ptr = copy_src(
-                    &mut src,
-                    &mut src_offset,
-                    &mut src_left,
-                    chunk_buffer.get_write(),
-                    header_value as usize,
-                )
-                .ok_or_else(|| cut_short(total_size - CHUNK_SIZE))?;
-                let dst = get_dest(&mut dst_buffers, &mut dst_offset, CHUNK_SIZE);
-                if stream
-                    .decompress_safe_continue(
-                        src_ptr,
-                        /*dst_buffers.back().get_write()*/ dst,
-                        header_value as usize,
+                let n = header_value as usize;
+                let decoded = if straddles(src, src_offset, src_left, n) {
+                    let dst = get_dest(&mut dst_buffers, &mut dst_offset, CHUNK_SIZE);
+                    let at = src.offset_from(all.as_ptr()) as usize;
+                    let decoded = stream.decompress_safe_continue_pieces(
+                        &all[at..],
+                        src_offset,
+                        n,
+                        dst,
                         CHUNK_SIZE,
+                    );
+                    skip_src(&mut src, &mut src_offset, &mut src_left, n);
+                    decoded
+                } else {
+                    let src_ptr = copy_src(
+                        &mut src,
+                        &mut src_offset,
+                        &mut src_left,
+                        chunk_buffer.get_write(),
+                        n,
                     )
-                    .is_err()
-                {
+                    .ok_or_else(|| cut_short(total_size - CHUNK_SIZE))?;
+                    let dst = get_dest(&mut dst_buffers, &mut dst_offset, CHUNK_SIZE);
+                    stream.decompress_safe_continue(
+                        src_ptr, /*dst_buffers.back().get_write()*/ dst, n, CHUNK_SIZE,
+                    )
+                };
+                if decoded.is_err() {
                     return Err(ExceptionPtr::new(crate::engine::core::future::RuntimeError::new(
                         format!(
                             "RPC frame LZ4_FRAGMENTED decompression failure (long, at {} bytes)",
@@ -455,18 +495,27 @@ impl Lz4FragmentedCompressor {
             }
             let last_chunk_compressed_size = src_left;
             let n = src_left;
-            let src_ptr =
-                copy_src(&mut src, &mut src_offset, &mut src_left, chunk_buffer.get_write(), n)
-                    .ok_or_else(|| cut_short(total_size - header_value as usize))?;
-            if stream
-                .decompress_safe_continue(
+            let decoded = if straddles(src, src_offset, src_left, n) {
+                let at = src.offset_from(all.as_ptr()) as usize;
+                stream.decompress_safe_continue_pieces(
+                    &all[at..],
+                    src_offset,
+                    n,
+                    dst,
+                    header_value as usize,
+                )
+            } else {
+                let src_ptr =
+                    copy_src(&mut src, &mut src_offset, &mut src_left, chunk_buffer.get_write(), n)
+                        .ok_or_else(|| cut_short(total_size - header_value as usize))?;
+                stream.decompress_safe_continue(
                     src_ptr,
                     /*dst_buffers.back().get_write()*/ dst,
                     last_chunk_compressed_size,
                     header_value as usize,
                 )
-                .is_err()
-            {
+            };
+            if decoded.is_err() {
                 return Err(ExceptionPtr::new(crate::engine::core::future::RuntimeError::new(
                     format!(
                         "RPC frame LZ4_FRAGMENTED decompression failure (long, last frame, at {} bytes)",

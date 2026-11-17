@@ -48,9 +48,78 @@ pub struct ParallelForEachState {
     // First field: the task header (see `Task`).
     task: TaskBase,
     state: FutureState<()>,
-    incomplete: Vec<Future<()>>,
+    incomplete: IncompleteFutures,
     result: HostedPromise<()>,
     ex: ExceptionPtr,
+}
+
+/// The pending futures of a [`ParallelForEachState`]: the first [`IncompleteFutures::N`]
+/// inline in the state, the rest in a heap vector. As the upstream change
+/// "loop: use small_vector for parallel_for_each_state incomplete futures": a loop with a
+/// few pending futures no longer allocates a buffer for them besides the state.
+struct IncompleteFutures {
+    /// Initialized inline slots (`inline[..len]`); the heap part is used only when they are
+    /// all taken.
+    len: usize,
+    inline: [std::mem::MaybeUninit<Future<()>>; IncompleteFutures::N],
+    heap: Vec<Future<()>>,
+}
+
+impl IncompleteFutures {
+    const N: usize = 5;
+
+    /// Empty, with heap room for the futures beyond the inline ones when `n` are expected.
+    fn with_capacity(n: usize) -> Self {
+        IncompleteFutures {
+            len: 0,
+            inline: [const { std::mem::MaybeUninit::uninit() }; Self::N],
+            heap: Vec::with_capacity(n.saturating_sub(Self::N)),
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, f: Future<()>) {
+        if self.len < Self::N {
+            self.inline[self.len].write(f);
+            self.len += 1;
+        } else {
+            self.heap.push(f);
+        }
+    }
+
+    /// The last future pushed, if any.
+    #[inline]
+    fn last(&self) -> Option<&Future<()>> {
+        if let Some(f) = self.heap.last() {
+            return Some(f);
+        }
+        // SAFETY: the slots below `len` are initialized.
+        self.len.checked_sub(1).map(|i| unsafe { self.inline[i].assume_init_ref() })
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<Future<()>> {
+        if let Some(f) = self.heap.pop() {
+            return Some(f);
+        }
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        // SAFETY: the slot was initialized and is moved out once (`len` no longer covers it).
+        Some(unsafe { self.inline[self.len].assume_init_read() })
+    }
+}
+
+impl Drop for IncompleteFutures {
+    fn drop(&mut self) {
+        // The heap part drops itself; the inline futures still held are dropped here.
+        while self.len > 0 {
+            self.len -= 1;
+            // SAFETY: the slot is initialized and dropped once.
+            unsafe { self.inline[self.len].assume_init_drop() };
+        }
+    }
 }
 
 // SAFETY: hosted_promise returns the `result` field, derived from `this`.
@@ -101,7 +170,7 @@ impl ParallelForEachState {
         HostBox::into_raw(HostBox::new(Self {
             task: TaskBase::new_current::<Self>(),
             state: FutureState::new(),
-            incomplete: Vec::with_capacity(n),
+            incomplete: IncompleteFutures::with_capacity(n),
             result: HostedPromise::new(),
             ex: ExceptionPtr::null(),
         }))

@@ -119,11 +119,18 @@ pub enum Stage {
     /// A background request's wait in its core's background queue until the core runs it (012
     /// FR-030).
     BackgroundWait,
+    /// A pass of the statistics of the ranges compactions rewrote (010 FR-029), from the
+    /// routing table to its last range published.
+    StatsPass,
+    /// The read of the values of a collection's indexes in one range for its statistics.
+    StatsRead,
+    /// The build of one range's statistics from the values read: their sort and histograms.
+    StatsBuild,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 41] = [
+    pub const ALL: [Stage; 44] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -165,6 +172,9 @@ impl Stage {
         Stage::AggScattered,
         Stage::AggByIndex,
         Stage::BackgroundWait,
+        Stage::StatsPass,
+        Stage::StatsRead,
+        Stage::StatsBuild,
     ];
 
     /// Its label in the metrics.
@@ -211,6 +221,9 @@ impl Stage {
             Stage::AggScattered => "agg_scattered",
             Stage::AggByIndex => "agg_by_index",
             Stage::BackgroundWait => "background_wait",
+            Stage::StatsPass => "stats_pass",
+            Stage::StatsRead => "stats_read",
+            Stage::StatsBuild => "stats_build",
         }
     }
 }

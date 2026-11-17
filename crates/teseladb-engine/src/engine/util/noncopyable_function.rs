@@ -75,13 +75,21 @@ pub mod internal {
             from: *mut NoncopyableFunctionBase,
             to: *mut NoncopyableFunctionBase,
         ) {
-            // A bytewise copy, since the type is erased. It also copies any padding the
-            // closure left uninitialized, which is fine: nothing reads it.
-            // SAFETY: both storages are NR_DIRECT >= N bytes.
+            // A copy of the N bytes, since the type is erased. It also copies any padding the
+            // closure left uninitialized, which is fine: nothing reads it. One
+            // `copy_nonoverlapping` of a constant size, which compiles to word moves: a
+            // bytewise loop through the two `UnsafeCell`s is kept as N byte moves, since the
+            // compiler cannot tell that the storages do not overlap (the upstream change
+            // "noncopyable_function: use memcpy instead of bytewise copy loop").
+            // SAFETY: both storages are NR_DIRECT >= N bytes, and they are the storages of two
+            // distinct functions (a move is never from a function into itself).
+            const { assert!(N <= NR_DIRECT) };
             unsafe {
-                for i in 0..N {
-                    (*(*to)._storage.get()).direct[i] = (*(*from)._storage.get()).direct[i];
-                }
+                std::ptr::copy_nonoverlapping(
+                    (*(*from)._storage.get()).direct.as_ptr(),
+                    (*(*to)._storage.get()).direct.as_mut_ptr(),
+                    N,
+                );
             }
         }
 

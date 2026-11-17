@@ -59,6 +59,10 @@ pub struct ReadOp {
     pub op: Operation,
     /// Whether the file supports `RWF_NOWAIT` for this request.
     pub nowait_works: bool,
+    /// A write the kernel is known to have to block for (it lands where the file has no
+    /// blocks yet, so it allocates them): with `RWF_NOWAIT` it would only fail with `EAGAIN`,
+    /// so the linux-aio backend hands it to the syscall thread at once.
+    pub allocates: bool,
     /// The file descriptor.
     pub fd: i32,
     /// The file offset.
@@ -77,6 +81,10 @@ pub struct ReadvOp {
     pub op: Operation,
     /// Whether the file supports `RWF_NOWAIT` for this request.
     pub nowait_works: bool,
+    /// A write the kernel is known to have to block for (it lands where the file has no
+    /// blocks yet, so it allocates them): with `RWF_NOWAIT` it would only fail with `EAGAIN`,
+    /// so the linux-aio backend hands it to the syscall thread at once.
+    pub allocates: bool,
     /// The file descriptor.
     pub fd: i32,
     /// The file offset.
@@ -243,6 +251,7 @@ impl IoRequest {
                 _read: ReadOp {
                     op: Operation::Read,
                     nowait_works,
+                    allocates: false,
                     fd,
                     pos,
                     addr: address.cast(),
@@ -261,6 +270,7 @@ impl IoRequest {
                 _readv: ReadvOp {
                     op: Operation::Readv,
                     nowait_works,
+                    allocates: false,
                     fd,
                     pos,
                     iovec: iov.as_mut_ptr(),
@@ -324,6 +334,7 @@ impl IoRequest {
                 _read: ReadOp {
                     op: Operation::Write,
                     nowait_works,
+                    allocates: false,
                     fd,
                     pos,
                     addr: address.cast_mut().cast(),
@@ -342,12 +353,38 @@ impl IoRequest {
                 _readv: ReadvOp {
                     op: Operation::Writev,
                     nowait_works,
+                    allocates: false,
                     fd,
                     pos,
                     iovec: iov.as_mut_ptr(),
                     iov_len: iov.len(),
                 },
             },
+        }
+    }
+
+    /// Marks a write or vectored write as one that allocates blocks (see
+    /// [`ReadOp::allocates`]); other requests are left as they are.
+    #[inline]
+    pub fn set_allocates(&mut self) {
+        // The active member of a write is `_read`, of a vectored write `_readv` (writing a
+        // union field is safe; the opcode keeps the member the one later read).
+        match self.opcode() {
+            Operation::Write => self.u._read.allocates = true,
+            Operation::Writev => self.u._readv.allocates = true,
+            _ => {}
+        }
+    }
+
+    /// Whether this is a write or vectored write marked with [`IoRequest::set_allocates`].
+    #[inline]
+    pub fn allocates(&self) -> bool {
+        match self.opcode() {
+            // SAFETY: the active member of a write is `_read`.
+            Operation::Write => unsafe { self.u._read.allocates },
+            // SAFETY: the active member of a vectored write is `_readv`.
+            Operation::Writev => unsafe { self.u._readv.allocates },
+            _ => false,
         }
     }
 
@@ -468,6 +505,7 @@ impl IoRequest {
                 _read: ReadOp {
                     op: op.op,
                     nowait_works: op.nowait_works,
+                    allocates: op.allocates,
                     fd: op.fd,
                     pos: op.pos + pos as u64,
                     addr: op.addr.wrapping_add(pos),
@@ -490,6 +528,7 @@ impl IoRequest {
                 _readv: ReadvOp {
                     op: op.op,
                     nowait_works: op.nowait_works,
+                    allocates: op.allocates,
                     fd: op.fd,
                     pos: op.pos + pos as u64,
                     iovec: iov.as_mut_ptr(),

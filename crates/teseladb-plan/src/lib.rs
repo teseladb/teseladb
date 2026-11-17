@@ -8,6 +8,7 @@
 pub mod checker;
 pub mod cost;
 pub mod logical;
+pub mod ordered;
 pub mod rules;
 pub mod stages;
 pub mod stats;

@@ -27,7 +27,8 @@
 //! small-prefix, external-dictionary and double-dictionary modes); and the one-shot block
 //! functions on raw buffers, with output-limit checks when the room is below the bound. The
 //! decoder counts output positions from the start of the prefix that matches may reach, so the
-//! block decoder is the same code with a prefix of 0.
+//! block decoder is the same code with a prefix of 0. [`pieces`] runs the same decoder on a
+//! block held in several buffers without copying them into one first.
 //!
 //! Unsafe code: every read and write goes through a raw pointer whose bounds the loop conditions
 //! guarantee; each function says which, and Miri runs the tests of this module, also on damaged
@@ -35,6 +36,8 @@
 #![allow(unsafe_code)]
 
 use std::{hint, ptr, slice};
+
+pub mod pieces;
 
 /// A block or a stream that does not decode: damaged, cut short, or larger than its room.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,8 +214,45 @@ unsafe fn wild_copy32(mut dst: *mut u8, mut src: *const u8, end: *mut u8) {
     }
 }
 
+/// The bytes one step of the long loop of [`count`] compares: four words, one branch.
+const COUNT_BLOCK: usize = 32;
+
+/// The bytes a step of the widest loop of [`count`] compares, on aarch64: four vectors of 16, one
+/// branch.
+#[cfg(target_arch = "aarch64")]
+const COUNT_WIDE_BLOCK: usize = 64;
+
+/// Whether the [`COUNT_WIDE_BLOCK`] bytes at `a` and at `b` differ: their differences in four
+/// vector registers or-ed together, and one test of the largest lane.
+///
+/// # Safety
+/// The 64 bytes at `a` and at `b` are readable.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn wide_block_differs(a: *const u8, b: *const u8) -> bool {
+    use std::arch::aarch64::{veorq_u8, vld1q_u8, vmaxvq_u32, vorrq_u8, vreinterpretq_u32_u8};
+    // SAFETY: the caller's; NEON is part of every aarch64 target.
+    unsafe {
+        let d0 = veorq_u8(vld1q_u8(a), vld1q_u8(b));
+        let d1 = veorq_u8(vld1q_u8(a.add(16)), vld1q_u8(b.add(16)));
+        let d2 = veorq_u8(vld1q_u8(a.add(32)), vld1q_u8(b.add(32)));
+        let d3 = veorq_u8(vld1q_u8(a.add(48)), vld1q_u8(b.add(48)));
+        let any = vorrq_u8(vorrq_u8(d0, d1), vorrq_u8(d2, d3));
+        vmaxvq_u32(vreinterpretq_u32_u8(any)) != 0
+    }
+}
+
 /// How many bytes from `p_in` on equal those from `p_match` on, not going past `limit`, eight at a
 /// time.
+///
+/// On aarch64 a long match is first skipped [`COUNT_WIDE_BLOCK`] bytes at a time with vectors,
+/// up to the first such block that differs, which the loops below then resolve as before.
+///
+/// After a first word that differs (most matches are short, and they cost one comparison, as in
+/// the loop of one word), a long match is compared [`COUNT_BLOCK`] bytes at a time: the
+/// differences of four words are or-ed together and tested once, so the loop takes a quarter of
+/// the branches; the first block that differs is then resolved word by word. The result is the
+/// same as that of the loop of one word.
 ///
 /// # Safety
 /// `p_in <= limit`, `p_in..limit` is readable and so are as many bytes from `p_match` (behind
@@ -223,6 +263,43 @@ unsafe fn count(mut p_in: *const u8, mut p_match: *const u8, limit: *const u8) -
     // SAFETY: every read is of bytes before `limit`, which the comparisons check, and of as many
     // from `p_match`, which the caller's contract makes readable.
     unsafe {
+        if (p_in as usize) + 8 <= limit as usize {
+            let diff = read64(p_match) ^ read64(p_in);
+            if diff != 0 {
+                return (diff.trailing_zeros() / 8) as usize;
+            }
+            p_in = p_in.add(8);
+            p_match = p_match.add(8);
+            #[cfg(target_arch = "aarch64")]
+            while (p_in as usize) + COUNT_WIDE_BLOCK <= limit as usize
+                && !wide_block_differs(p_in, p_match)
+            {
+                p_in = p_in.add(COUNT_WIDE_BLOCK);
+                p_match = p_match.add(COUNT_WIDE_BLOCK);
+            }
+            while (p_in as usize) + COUNT_BLOCK <= limit as usize {
+                let d0 = read64(p_match) ^ read64(p_in);
+                let d1 = read64(p_match.add(8)) ^ read64(p_in.add(8));
+                let d2 = read64(p_match.add(16)) ^ read64(p_in.add(16));
+                let d3 = read64(p_match.add(24)) ^ read64(p_in.add(24));
+                if (d0 | d1 | d2 | d3) != 0 {
+                    let (skip, diff) = if d0 != 0 {
+                        (0, d0)
+                    } else if d1 != 0 {
+                        (8, d1)
+                    } else if d2 != 0 {
+                        (16, d2)
+                    } else {
+                        (24, d3)
+                    };
+                    return p_in.offset_from(start) as usize
+                        + skip
+                        + (diff.trailing_zeros() / 8) as usize;
+                }
+                p_in = p_in.add(COUNT_BLOCK);
+                p_match = p_match.add(COUNT_BLOCK);
+            }
+        }
         while (p_in as usize) + 8 <= limit as usize {
             let diff = read64(p_match) ^ read64(p_in);
             if diff != 0 {
@@ -716,6 +793,24 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The length bytes [`read_length`] reads at once while that many are before its limit.
+const LENGTH_WORD: usize = 8;
+
+/// The length bytes in the eight bytes of `w` (little-endian, the first byte lowest): what they
+/// add, how many of them there are, and whether the last of them ends the field (is below 255).
+/// Eight bytes of 255 add 2,040 and the field goes on; otherwise the field ends at the first byte
+/// that is not 255. A field of many 255s (a long run of literals that do not compress) is read a
+/// word at a time instead of a byte at a time, with the same result and the same limit: all eight
+/// bytes are before it, so none of them would have stopped the byte loop.
+#[inline(always)]
+fn length_word(w: u64) -> (usize, usize, bool) {
+    let full = ((!w).trailing_zeros() / 8) as usize;
+    if full == LENGTH_WORD {
+        return (255 * LENGTH_WORD, LENGTH_WORD, false);
+    }
+    (255 * full + ((w >> (8 * full)) & 0xFF) as usize, full + 1, true)
+}
+
 /// Reads the more length bytes of a field that was 15: none may be past `limit`, and with `check`
 /// the first may not be at it.
 ///
@@ -733,6 +828,16 @@ unsafe fn read_length(
     }
     let mut length = 0usize;
     loop {
+        if *ip + LENGTH_WORD <= limit {
+            // SAFETY: the eight bytes are before `limit`, readable by the caller's contract.
+            let (n, read, last) = length_word(unsafe { read64(src.add(*ip)) });
+            length += n;
+            *ip += read;
+            if last {
+                return Ok(length);
+            }
+            continue;
+        }
         // SAFETY: `*ip < limit`, by `check` the first time and by the test below after.
         let s = unsafe { *src.add(*ip) };
         *ip += 1;
@@ -881,7 +986,7 @@ unsafe fn decompress_generic<const DICT: u8>(
     let mut d = Decoder { ip: 0, op: prefix, token: 0, length: 0, offset: 0 };
     let stage = if cap >= FASTLOOP_SAFE_DISTANCE {
         // SAFETY: see the function's comment.
-        unsafe { fast_loop::<DICT>(input, iend, low, end, dict, &mut d)? }
+        unsafe { fast_loop::<DICT, false>(input, iend, low, end, dict, &mut d)? }
     } else {
         Stage::Token
     };
@@ -936,11 +1041,18 @@ unsafe fn copy_from_dict(
 /// The fast loop of [`decompress_generic`], while 64 bytes of output are left; returns where the
 /// safe loop starts.
 ///
+/// With `PARTIAL`, the input is a piece of the block that does not reach its end (see
+/// [`pieces`]): a length field that runs into the last bytes of the piece is not refused, as it may
+/// go on in the next piece, but left unread, and the loop stops before it with
+/// [`Stage::Token`] (a literal length: `d.ip` is the token) or [`Stage::MatchLength`] (a match
+/// length: `d.ip` is its first byte, `d.offset` read and `d.length` 15). Its other stops are those
+/// of the whole block, tested against the end of the piece, which is nearer.
+///
 /// # Safety
 /// As [`decompress_generic`]'s, with `out` the start of the prefix and `cap` the end of the
 /// output.
 #[inline(always)]
-unsafe fn fast_loop<const DICT: u8>(
+unsafe fn fast_loop<const DICT: u8, const PARTIAL: bool>(
     input: *const u8,
     iend: usize,
     out: *mut u8,
@@ -964,12 +1076,20 @@ unsafe fn fast_loop<const DICT: u8>(
         let mut ip = input.add(d.ip);
         let mut op = out.add(d.op);
         let stage = loop {
+            let token_at = ip;
             let token = usize::from(*ip);
             ip = ip.add(1);
             d.token = token;
             let length = token >> ML_BITS;
             if length == RUN_MASK {
-                let length = length + read_length_at(&mut ip, run_limit, true)?;
+                let length = match read_length_at(&mut ip, run_limit, true) {
+                    Ok(more) => length + more,
+                    Err(_) if PARTIAL => {
+                        ip = token_at;
+                        break Stage::Token;
+                    }
+                    Err(bad) => return Err(bad),
+                };
                 let cpy = (op as usize).checked_add(length).ok_or(Bad)?;
                 if cpy > wild_out_limit || (ip as usize).saturating_add(length) > wild_in_limit {
                     d.length = length;
@@ -992,7 +1112,16 @@ unsafe fn fast_loop<const DICT: u8>(
             let written = op as usize - start;
             let mut length = token & ML_MASK;
             if length == ML_MASK {
-                length += read_length_at(&mut ip, match_limit, false)? + MIN_MATCH;
+                let length_at = ip;
+                length += match read_length_at(&mut ip, match_limit, false) {
+                    Ok(more) => more + MIN_MATCH,
+                    Err(_) if PARTIAL => {
+                        ip = length_at;
+                        (d.length, d.offset) = (length, offset);
+                        break Stage::MatchLength;
+                    }
+                    Err(bad) => return Err(bad),
+                };
                 if offset > written + dict.size {
                     return Err(Bad);
                 }
@@ -1047,6 +1176,17 @@ unsafe fn read_length_at(ip: &mut *const u8, limit: usize, check: bool) -> Resul
     }
     let mut length = 0usize;
     loop {
+        if *ip as usize + LENGTH_WORD <= limit {
+            // SAFETY: the eight bytes are before `limit`, readable by the caller's contract.
+            let (n, read, last) = length_word(unsafe { read64(*ip) });
+            length += n;
+            // SAFETY: `read` is at most 8, so `*ip` stays at or before `limit`.
+            *ip = unsafe { ip.add(read) };
+            if last {
+                return Ok(length);
+            }
+            continue;
+        }
         // SAFETY: `*ip < limit`, by `check` the first time and by the test below after.
         let s = unsafe {
             let s = **ip;
@@ -1530,6 +1670,10 @@ impl Lz4StreamDecode {
     }
 }
 
+/// The blocks up to which [`Lz4Stream::reset_stream_after_block`] clears the table entry by entry:
+/// hashing each position costs less than clearing 16 KiB below about this many.
+const CLEAR_BY_ENTRY_LIMIT: usize = 512;
+
 /// The state of a stream compressor: the table of the positions last seen by hash, as indexes that
 /// grow from block to block, the data before the next block that its matches may reach, and the
 /// stream of a dictionary to look in as well.
@@ -1579,13 +1723,46 @@ impl Lz4Stream {
     }
 
     /// Forgets the data before and clears the table.
+    ///
+    /// A table marked [`CLEARED_TABLE`] is all 0 (every write to it marks it [`BY_U32`] first),
+    /// so it is not cleared again.
     pub fn reset_stream(&mut self) {
-        self.hash_table.fill(0);
+        if self.table_type != CLEARED_TABLE {
+            self.hash_table.fill(0);
+        }
         self.dictionary = ptr::null();
         self.dict_ctx = ptr::null();
         self.current_offset = 0;
         self.table_type = CLEARED_TABLE;
         self.dict_size = 0;
+    }
+
+    /// [`reset_stream`](Self::reset_stream) right after the stream compressed one block, the `len`
+    /// bytes at `source`: when that block is all the stream did since it was reset (its state
+    /// says so) and is short, the table entries it wrote are cleared one by one instead of the
+    /// whole 16 KiB table. They are entries of hashes of its positions, so clearing the entry of
+    /// every position leaves the table all 0, as `reset_stream` does; the state after is the same.
+    ///
+    /// # Safety
+    /// `source..source + len` is readable and unchanged since it was compressed.
+    pub unsafe fn reset_stream_after_block(&mut self, source: *const u8, len: usize) {
+        let one_block = self.table_type == BY_U32
+            && self.dict_ctx.is_null()
+            && ptr::eq(self.dictionary, source)
+            && self.dict_size as usize == len
+            && self.current_offset as usize == len
+            && len <= CLEAR_BY_ENTRY_LIMIT;
+        if one_block {
+            if len >= HASH_UNIT {
+                for at in 0..=len - HASH_UNIT {
+                    // SAFETY: the eight bytes at `at` are in the block.
+                    let h = unsafe { Large::hash(source.add(at)) };
+                    self.hash_table[h] = 0;
+                }
+            }
+            self.table_type = CLEARED_TABLE;
+        }
+        self.reset_stream();
     }
 
     /// Forgets the data before, keeping the table when its entries can be told from the next
@@ -2121,6 +2298,111 @@ unsafe fn compress_continue_generic<const DICT: u8, const DICT_SMALL: bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `count` gives the length of the common prefix, not going past the limit, for every length
+    /// up to past three blocks of its long loop and every position of the first difference, with
+    /// the match in the same buffer (one byte back, as in a run) and in another one.
+    #[test]
+    fn count_is_the_length_of_the_common_prefix() {
+        // Past three blocks of the widest loop (64 bytes on aarch64).
+        const MAX: usize = 3 * 64 + 13;
+        let reference = |a: &[u8], b: &[u8]| a.iter().zip(b).take_while(|(x, y)| x == y).count();
+        for len in 0..=MAX {
+            for first_diff in (0..len).map(Some).chain([None]) {
+                let input: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
+                let mut other = input.clone();
+                if let Some(at) = first_diff {
+                    other[at] ^= 0x5a;
+                }
+                let range = input.as_ptr_range();
+                // SAFETY: both buffers hold `len` bytes and the limit is the end of `input`.
+                let got = unsafe { count(range.start, other.as_ptr(), range.end) };
+                assert_eq!(
+                    got,
+                    reference(&input, &other),
+                    "len {len}, first difference {first_diff:?}"
+                );
+                assert_eq!(got, first_diff.unwrap_or(len));
+
+                // A run of one byte with a different byte at `first_diff`, matched one byte back.
+                let mut run = vec![9u8; len + 1];
+                if let Some(at) = first_diff {
+                    run[at + 1] = 3;
+                }
+                let range = run.as_ptr_range();
+                // SAFETY: `p_match` is one byte behind `p_in`, both inside `run`.
+                let got = unsafe { count(range.start.add(1), range.start, range.end) };
+                assert_eq!(got, reference(&run[1..], &run[..len]), "run of {len}, {first_diff:?}");
+            }
+        }
+    }
+
+    /// The length reader of the format, a byte at a time, as the reference decoder reads it:
+    /// (length, position after) or `Bad`.
+    fn length_bytewise(
+        src: &[u8],
+        mut ip: usize,
+        limit: usize,
+        check: bool,
+    ) -> Result<(usize, usize), Bad> {
+        if check && ip >= limit {
+            return Err(Bad);
+        }
+        let mut length = 0;
+        loop {
+            let s = src[ip];
+            ip += 1;
+            length += usize::from(s);
+            if ip > limit {
+                return Err(Bad);
+            }
+            if s != 255 {
+                return Ok((length, ip));
+            }
+        }
+    }
+
+    /// `read_length` and `read_length_at`, which take eight bytes at once while they are before
+    /// the limit, give the length, the position after it and the refusals of the byte loop: for
+    /// every run of 255s up to past three words, ended by every kind of byte, from every start
+    /// and against every limit around the end of the run, with and without the first check.
+    #[test]
+    fn length_fields_read_a_word_at_a_time_are_those_of_the_byte_loop() {
+        for run in 0..3 * LENGTH_WORD + 3 {
+            for last in [0u8, 1, 0x7F, 0xFE, 0xFF] {
+                let mut src = vec![255u8; run];
+                src.push(last);
+                src.extend([7u8; 2 * LENGTH_WORD]);
+                for start in 0..3 {
+                    let field = [&[0x33u8; 3][..start], &src[..]].concat();
+                    for limit in start..=(start + run + LENGTH_WORD + 2).min(field.len() - 1) {
+                        for check in [false, true] {
+                            let want = length_bytewise(&field, start, limit, check);
+                            let mut ip = start;
+                            // SAFETY: the bytewise reader read every byte up to `limit` from
+                            // the same start, all inside `field`.
+                            let got = unsafe { read_length(field.as_ptr(), &mut ip, limit, check) };
+                            assert_eq!(
+                                got.map(|n| (n, ip)),
+                                want,
+                                "run {run}, last {last}, start {start}, limit {limit}, check {check}"
+                            );
+                            let mut p = field[start..].as_ptr();
+                            let limit_at = field.as_ptr() as usize + limit;
+                            // SAFETY: as above, on pointers.
+                            let got = unsafe { read_length_at(&mut p, limit_at, check) };
+                            let at = p as usize - field.as_ptr() as usize;
+                            assert_eq!(
+                                got.map(|n| (n, at)),
+                                want,
+                                "at: run {run}, last {last}, start {start}, limit {limit}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// Blocks written by hand from the format's description.
     #[test]
@@ -2700,5 +2982,231 @@ mod tests {
         }
         assert_eq!(size_of::<Lz4Stream>(), (1 << 14) + 32);
         assert_eq!(size_of::<Lz4StreamDecode>(), 32);
+    }
+
+    /// Whether `s` is as `reset_stream` leaves a stream: a table of 0 and no data before.
+    fn is_reset(s: &Lz4Stream) -> bool {
+        s.hash_table.iter().all(|&e| e == 0)
+            && s.dictionary.is_null()
+            && s.dict_ctx.is_null()
+            && s.current_offset == 0
+            && s.table_type == CLEARED_TABLE
+            && s.dict_size == 0
+    }
+
+    /// `reset_stream_after_block` after one block leaves the stream as `reset_stream` does, for
+    /// blocks below, at and above the size it clears entry by entry, and the next block comes
+    /// out as on a new stream; after two blocks, or a dictionary, it clears the whole table.
+    #[test]
+    fn a_stream_reset_after_one_block_is_a_new_stream() {
+        let compress = |s: &mut Lz4Stream, input: &[u8]| {
+            let mut dst = vec![0u8; compress_bound(input.len()).max(1)];
+            // SAFETY: `dst` has room for the bound; the input stays alive and unchanged.
+            let n = unsafe {
+                s.compress_fast_continue(
+                    input.as_ptr(),
+                    dst.as_mut_ptr(),
+                    input.len(),
+                    dst.len(),
+                    0,
+                )
+            };
+            dst.truncate(n);
+            dst
+        };
+        let next = stream_data(3000);
+        for len in [0, 1, 7, 8, 12, 13, 14, 100, 128, 511, 512, 513, 4000] {
+            for input in [noise(len, 3), vec![0; len], stream_data(len)] {
+                let mut s = Lz4Stream::new();
+                compress(&mut s, &noise(9000, 4));
+                s.reset_stream();
+                let block = compress(&mut s, &input);
+                // SAFETY: the block is in `input`, unchanged.
+                unsafe { s.reset_stream_after_block(input.as_ptr(), input.len()) };
+                assert!(is_reset(&s), "{len} bytes");
+                assert_eq!(compress(&mut s, &next), compress(&mut Lz4Stream::new(), &next));
+                assert_eq!(block, compress(&mut Lz4Stream::new(), &input));
+            }
+        }
+        // Two blocks, or one after a dictionary: the whole table is cleared.
+        let (a, b) = (stream_data(200), stream_data(300));
+        let mut s = Lz4Stream::new();
+        compress(&mut s, &a);
+        compress(&mut s, &b);
+        // SAFETY: `b` is unchanged.
+        unsafe { s.reset_stream_after_block(b.as_ptr(), b.len()) };
+        assert!(is_reset(&s));
+        let mut s = Lz4Stream::new();
+        // SAFETY: `a` stays alive while the stream uses it.
+        unsafe { s.load_dict(a.as_ptr(), a.len()) };
+        compress(&mut s, &b);
+        // SAFETY: as above.
+        unsafe { s.reset_stream_after_block(b.as_ptr(), b.len()) };
+        assert!(is_reset(&s));
+    }
+
+    /// `block` cut into pieces at `cuts` (positions in it, in order), after a first piece of
+    /// `skip` bytes that are not part of it, with an empty piece among them.
+    fn cut(block: &[u8], cuts: &[usize], skip: usize) -> Vec<Vec<u8>> {
+        let mut pieces = vec![vec![0xEE; skip], Vec::new()];
+        let mut at = 0;
+        for &c in cuts.iter().chain([&block.len()]) {
+            pieces.push(block[at..c].to_vec());
+            at = c;
+        }
+        pieces
+    }
+
+    /// The cuts of a block of `len` bytes into pieces of `n` (and a last shorter one).
+    fn every(len: usize, n: usize) -> Vec<usize> {
+        (n..len).step_by(n).collect()
+    }
+
+    /// `decompress_safe` on the whole block and `decompress_safe_pieces` on it cut at `cuts` give
+    /// the same result: the same length and output, or both a refusal.
+    fn same_in_pieces(block: &[u8], cuts: &[usize], cap: usize) {
+        let mut whole = vec![0u8; cap];
+        let mut parts = vec![0u8; cap];
+        let skip = cuts.len() % 3;
+        let pieces = cut(block, cuts, skip);
+        // SAFETY: each output has `cap` bytes; the pieces hold the block after `skip` bytes.
+        let (want, got) = unsafe {
+            (
+                decompress_safe(block.as_ptr(), whole.as_mut_ptr(), block.len(), cap),
+                pieces::decompress_safe_pieces(&pieces, skip, block.len(), parts.as_mut_ptr(), cap),
+            )
+        };
+        assert_eq!(got, want, "{} bytes into {cap}, cut at {cuts:?}", block.len());
+        if let Ok(n) = want {
+            assert!(parts[..n] == whole[..n], "{} bytes cut at {cuts:?}", block.len());
+        }
+    }
+
+    /// Blocks of every kind cut into pieces decode as the whole block: cut once at every place
+    /// (every few for long blocks), and into pieces of 1 byte to more than a long run of literals,
+    /// with the room of the block, more and less.
+    #[test]
+    fn blocks_in_pieces_decode_as_the_whole_block() {
+        let mut all = inputs();
+        // Literals that do not compress, longer than a length field of one word and than the
+        // pieces, as a frame of noise arrives; and noise between repeats.
+        all.push(noise(70_000, 5));
+        all.push([noise(3000, 9), vec![0; 5000], noise(3000, 9), noise(40_000, 3)].concat());
+        let sparse = if cfg!(miri) { 97 } else { 1 };
+        for input in &all {
+            let block = compress_block(input);
+            let len = block.len();
+            let caps = [input.len(), input.len() + 100, input.len().saturating_sub(1)];
+            let step = (len / 400).max(1) * sparse;
+            for at in (0..=len).step_by(step) {
+                same_in_pieces(&block, &[at], input.len());
+            }
+            for n in [1, 3, 17, 64, 100, 1000, 70_000] {
+                if cfg!(miri) && n < 64 && len > 2000 {
+                    continue;
+                }
+                for cap in caps {
+                    same_in_pieces(&block, &every(len, n), cap);
+                }
+            }
+        }
+    }
+
+    /// Damaged blocks give the same result in pieces as whole, also where the decoder treats a
+    /// damaged sequence differently by where the ends are: each byte changed and each cut, in
+    /// pieces cut around the change and at a fixed step.
+    #[test]
+    fn damaged_blocks_in_pieces_decode_as_the_whole_block() {
+        let step = if cfg!(miri) { 11 } else { 1 };
+        for input in inputs().into_iter().filter(|i| i.len() < 5000) {
+            let block = compress_block(&input);
+            for at in (0..block.len()).step_by(step) {
+                for value in [0x00, 0x0F, 0xF0, 0xFF, block[at] ^ 0x40] {
+                    let mut bad = block.clone();
+                    bad[at] = value;
+                    for cuts in [vec![at], vec![at + 1], every(bad.len(), 64), every(bad.len(), 5)]
+                    {
+                        let cuts: Vec<usize> =
+                            cuts.into_iter().filter(|&c| c <= bad.len()).collect();
+                        same_in_pieces(&bad, &cuts, input.len());
+                        same_in_pieces(&bad, &cuts, input.len() + 40);
+                    }
+                }
+                same_in_pieces(&block[..at], &every(at, 33), input.len());
+            }
+        }
+        // A cut of the pieces short of the block is refused.
+        let block = compress_block(&noise(500, 1));
+        let mut out = vec![0u8; 500];
+        // SAFETY: `out` has 500 bytes.
+        let got = unsafe {
+            pieces::decompress_safe_pieces(&[&block[..100]], 0, block.len(), out.as_mut_ptr(), 500)
+        };
+        assert_eq!(got, Err(Bad));
+    }
+
+    /// A stream of blocks, each cut into pieces, decodes with `decompress_safe_continue_pieces`
+    /// as with `decompress_safe_continue` on each whole block, in every mode: one buffer (the
+    /// prefix, up to and past 64 KiB), a ring buffer (the double dictionary) and separate buffers
+    /// (the external dictionary).
+    #[test]
+    fn streams_in_pieces_decode_as_whole_blocks() {
+        let max = 32 << 10;
+        let total = if cfg!(miri) { 80 << 10 } else { 400 << 10 };
+        let data = stream_data(total);
+        let sizes = fragment_sizes(total, max);
+        for copy in [false, true] {
+            let blocks = compress_stream(&mut Lz4Stream::new(), &data, &sizes, copy);
+            // Where each block goes: one buffer, a ring, or a buffer of its own.
+            for layout in 0..3 {
+                let room = match layout {
+                    0 => total,
+                    1 => decoder_ring_buffer_size(max),
+                    _ => max * blocks.len(),
+                };
+                let mut whole = vec![0u8; room];
+                let mut parts = vec![0u8; room];
+                let mut a = Lz4StreamDecode::new();
+                let mut b = Lz4StreamDecode::new();
+                let mut at = 0;
+                for (k, (block, &n)) in blocks.iter().zip(&sizes).enumerate() {
+                    if layout == 1 && at + max > room {
+                        at = 0;
+                    }
+                    if layout == 2 {
+                        at = k * max;
+                    }
+                    let pieces = cut(block, &every(block.len(), 1000 + 37 * k), k % 2);
+                    // SAFETY: each buffer has room for `n` bytes at `at` and keeps what the
+                    // blocks before wrote.
+                    let (want, got) = unsafe {
+                        (
+                            a.decompress_safe_continue(
+                                block.as_ptr(),
+                                whole.as_mut_ptr().add(at),
+                                block.len(),
+                                n,
+                            ),
+                            b.decompress_safe_continue_pieces(
+                                &pieces,
+                                k % 2,
+                                block.len(),
+                                parts.as_mut_ptr().add(at),
+                                n,
+                            ),
+                        )
+                    };
+                    assert_eq!(got, want, "layout {layout}, block {k}");
+                    // Separate buffers keep only the block before as the dictionary: a stream
+                    // compressed from one buffer may reach farther, and both refuse it.
+                    if layout != 2 || copy {
+                        assert_eq!(want, Ok(n));
+                        let from = sizes[..k].iter().sum::<usize>();
+                        assert!(parts[at..at + n] == data[from..from + n]);
+                    }
+                    at += n;
+                }
+            }
+        }
     }
 }

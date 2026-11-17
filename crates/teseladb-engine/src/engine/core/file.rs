@@ -1441,7 +1441,11 @@ impl PosixFileImpl {
         ret
     }
 
-    /// Queues a write of `len` bytes from `buffer` at `pos` on the shard's I/O queue.
+    /// Queues a write of `len` bytes from `buffer` at `pos` on the shard's I/O queue;
+    /// `allocates` says that it lands where the file has no blocks (see
+    /// [`IoRequest::set_allocates`]).
+    ///
+    /// [`IoRequest::set_allocates`]: crate::engine::core::internal::io_request::IoRequest::set_allocates
     #[inline]
     pub(crate) fn do_write_dma(
         &self,
@@ -1450,14 +1454,18 @@ impl PosixFileImpl {
         len: usize,
         io_priority_class: MaybePriorityClassRef,
         intent: *mut IoIntent,
+        allocates: bool,
     ) -> Future<usize> {
-        let req = crate::engine::core::internal::io_request::IoRequest::make_write(
+        let mut req = crate::engine::core::internal::io_request::IoRequest::make_write(
             self._fd.get(),
             pos,
             buffer as *const c_void,
             len,
             self._nowait_works,
         );
+        if allocates && self._nowait_works {
+            req.set_allocates();
+        }
         // SAFETY: the io queue of a device lives as long as the reactor; `_io_queue` is its
         // root pointer (`get_io_queue`), with no reference to the queue live.
         unsafe {
@@ -1472,7 +1480,8 @@ impl PosixFileImpl {
         }
     }
 
-    /// Queues a vectored write at `pos` on the shard's I/O queue.
+    /// Queues a vectored write at `pos` on the shard's I/O queue; `allocates` as for
+    /// [`PosixFileImpl::do_write_dma`].
     #[inline]
     pub(crate) fn do_write_dma_iov(
         &self,
@@ -1480,14 +1489,18 @@ impl PosixFileImpl {
         mut iov: Vec<Iovec>,
         io_priority_class: MaybePriorityClassRef,
         intent: *mut IoIntent,
+        allocates: bool,
     ) -> Future<usize> {
         let len = sanitize_iovecs(&mut iov, self._base._disk_write_dma_alignment as usize);
-        let req = crate::engine::core::internal::io_request::IoRequest::make_writev(
+        let mut req = crate::engine::core::internal::io_request::IoRequest::make_writev(
             self._fd.get(),
             pos,
             &mut iov,
             self._nowait_works,
         );
+        if allocates && self._nowait_works {
+            req.set_allocates();
+        }
         // SAFETY: the io queue of a device lives as long as the reactor; `_io_queue` is its
         // root pointer (`get_io_queue`), with no reference to the queue live.
         unsafe {
@@ -1575,7 +1588,7 @@ impl PosixFileReal {
         pc: MaybePriorityClassRef,
         intent: *mut IoIntent,
     ) -> Future<usize> {
-        self.base.do_write_dma(pos, buffer, len, pc, intent)
+        self.base.do_write_dma(pos, buffer, len, pc, intent, false)
     }
 
     /// Writes the buffers of `iov` at `pos`.
@@ -1587,7 +1600,7 @@ impl PosixFileReal {
         pc: MaybePriorityClassRef,
         intent: *mut IoIntent,
     ) -> Future<usize> {
-        self.base.do_write_dma_iov(pos, iov, pc, intent)
+        self.base.do_write_dma_iov(pos, iov, pc, intent, false)
     }
 
     /// Reads `len` bytes at `pos` into `buffer`.
@@ -1867,7 +1880,7 @@ impl BlockdevFileImpl {
         pc: MaybePriorityClassRef,
         intent: *mut IoIntent,
     ) -> Future<usize> {
-        self.base.do_write_dma(pos, buffer, len, pc, intent)
+        self.base.do_write_dma(pos, buffer, len, pc, intent, false)
     }
 
     /// Writes the buffers of `iov` at `pos`.
@@ -1879,7 +1892,7 @@ impl BlockdevFileImpl {
         pc: MaybePriorityClassRef,
         intent: *mut IoIntent,
     ) -> Future<usize> {
-        self.base.do_write_dma_iov(pos, iov, pc, intent)
+        self.base.do_write_dma_iov(pos, iov, pc, intent, false)
     }
 
     /// Reads `len` bytes at `pos` into `buffer`.
@@ -1941,6 +1954,7 @@ impl AppendChallengedPosixFileImpl {
             _esft: Default::default(),
             _committed_size: Cell::new(r as u64),
             _logical_size: Cell::new(r as u64),
+            _data_end: Cell::new(r as u64),
             _q: UnsafeCell::new(VecDeque::new()),
             _max_size_changing_ops: fsi.append_concurrency,
             _current_non_size_changing_ops: Cell::new(0),
@@ -2033,6 +2047,7 @@ impl AppendChallengedPosixFileImpl {
         let r = unsafe { c_ftruncate(self.base._fd.get(), length as i64) };
         if r != -1 {
             self._committed_size.set(length);
+            self.data_end_truncated(length);
         }
         r
     }
@@ -2149,6 +2164,14 @@ impl AppendChallengedPosixFileImpl {
     pub(crate) fn commit_size(&self, size: u64) {
         self._committed_size.set(size.max(self._committed_size.get()));
         self._logical_size.set(size.max(self._logical_size.get()));
+        // A completed write gave the file blocks up to its end.
+        self._data_end.set(size.max(self._data_end.get()));
+    }
+
+    /// Records that a truncation to `length` dropped the blocks past it.
+    #[inline]
+    pub(crate) fn data_end_truncated(&self, length: u64) {
+        self._data_end.set(length.min(self._data_end.get()));
     }
 
     /// Reads `len` bytes at `pos` into `buffer`; a read at or past the logical size
@@ -2239,7 +2262,9 @@ impl AppendChallengedPosixFileImpl {
                 Err(e) => return make_exception_future(e),
             };
             // SAFETY: the file outlives its queued operations.
-            unsafe { (*this).base.do_write_dma(pos, buffer, len, pc, i) }.then(move |ret: usize| {
+            let me = unsafe { &*this };
+            let allocates = pos >= me._data_end.get();
+            me.base.do_write_dma(pos, buffer, len, pc, i, allocates).then(move |ret: usize| {
                 // SAFETY: as above.
                 unsafe { (*this).commit_size(pos + ret as u64) };
                 make_ready_future(ret)
@@ -2263,7 +2288,9 @@ impl AppendChallengedPosixFileImpl {
                 Err(e) => return make_exception_future(e),
             };
             // SAFETY: the file outlives its queued operations.
-            unsafe { (*this).base.do_write_dma_iov(pos, iov, pc, i) }.then(move |ret: usize| {
+            let me = unsafe { &*this };
+            let allocates = pos >= me._data_end.get();
+            me.base.do_write_dma_iov(pos, iov, pc, i, allocates).then(move |ret: usize| {
                 // SAFETY: as above.
                 unsafe { (*this).commit_size(pos + ret as u64) };
                 make_ready_future(ret)
@@ -2318,7 +2345,13 @@ impl AppendChallengedPosixFileImpl {
             ptr::null_mut(),
             move |_| {
                 // SAFETY: the file outlives its queued operations.
-                unsafe { (*this).base.allocate(position, length) }
+                unsafe { (*this).base.allocate(position, length) }.then(move |()| {
+                    // The range has blocks now (unwritten ones on some filesystems, which
+                    // the first RWF_NOWAIT write then learns the old way, by EAGAIN).
+                    // SAFETY: as above.
+                    let me = unsafe { &*this };
+                    me._data_end.set((position + length).max(me._data_end.get()));
+                })
             },
         )
     }
@@ -2344,6 +2377,7 @@ impl AppendChallengedPosixFileImpl {
                 unsafe {
                     (*this)._committed_size.set(length);
                     (*this)._logical_size.set(length);
+                    (*this).data_end_truncated(length);
                 }
             })
         })

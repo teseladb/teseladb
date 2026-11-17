@@ -9,13 +9,19 @@
 //! body           := frame*
 //! frame          := kind(u8) · 0(u8) · core(u16) · len(u32) · segment(u64) · arg(u64) · data(len)
 //!                   · zeros up to 8 bytes
+//!                 | 6(u8) · byte(u8) · core(u16) · len(u32) · segment(u64) · arg(u64)
 //! ```
 //!
 //! A frame addresses a WAL segment of one core: `CREATE` makes it (`arg`: its reserved length),
-//! `WRITE` puts `data` at offset `arg`, `TRUNCATE` cuts it to `arg` bytes and `REMOVE` deletes it.
-//! `BOUND` names no segment: `arg` is the node's HLC bound in force (005 FR-003, D-172).
-//! The CRC of a record covers its whole body, so a record is whole or not there. Integers are
-//! little-endian.
+//! `WRITE` puts `data` at offset `arg`, `FILL` puts `len` copies of `byte` at offset `arg` without
+//! carrying them, `TRUNCATE` cuts it to `arg` bytes and `REMOVE` deletes it. `BOUND` names no
+//! segment: `arg` is the node's HLC bound in force (005 FR-003, D-172). The CRC of a record covers
+//! its whole body, so a record is whole or not there. Integers are little-endian.
+//!
+//! Version 2 adds `FILL`: a core's WAL pads each batch to 4 KiB, and the padding no longer goes to
+//! the disk byte by byte. Version 2 reads the files and records of version 1; a reader of version 1
+//! takes a record of version 2 for the end of its log, so the data directory's format says which
+//! version a node may open.
 
 use teseladb_hash::crc32c;
 
@@ -25,8 +31,10 @@ pub const BLOCK: u64 = 4096;
 pub const DIR: &str = "raftlog";
 const SEGMENT_MAGIC: &[u8; 8] = b"TDBRLOG\0";
 const RECORD_MAGIC: u32 = 0x4746_4C54;
-/// Version of the format.
-pub const VERSION: u16 = 1;
+/// Version of the format it writes.
+pub const VERSION: u16 = 2;
+/// The oldest version it reads.
+pub const FIRST_VERSION: u16 = 1;
 /// Bytes of a record's head.
 pub const HEAD: usize = 32;
 /// Bytes of a frame before its data.
@@ -46,6 +54,8 @@ pub enum FrameKind {
     /// The node's HLC bound in force, `arg` milliseconds (005 FR-003, D-172); it names no
     /// segment (core and segment 0). Every record carries one once a bound was offered.
     Bound = 5,
+    /// `len` copies of one byte at offset `arg`, not carried in the record (version 2).
+    Fill = 6,
 }
 
 impl FrameKind {
@@ -56,9 +66,16 @@ impl FrameKind {
             3 => Some(FrameKind::Truncate),
             4 => Some(FrameKind::Remove),
             5 => Some(FrameKind::Bound),
+            6 => Some(FrameKind::Fill),
             _ => None,
         }
     }
+}
+
+/// Whether this build reads files and records of `version`.
+#[must_use]
+pub fn reads_version(version: u32) -> bool {
+    (u32::from(FIRST_VERSION)..=u32::from(VERSION)).contains(&version)
 }
 
 /// A frame read from a record: where its data starts within the body.
@@ -72,10 +89,12 @@ pub struct Frame {
     pub segment: u64,
     /// Offset, reserved length or new length, by kind.
     pub arg: u64,
-    /// Bytes of data (only `WRITE` has any).
+    /// Bytes of data (only `WRITE` carries them), or the bytes a `FILL` puts.
     pub len: u32,
     /// Where the data starts within the body.
     pub data_at: usize,
+    /// The byte a `FILL` repeats (0 for the other kinds).
+    pub fill: u8,
 }
 
 /// Name of segment `seq` under the data directory.
@@ -110,7 +129,7 @@ pub fn segment_header(seq: u64) -> Vec<u8> {
 pub fn header_ok(data: &[u8], seq: u64) -> bool {
     data.len() >= BLOCK as usize
         && &data[..8] == SEGMENT_MAGIC
-        && u32_at(data, 8) == u32::from(VERSION)
+        && reads_version(u32_at(data, 8))
         && u64_at(data, 16) == seq
         && u32_at(data, 24) == crc32c(&data[..24])
         && data[28..BLOCK as usize].iter().all(|b| *b == 0)
@@ -134,6 +153,16 @@ pub fn push_frame(
     body.extend_from_slice(&arg.to_le_bytes());
     body.extend_from_slice(data);
     body.resize(body.len().next_multiple_of(8), 0);
+}
+
+/// Appends to `body` a `FILL` frame: `len` copies of `byte` at offset `arg` of the segment.
+pub fn push_fill(body: &mut Vec<u8>, core: u16, segment: u64, arg: u64, len: u32, byte: u8) {
+    body.push(FrameKind::Fill as u8);
+    body.push(byte);
+    body.extend_from_slice(&core.to_le_bytes());
+    body.extend_from_slice(&len.to_le_bytes());
+    body.extend_from_slice(&segment.to_le_bytes());
+    body.extend_from_slice(&arg.to_le_bytes());
 }
 
 /// Bytes a frame of `len` bytes of data takes in a body.
@@ -178,7 +207,7 @@ pub struct Record<'a> {
 pub fn read_record(data: &[u8]) -> Option<Record<'_>> {
     let head = data.get(..HEAD)?;
     if u32_at(head, 0) != RECORD_MAGIC
-        || u16::from_le_bytes([head[4], head[5]]) != VERSION
+        || !reads_version(u32::from(u16::from_le_bytes([head[4], head[5]])))
         || u32_at(head, 24) != crc32c(&head[..24])
     {
         return None;
@@ -206,7 +235,8 @@ pub fn frames(body: &[u8]) -> Option<Vec<Frame>> {
         let kind = FrameKind::from_u8(head[0])?;
         let len = u32_at(head, 4);
         let data_at = pos + FRAME_HEAD;
-        body.get(data_at..data_at + len as usize)?;
+        let carried = if kind == FrameKind::Fill { 0 } else { len as usize };
+        body.get(data_at..data_at + carried)?;
         out.push(Frame {
             kind,
             core: u16::from_le_bytes([head[2], head[3]]),
@@ -214,8 +244,9 @@ pub fn frames(body: &[u8]) -> Option<Vec<Frame>> {
             arg: u64_at(head, 16),
             len,
             data_at,
+            fill: if kind == FrameKind::Fill { head[1] } else { 0 },
         });
-        pos += frame_len(len as usize);
+        pos += frame_len(carried);
     }
     Some(out)
 }
@@ -279,6 +310,35 @@ mod tests {
             assert!(!header_ok(&bad, 26), "{at}");
         }
         assert!(!header_ok(&h[..100], 26));
+    }
+
+    #[test]
+    fn a_fill_frame_carries_no_data_and_version_1_still_reads() {
+        let mut body = Vec::new();
+        push_frame(&mut body, FrameKind::Write, 2, 5, 0, b"abc");
+        push_fill(&mut body, 2, 5, 3, 4093, 0x5a);
+        push_frame(&mut body, FrameKind::Truncate, 2, 5, 9, &[]);
+        assert_eq!(body.len(), frame_len(3) + 2 * FRAME_HEAD);
+        let f = frames(&body).unwrap();
+        assert_eq!(f.len(), 3);
+        assert_eq!((f[1].kind, f[1].arg, f[1].len, f[1].fill), (FrameKind::Fill, 3, 4093, 0x5a));
+        assert_eq!((f[0].fill, f[2].kind), (0, FrameKind::Truncate));
+        // A record and a header of version 1 (no `FILL`) read as before; a later version does not.
+        let mut old = record(4, &body[..frame_len(3)]);
+        old[4] = 1;
+        let crc = crc32c(&old[..24]);
+        old[24..28].copy_from_slice(&crc.to_le_bytes());
+        assert_eq!(read_record(&old).unwrap().flush, 4);
+        let mut h = segment_header(3);
+        h[8] = 1;
+        let crc = crc32c(&h[..24]);
+        h[24..28].copy_from_slice(&crc.to_le_bytes());
+        assert!(header_ok(&h, 3));
+        h[8] = 3;
+        let crc = crc32c(&h[..24]);
+        h[24..28].copy_from_slice(&crc.to_le_bytes());
+        assert!(!header_ok(&h, 3));
+        assert!(!reads_version(0) && reads_version(1) && reads_version(2) && !reads_version(3));
     }
 
     #[test]
