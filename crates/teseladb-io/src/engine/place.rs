@@ -57,6 +57,11 @@ impl DiskPlace {
     pub fn on_shard(&self) -> io::Result<ShardDisk> {
         match self {
             DiskPlace::Files(root) => {
+                // Elsewhere the engine's calls below would run on a thread without a reactor
+                // (which the engine does not check: a crash).
+                if !crate::engine::wait::in_engine_thread() {
+                    return Err(io::Error::other("a shard's disk opens in an engine thread"));
+                }
                 let failed = |e: teseladb::engine::core::future::ExceptionPtr| {
                     io::Error::other(e.to_string())
                 };
@@ -148,5 +153,17 @@ mod tests {
         assert!(matches!(DiskPlace::Files(root.clone()).log_disk().unwrap(), LogDisk::Files(_)));
         assert!(matches!(DiskPlace::Memory.log_disk().unwrap(), LogDisk::Memory(_)));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A shard's disk asked for from a thread that is not an engine thread is refused, not
+    /// opened on a thread without a reactor (which crashed the process).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shard_s_disk_outside_an_engine_thread_is_refused() {
+        let root = std::env::temp_dir().join(format!("teseladb-place-off-{}", std::process::id()));
+        let e = DiskPlace::Files(root.clone()).on_shard().unwrap_err();
+        assert!(e.to_string().contains("engine thread"), "{e}");
+        assert!(DiskPlace::Memory.on_shard().is_ok(), "a model needs no engine");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
