@@ -28,12 +28,18 @@
 //! check would hide from both (H-049 of the native tests, `spec/tla/HlcKeyLatches.tla`).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use teseladb_lsm::Published;
 
 use teseladb_hlc::Hlc;
+
+/// A latched key. The latches hold one copy of each key, which every map of them shares: a key
+/// may be an index entry of many MiB (an index on a long string), and the maps of the exclusive
+/// latches, the counted keys, the keys in order and the last releases each held their own copy.
+type Key = Arc<[u8]>;
 
 /// Which latches a read waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,14 +100,16 @@ impl KeySlots {
 /// are sequentially consistent, so either the scan loads a set with the key or the write sees its
 /// bound (`spec/tla/HlcKeyLatches.tla`).
 pub struct SpanKeys {
-    published: Published<Vec<Vec<u8>>>,
+    published: Published<Vec<Key>>,
     /// The keys, first and last, of the last writes released, each with its number in the count
     /// of releases: published before the count goes up, so a scan that sees a release counted
     /// finds it here, and goes to the core only if one of them was in what it read.
     recent: Published<Released>,
 }
 
-/// The last [`RECENT_RELEASES`] writes released with counted keys: number, first and last key.
+/// The last [`RECENT_RELEASES`] writes released with counted keys: number, and a key at or
+/// below their first key and one at or above their last, each of at most
+/// [`crate::load::SAMPLE_KEY`] bytes (whole keys of many MiB, kept for 256 writes, held them all).
 #[derive(Debug, Default)]
 pub struct Released {
     writes: VecDeque<(u64, Arc<[u8]>, Arc<[u8]>)>,
@@ -111,6 +119,11 @@ pub struct Released {
 pub const RECENT_RELEASES: usize = 256;
 
 impl Released {
+    /// Bytes of the keys it keeps.
+    pub fn key_bytes(&self) -> usize {
+        self.writes.iter().map(|(_, f, l)| f.len() + l.len()).sum()
+    }
+
     /// Whether a write numbered in `(after, upto]` had a key in `[start, end)`; `None` when it
     /// does not keep all of them.
     pub fn any_in(&self, (after, upto): (u64, u64), (start, end): (&[u8], &[u8])) -> Option<bool> {
@@ -146,12 +159,12 @@ impl SpanKeys {
             return false;
         }
         let keys = self.published.load();
-        let first = keys.partition_point(|k| k.as_slice() < start);
-        keys.get(first).is_some_and(|k| k.as_slice() < end)
+        let first = keys.partition_point(|k| &k[..] < start);
+        keys.get(first).is_some_and(|k| &k[..] < end)
     }
 
     /// Publishes the keys of `held`, in order.
-    fn publish(&self, held: &BTreeMap<Vec<u8>, u32>) {
+    fn publish(&self, held: &BTreeMap<Key, u32>) {
         self.published.store(Arc::new(held.keys().cloned().collect()));
     }
 
@@ -161,10 +174,13 @@ impl SpanKeys {
     }
 
     /// Records write number `n` released, with its keys from `first` to `last`.
-    fn record_release(&self, n: u64, first: &[u8], last: &[u8]) {
+    fn record_release(&self, n: u64, first: &Key, last: &Key) {
         let now = self.recent.load();
         let mut writes = now.writes.clone();
-        writes.push_back((n, Arc::from(first), Arc::from(last)));
+        let bound =
+            |k: &Key, b: Vec<u8>| if b.len() == k.len() { Arc::clone(k) } else { Arc::from(b) };
+        let (lo, hi) = (crate::load::at_or_below(first), crate::load::at_or_above(last));
+        writes.push_back((n, bound(first, lo), bound(last, hi)));
         while writes.len() > RECENT_RELEASES {
             writes.pop_front();
         }
@@ -203,9 +219,9 @@ pub type Pending = Option<(u8, Vec<u8>)>;
 /// The latches of a range's leader.
 #[derive(Clone, Debug, Default)]
 pub struct Latches {
-    by_key: BTreeMap<Vec<u8>, (Option<Hlc>, LatchId)>,
+    by_key: BTreeMap<Key, (Option<Hlc>, LatchId)>,
     /// The writes proposed and not applied yet by key, in the order of their entries (FR-029).
-    pipelined: BTreeMap<Vec<u8>, Vec<Pipelined>>,
+    pipelined: BTreeMap<Key, Vec<Pipelined>>,
     /// The holders that took their latches with [`Latches::acquire_pipelined`]: only they go on
     /// pipelined writes when they add keys.
     goes_on: BTreeSet<LatchId>,
@@ -222,12 +238,12 @@ pub struct Latches {
     keys: Arc<KeySlots>,
     /// The keys latched, in order, for the scans outside the core, and how many writes hold each.
     spans: Arc<SpanKeys>,
-    span_counts: BTreeMap<Vec<u8>, u32>,
+    span_counts: BTreeMap<Key, u32>,
     /// How many writes with counted keys were released, raised before their keys leave
     /// [`SpanKeys`].
     released: Arc<AtomicU64>,
     /// The keys each write counted, which its release uncounts.
-    counted: BTreeMap<LatchId, Vec<Vec<u8>>>,
+    counted: BTreeMap<LatchId, Vec<Key>>,
 }
 
 impl Latches {
@@ -266,7 +282,7 @@ impl Latches {
         if let Some(id) = pipelined {
             return Some((id, true));
         }
-        keys.iter().find_map(|k| self.by_key.get(k)).map(|(_, h)| (*h, false))
+        keys.iter().find_map(|k| self.by_key.get(&k[..])).map(|(_, h)| (*h, false))
     }
 
     /// The newest pipelined write of `key` a write has to wait for: any, or with `records_only`
@@ -293,17 +309,18 @@ impl Latches {
         records: &[Vec<u8>],
         mut written: BTreeMap<Vec<u8>, Pending>,
     ) {
-        let mine: Vec<Vec<u8>> =
-            self.by_key.iter().filter(|(_, (_, h))| *h == id).map(|(k, _)| k.clone()).collect();
+        let mine: Vec<Key> =
+            self.by_key.iter().filter(|(_, (_, h))| *h == id).map(|(k, _)| Arc::clone(k)).collect();
         for k in mine {
             self.by_key.remove(&k);
-            let value = written.remove(&k);
-            let record = records.contains(&k);
+            let value = written.remove(&k[..]);
+            let record = records.iter().any(|r| r[..] == k[..]);
             self.pipelined.entry(k).or_default().push(Pipelined { ts, id, record, value });
         }
         let mut added = false;
         for (k, value) in written {
             // A key written and not latched (only a faulty variant leaves one) counts now.
+            let k: Key = Arc::from(k);
             added |= self.count_key(id, &k);
             let p = Pipelined { ts, id, record: false, value: Some(value) };
             self.pipelined.entry(k).or_default().push(p);
@@ -326,7 +343,7 @@ impl Latches {
         if let Some(holder) = pipelined {
             return Err(holder);
         }
-        let other = keys.iter().filter_map(|k| self.by_key.get(k)).find(|(_, h)| *h != id);
+        let other = keys.iter().filter_map(|k| self.by_key.get(&k[..])).find(|(_, h)| *h != id);
         // Faulty variant (005 T017): writes never wait for each other, so two increments of one
         // document read the same version.
         #[cfg(teseladb_bug = "no_latch_inc")]
@@ -339,10 +356,15 @@ impl Latches {
         for k in keys {
             // Counted here, before the write's mark: the simulator runs a core step whole, so
             // only `spec/tla/HlcKeyLatches.tla` (its CountBeforeMark mutant) reaches a read
-            // between the count and the mark.
-            if self.by_key.insert(k.clone(), (ts, id)).is_none() {
-                added |= self.count_key(id, k);
+            // between the count and the mark. A key latched again by the same write is not
+            // copied again.
+            if let Some(held) = self.by_key.get_mut(&k[..]) {
+                *held = (ts, id);
+                continue;
             }
+            let k: Key = Arc::from(&k[..]);
+            self.by_key.insert(Arc::clone(&k), (ts, id));
+            added |= self.count_key(id, &k);
         }
         if added {
             self.spans.publish(&self.span_counts);
@@ -390,10 +412,10 @@ impl Latches {
         let mut gone = false;
         for k in &counted {
             self.keys.uncount(KeySlots::slot(k));
-            if let Some(n) = self.span_counts.get_mut(k) {
+            if let Some(n) = self.span_counts.get_mut(&k[..]) {
                 *n -= 1;
                 if *n == 0 {
-                    self.span_counts.remove(k);
+                    self.span_counts.remove(&k[..]);
                     gone = true;
                 }
             }
@@ -429,10 +451,13 @@ impl Latches {
 
     /// Counts `key`, latched by `id`, in its slot and among the keys in order; whether the keys
     /// in order gained it, and have to be published before the write's mark.
-    fn count_key(&mut self, id: LatchId, key: &[u8]) -> bool {
+    fn count_key(&mut self, id: LatchId, key: &Key) -> bool {
         self.keys.count(KeySlots::slot(key));
-        self.counted.entry(id).or_default().push(key.to_vec());
-        let n = self.span_counts.entry(key.to_vec()).or_insert(0);
+        self.counted.entry(id).or_default().push(Arc::clone(key));
+        let n = match self.span_counts.get_mut(&key[..]) {
+            Some(n) => n,
+            None => self.span_counts.entry(Arc::clone(key)).or_insert(0),
+        };
         *n += 1;
         *n == 1
     }
@@ -453,10 +478,11 @@ impl Latches {
         start: &[u8],
         end: &[u8],
     ) -> impl Iterator<Item = (Option<Hlc>, LatchId)> + 'a {
-        let exclusive = self.by_key.range(start.to_vec()..end.to_vec()).map(|(_, v)| *v);
+        let bounds = || (Bound::Included(start), Bound::Excluded(end));
+        let exclusive = self.by_key.range::<[u8], _>(bounds()).map(|(_, v)| *v);
         let pipelined = self
             .pipelined
-            .range(start.to_vec()..end.to_vec())
+            .range::<[u8], _>(bounds())
             .flat_map(|(_, held)| held.iter().map(|p| (Some(p.ts), p.id)));
         // Faulty variant (005 T054): the reads do not wait for the pipelined writes, and see a
         // value before its entry commits, or miss a write confirmed below their mark.

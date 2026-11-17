@@ -4,7 +4,7 @@
 //! of the samples on each side. One hot key gives no cut, and a second below the threshold starts
 //! the count again.
 
-use teseladb_range::load::{LOAD_SECONDS, Load, RESERVOIR};
+use teseladb_range::load::{LOAD_SECONDS, Load, RESERVOIR, SAMPLE_KEY};
 use teseladb_types::Nanos;
 
 fn key(i: u32) -> Vec<u8> {
@@ -161,4 +161,29 @@ fn a_cut_does_not_split_the_operations_it_sampled() {
     // Past every key of the first collection, at the lowest key of the second one the reservoir
     // kept, which cuts through none of its writes it sampled.
     assert!((11_000..51_000).contains(&at), "{at}");
+}
+
+/// Long keys (index entries of 1 MiB) keep a short sample each: the reservoir holds at most
+/// [`SAMPLE_KEY`] bytes of each key, and the cut still falls between the long keys of the load,
+/// at or below the first key of the upper half.
+#[test]
+fn long_keys_keep_short_samples_and_still_cut_between_them() {
+    let long = |i: u32| {
+        let mut k = key(i % 1000);
+        k.resize(1 << 20, 0xab);
+        k
+    };
+    let mut load = Load::new(100, 7);
+    let mut now = Nanos::ZERO;
+    let step = 1_000_000_000 / 200;
+    for i in 0..(LOAD_SECONDS + 1) as u32 * 200 {
+        let k = long(i);
+        load.record_span(&k, &k, now);
+        now = now + Nanos(step);
+    }
+    assert_eq!(load.samples(), RESERVOIR);
+    assert!(load.sample_bytes() <= 2 * RESERVOIR * SAMPLE_KEY, "{}", load.sample_bytes());
+    let cut = load.cut(now, &key(0)).expect("a cut");
+    assert!(cut.len() <= SAMPLE_KEY);
+    assert!(cut > key(200) && cut <= long(800), "{:?}", &cut[..5]);
 }

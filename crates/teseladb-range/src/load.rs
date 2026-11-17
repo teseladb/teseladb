@@ -31,6 +31,33 @@ pub const MAX_SPLIT_PERCENT: usize = 5;
 
 const SECOND: u64 = 1_000_000_000;
 
+/// Most bytes of a key the reservoir keeps: a longer first key keeps its prefix, which sorts at
+/// or below it, and a longer last key a short key at or above every key with its prefix. With
+/// index entries of many MiB (an index on a long string) the reservoir of whole keys held
+/// [`RESERVOIR`] pairs of them for as long as the range was led.
+pub const SAMPLE_KEY: usize = 256;
+
+/// `first` cut to [`SAMPLE_KEY`] bytes: at or below it.
+pub(crate) fn at_or_below(first: &[u8]) -> Vec<u8> {
+    first[..first.len().min(SAMPLE_KEY)].to_vec()
+}
+
+/// A key of at most [`SAMPLE_KEY`] bytes at or above `last`: its prefix with the last byte that
+/// can grow raised by one (`last` itself when it is short, or when no byte of the prefix can grow).
+pub(crate) fn at_or_above(last: &[u8]) -> Vec<u8> {
+    if last.len() <= SAMPLE_KEY {
+        return last.to_vec();
+    }
+    match last[..SAMPLE_KEY].iter().rposition(|b| *b != u8::MAX) {
+        Some(i) => {
+            let mut k = last[..=i].to_vec();
+            k[i] += 1;
+            k
+        }
+        None => last.to_vec(),
+    }
+}
+
 /// The load of one range, as its leader measures it.
 #[derive(Clone, Debug)]
 pub struct Load {
@@ -114,7 +141,7 @@ impl Load {
         self.roll(now);
         self.count += 1;
         self.seen += 1;
-        let sample = || (first.to_vec(), last.to_vec());
+        let sample = || (at_or_below(first), at_or_above(last));
         if self.keys.len() < RESERVOIR {
             self.keys.push(sample());
             return;
@@ -149,6 +176,11 @@ impl Load {
     /// Keys in the reservoir.
     pub fn samples(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Bytes of the keys in the reservoir.
+    pub fn sample_bytes(&self) -> usize {
+        self.keys.iter().map(|(f, l)| f.len() + l.len()).sum()
     }
 
     /// The cut key of a range that starts at `start` once the load stayed above the threshold
