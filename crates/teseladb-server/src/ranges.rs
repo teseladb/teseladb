@@ -692,19 +692,25 @@ impl Replicas {
             return;
         }
         // A range whose bounds Group 0 does not have yet (a cut not completed) is not measured.
-        if !measure || desc.settling || *end != desc.end {
+        if desc.settling || *end != desc.end {
+            return;
+        }
+        // Each partition of a collection spread over partitions gets a range of its own on the
+        // least loaded core, without waiting for load, size or the measure of the second (D-186):
+        // at the middle edge, so that both halves go on cutting at once.
+        if let Some(at) = partition_cut(start, end, &self.partition_edges) {
+            if self.may_send(g, now) {
+                self.cuts.insert(g, at.clone());
+                self.ask_split(g, at, SplitRule::Partition, l.live, out);
+            }
+            return;
+        }
+        if !measure {
             return;
         }
         // A capped collection gets a range of its own first (FR-009).
         if let Some(at) = capped_cut(start, end, &self.capped) {
             self.ask_split(g, at, SplitRule::Capped, l.live, out);
-            return;
-        }
-        // Each partition of a collection spread over partitions gets a range of its own on the
-        // least loaded core, without waiting for load or size (D-186, FR-040).
-        if let Some(at) = partition_cut(start, end, &self.partition_edges) {
-            self.cuts.insert(g, at.clone());
-            self.ask_split(g, at, SplitRule::Partition, l.live, out);
             return;
         }
         let split_bytes = split_size(start, &self.chunks, self.split_bytes);
@@ -875,14 +881,15 @@ fn size_cut(
 /// The first edge of a capped collection of `capped` strictly inside `[start, end)` (an empty
 /// `end`: no end), where the range is cut so that the collection has a range of its own
 /// (007 FR-009).
-/// The first partition edge strictly inside `[start, end)` (D-186).
+/// The middle one of the partition edges strictly inside `[start, end)` (D-186): the halves then
+/// cut on at once, in rounds that halve what is left.
 fn partition_cut(start: &[u8], end: &[u8], edges: &BTreeSet<Vec<u8>>) -> Option<Vec<u8>> {
     use std::ops::Bound::{Excluded, Unbounded};
-    edges
+    let inside: Vec<&Vec<u8>> = edges
         .range::<[u8], _>((Excluded(start), Unbounded))
-        .next()
-        .filter(|k| end.is_empty() || k.as_slice() < end)
-        .cloned()
+        .take_while(|k| end.is_empty() || k.as_slice() < end)
+        .collect();
+    inside.get(inside.len() / 2).map(|k| (*k).clone())
 }
 
 fn capped_cut(start: &[u8], end: &[u8], capped: &BTreeSet<(u32, u32)>) -> Option<Vec<u8>> {
@@ -1084,15 +1091,16 @@ mod tests {
             }
             o.lsm.borrow_mut().flush();
         }
-        assert_eq!(asked, vec![Group0Command::SplitRange { group: G, at: edge(11) }]);
-        // The next edge inside each half, and none inside a partition's own range.
-        assert_eq!(partition_cut(&edge(11), &[4], &edges), Some(edge(12)));
+        assert_eq!(asked, vec![Group0Command::SplitRange { group: G, at: edge(12) }]);
+        // The middle edge inside each half, and none inside a partition's own range.
+        assert_eq!(partition_cut(&[1], &edge(12), &edges), Some(edge(11)));
+        assert_eq!(partition_cut(&edge(12), &[4], &edges), Some(edge(13)));
         assert_eq!(partition_cut(&edge(12), &edge(13), &edges), None);
         assert_eq!(partition_cut(&edge(13), &[], &edges), None);
         // Once Group 0 has the new half, it moves to the least loaded core.
         o.r.set_cores(4);
         let ranges = Ranges {
-            descs: vec![desc(1, &[1], &edge(11)), desc(2, &edge(11), &[4])],
+            descs: vec![desc(1, &[1], &edge(12)), desc(2, &edge(12), &[4])],
             partition_edges: edges,
             ..Ranges::default()
         };
