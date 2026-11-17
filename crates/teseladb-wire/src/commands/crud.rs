@@ -305,6 +305,85 @@ impl Writer {
         Ok(r)
     }
 
+    /// Runs mutations `parts`, which do not depend on each other (the parts of an unordered
+    /// insert in the partitions of a collection, D-186): all sent before any answer is awaited.
+    /// A part that needs more than one plain send (a retryable write whose indexes may be in
+    /// another range, an index with `prepareUnique`, a part refused for reaching another range
+    /// or for the write concern) goes as [`Writer::write`] sends it.
+    pub fn write_all<B: Backend + ?Sized>(
+        &mut self,
+        backend: &mut B,
+        parts: &[(Bound, u32)],
+    ) -> Vec<Result<MutationResult, CommandError>> {
+        let simple =
+            |b: &Bound| b.probes().is_empty() && !(self.retry.is_some() && b.keeps_indexes());
+        if parts.len() < 2
+            || self.barrier
+            || self.wc.w == W::Zero
+            || !parts.iter().all(|(b, _)| simple(b))
+        {
+            return parts.iter().map(|(b, stmt)| self.write(backend, b, *stmt)).collect();
+        }
+        if let Err(e) = super::write_block::data(backend, &parts[0].0) {
+            return parts.iter().map(|_| Err(e.clone())).collect();
+        }
+        let mut ops = Vec::with_capacity(parts.len());
+        let mut attempts = Vec::with_capacity(parts.len());
+        for (bound, stmt) in parts {
+            let dedup = self.retry.map(|(lsid, txn_number)| StatementKey {
+                lsid,
+                txn_number,
+                stmt_id: *stmt,
+            });
+            let attempt = match self.retry {
+                Some(_) => i64::try_from(backend.random() >> 1).unwrap_or(i64::MAX).max(1),
+                None => 0,
+            };
+            let session = self.retry.map(|(lsid, txn_number)| RetryInfo {
+                lsid,
+                uid: self.uid,
+                txn_number,
+                stmt_id: *stmt,
+                prev: self.prev,
+                image: 0,
+            });
+            let numbered = super::field_names::numbers_for(backend, bound);
+            let send = Send { attempt, retry: session.as_ref(), fields: numbered.as_ref() };
+            let mutation = match bound.encode_for(send) {
+                Ok(m) => m,
+                Err(e) => return parts.iter().map(|_| Err(e.clone())).collect(),
+            };
+            ops.push(WriteOp { keys: bound.latch_keys(), mutation, dedup, wc: self.wc });
+            attempts.push(attempt);
+        }
+        let written = backend.write_all(ops);
+        parts
+            .iter()
+            .zip(written)
+            .zip(attempts)
+            .map(|(((bound, stmt), w), attempt)| match w {
+                Err(e)
+                    if super::cross_range::crosses(&e)
+                        || super::cross_range::too_large(&e)
+                        || e.code == UNSATISFIABLE_WRITE_CONCERN
+                        || probe_requests(&e).is_some() =>
+                {
+                    self.write(backend, bound, *stmt)
+                }
+                Err(e) => Err(e),
+                Ok(bytes) => {
+                    let r = MutationResult::decode(&bytes)?;
+                    let r = MutationResult { retried: attempt != 0 && r.attempt != attempt, ..r };
+                    if r.mark.is_some() {
+                        self.prev = r.mark;
+                    }
+                    log_validation(backend, bound, &r, self.redact);
+                    Ok(r)
+                }
+            })
+            .collect()
+    }
+
     /// Records that statements `stmts` were answered from an earlier send.
     pub fn note_retried(&mut self, stmts: impl IntoIterator<Item = u32>) {
         for s in stmts {
@@ -891,6 +970,59 @@ fn flush<B: Backend + ?Sized>(
         }
         return false;
     }
+    // An unordered insert in a collection spread over partitions: a part per partition, all
+    // written at once, each in its range alone (D-186).
+    let numbers: Vec<Option<&[u8]>> = items.iter().map(|(_, _, k)| k.get(5..9)).collect();
+    let spread = !ordered
+        && items.len() > 1
+        && target.0.partitions().is_ok_and(|p| p.count() > 1)
+        && numbers.iter().all(Option::is_some)
+        && numbers.windows(2).any(|w| w[0] != w[1]);
+    if spread {
+        let mut groups: Vec<(&[u8], Vec<usize>)> = Vec::new();
+        for (at, number) in numbers.iter().enumerate() {
+            let number = number.unwrap_or_default();
+            match groups.iter_mut().find(|(n, _)| *n == number) {
+                Some((_, members)) => members.push(at),
+                None => groups.push((number, vec![at])),
+            }
+        }
+        let parts: Vec<(Bound, u32)> = groups
+            .iter()
+            .map(|(_, members)| {
+                let docs = members.iter().map(|&m| items[m].1.clone()).collect();
+                let keys = members.iter().map(|&m| items[m].2.clone()).collect();
+                let mutation = DocMutation::Insert { docs, ordered, rules: target.1.clone() };
+                (Bound { mutation, keys }, stmt_id(ctx.cmd, items[members[0]].0))
+            })
+            .collect();
+        let results = w.write_all(ctx.backend, &parts);
+        for ((_, members), result) in groups.iter().zip(results) {
+            match result {
+                Ok(r) => {
+                    if r.retried {
+                        let failed: Vec<usize> = r.errors.iter().map(|e| e.index).collect();
+                        let done = members.iter().enumerate().filter(|(k, _)| !failed.contains(k));
+                        w.note_retried(done.map(|(_, &m)| stmt_id(ctx.cmd, items[m].0)));
+                    }
+                    *n += r.n;
+                    for e in &r.errors {
+                        errors.push(write_error(items[members[e.index]].0, &e.error));
+                    }
+                }
+                Err(e) => errors.extend(members.iter().map(|&m| write_error(items[m].0, &e))),
+            }
+        }
+        // Each document's error at its place in the command.
+        errors.sort_by_key(|e| match e {
+            Value::Document(d) => match d.get("index") {
+                Some(Value::Int32(i)) => *i,
+                _ => i32::MAX,
+            },
+            _ => i32::MAX,
+        });
+        return false;
+    }
     let first = items[0].0;
     let docs: Vec<Document> = items.iter().map(|(_, d, _)| d.clone()).collect();
     let mut keys: Vec<Vec<u8>> = items.iter().map(|(_, _, k)| k.clone()).collect();
@@ -942,6 +1074,11 @@ fn flush<B: Backend + ?Sized>(
             ordered
         }
     }
+}
+
+/// Whether collection `coll` is spread over several partitions (D-186).
+fn partitioned(coll: &CollectionEntry) -> bool {
+    coll.partitions().is_ok_and(|p| p.count() > 1)
 }
 
 /// The `_id` an equality filter names (`{_id: v}` or `{_id: {$eq: v}}`), if it is that simple.
@@ -1228,6 +1365,7 @@ fn modify_once<B: Backend + ?Sized>(
     for (i, mut chunk) in chunks.into_iter().enumerate() {
         // The upsert goes with the last chunk, when nothing else matched.
         let up = if i == last && total.n == 0 { upsert_doc.clone() } else { None };
+        let upserts = up.is_some();
         // A capped collection's upsert takes the next `seq` on the range, and its writes are
         // routed by the collection's state.
         let capped = rules.capped.is_some();
@@ -1257,6 +1395,30 @@ fn modify_once<B: Backend + ?Sized>(
                 rules: rules.clone(),
             },
         };
+        // A multi write in a collection spread over partitions: a part per partition, all
+        // written at once, each in its range alone (D-186); a multi write is no atomic unit.
+        let numbers: std::collections::BTreeSet<&[u8]> =
+            chunk.iter().filter_map(|k| k.get(5..9)).collect();
+        if m.multi && !upserts && numbers.len() > 1 && partitioned(&coll) {
+            let parts: Vec<(Bound, u32)> = numbers
+                .iter()
+                .map(|n| {
+                    let keys = chunk.iter().filter(|k| k.get(5..9) == Some(*n)).cloned().collect();
+                    (Bound { mutation: mutation.clone(), keys }, stmt)
+                })
+                .collect();
+            for r in w.write_all(ctx.backend, &parts) {
+                let r = r?;
+                if let Some(e) = r.errors.first() {
+                    return Err(e.error.clone());
+                }
+                total.n += r.n;
+                total.n_modified += r.n_modified;
+                total.value = total.value.or(r.value);
+                total.warnings.extend(r.warnings);
+            }
+            continue;
+        }
         let r = run(ctx.backend, ctx.shared, w, &coll, &Bound { mutation, keys: chunk }, stmt)?;
         if let Some(e) = r.errors.first() {
             return Err(e.error.clone());

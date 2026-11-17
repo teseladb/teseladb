@@ -121,6 +121,21 @@ fn answers(m: &mut Mem, coll: &str) -> Vec<Value> {
         .collect();
     ids.sort_unstable();
     out.push(Value::Array(ids.into_iter().map(Value::Int32).collect()));
+    // An unordered insert over several partitions, two of its documents already there: the
+    // others go in, and the errors name the two by their place in the command.
+    let docs: Vec<Value> = [5000, 7, 5001, 5002, 11, 5003]
+        .into_iter()
+        .map(|i: i32| d(&[("_id", i.into()), ("v", 1.into()), ("g", 9.into())]))
+        .collect();
+    let cmd =
+        doc(&[("insert", s(coll)), ("documents", Value::Array(docs)), ("ordered", false.into())]);
+    let r = guarded(m, cmd);
+    out.push(field(&r, "n").clone());
+    let places: Vec<Value> = match r.get("writeErrors") {
+        Some(Value::Array(e)) => e.iter().map(|x| field_of(x, "index")).collect(),
+        other => panic!("no write errors: {other:?}"),
+    };
+    out.push(Value::Array(places));
     let count = guarded(m, doc(&[("count", s(coll)), ("query", d(&[("g", 2.into())]))]));
     out.push(field(&count, "n").clone());
     let group = d(&[("$group", d(&[("_id", s("$g")), ("n", d(&[("$sum", 1.into())]))]))]);

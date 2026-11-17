@@ -1333,6 +1333,73 @@ impl Backend for ServerBackend {
         }
     }
 
+    fn write_all(&mut self, ops: Vec<WriteOp>) -> Vec<Result<Vec<u8>, CommandError>> {
+        if ops.len() < 2 {
+            return ops.into_iter().map(|op| self.write(op)).collect();
+        }
+        let until = self.until();
+        let deadline = self.deadline_of(until);
+        // Every write goes to its range's core before any answer is awaited (D-186): the parts
+        // of an unordered insert in a collection's partitions run on their cores at once.
+        let sent: Vec<_> = ops
+            .iter()
+            .map(|op| {
+                let entry = self.h.routes.lookup(op.keys.first()?)?;
+                let dedup = op.dedup.map(|k| DedupKey {
+                    lsid: k.lsid,
+                    txn_number: k.txn_number,
+                    stmt_id: k.stmt_id,
+                });
+                let req = RemoteReq::Write {
+                    keys: op.keys.clone(),
+                    mutation: op.mutation.clone(),
+                    dedup,
+                    wc: op.wc,
+                    deadline: Some(deadline),
+                    prepared: Ahead(None),
+                };
+                let (tx, rx) = mpsc::channel();
+                let msg = NodeMsg::Data(DataReq::Remote(entry.group, req), tx);
+                let core = self.cores.get(usize::from(entry.core))?;
+                core.send(CoreInput::App(msg)).ok()?;
+                Some((entry, rx))
+            })
+            .collect();
+        ops.into_iter()
+            .zip(sent)
+            .map(|(op, sent)| {
+                // Not sent: the write goes the usual way.
+                let Some((route, rx)) = sent else { return self.write(op) };
+                let ctx =
+                    RangeContext { retryable_write: op.dedup.is_some(), max_time_expired: false };
+                match rx.recv_deadline(until) {
+                    Ok(Ok(DataReply::Remote(RemoteReply::Written { ts, result, entry }))) => {
+                        self.h.clock.0.update(ts);
+                        self.committed = self.committed.max(ts);
+                        if let (Some(s), Some(e)) = (self.statements.as_mut(), entry) {
+                            s.note(route.group, e);
+                        }
+                        Ok(result)
+                    }
+                    // Refused before it was proposed: the usual way, which retries and waits.
+                    Ok(Err(
+                        RangeError::NotLeader { .. }
+                        | RangeError::Overloaded
+                        | RangeError::OutOfRange
+                        | RangeError::IntentConflict(_)
+                        | RangeError::KeyLocked,
+                    )) => self.write(op),
+                    Ok(Err(e)) => Err(from_range(&e, ctx)),
+                    Ok(Ok(other)) => Err(CommandError::new(
+                        INTERNAL_ERROR,
+                        format!("unexpected answer {other:?}"),
+                    )),
+                    Err(_) => Err(from_range(&RangeError::Timeout, ctx)),
+                }
+            })
+            .collect()
+    }
+
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
         let dedup = op.dedup.map(|k| DedupKey {
             lsid: k.lsid,

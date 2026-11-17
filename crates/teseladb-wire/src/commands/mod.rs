@@ -338,6 +338,12 @@ pub trait Backend {
     fn index_write(&mut self, cmd: IndexCommand) -> Result<(), CommandError>;
     /// Runs a write; the mutation's encoded result.
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError>;
+    /// Writes `ops`, which do not depend on each other (the parts of an unordered insert in the
+    /// partitions of a collection, D-186), each as [`Backend::write`] does: a backend that can
+    /// sends them all before it waits for any answer. By default one after the other.
+    fn write_all(&mut self, ops: Vec<WriteOp>) -> Vec<Result<Vec<u8>, CommandError>> {
+        ops.into_iter().map(|op| self.write(op)).collect()
+    }
     /// The encoded result of `op` answered without its range's core, when its keys have no
     /// version and it changes nothing (005 FR-030); `None` when it goes as a [`Backend::write`].
     /// It has no default: a backend that wraps another forwards it, or the shortcut is lost.

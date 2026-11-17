@@ -1079,6 +1079,18 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
         Ok(result)
     }
 
+    fn write_all(&mut self, ops: Vec<WriteOp>) -> Vec<Result<Vec<u8>, CommandError>> {
+        let n = ops.len();
+        let all = match self.call(|b| Ok(b.write_all(ops))) {
+            Ok(all) => all,
+            Err(e) => return (0..n).map(|_| Err(e.clone())).collect(),
+        };
+        for result in all.iter().flatten() {
+            self.note_keys_written(result);
+        }
+        all
+    }
+
     fn begin_statements(&mut self) -> bool {
         self.inner.begin_statements()
     }
