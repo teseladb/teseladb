@@ -1,0 +1,72 @@
+//! Reads of a collection spread over partitions (003 FR-012, D-186) see every write their client
+//! was answered before: an unordered insert over several partitions and a multi update, each
+//! followed at once by the aggregation that counts the client's documents, as the control
+//! aggregation of the one-node load does, on a node of four cores whose partitions get their own
+//! ranges while the client writes.
+#![cfg(target_os = "linux")]
+
+mod common;
+
+use common::{Client, READY, ok};
+use teseladb_bson::{Document, Value};
+use teseladb_io::engine::disk::DiskPlace;
+use teseladb_server::node::{Node, NodeConfig};
+
+const ROUNDS: i32 = 300;
+
+fn count_and_sum(c: &mut Client) -> (i64, i64) {
+    let matched = Document::new().with("$match", Document::new().with("c", 1));
+    let sum = |f: Value| Value::Document(Document::new().with("$sum", f));
+    let spec = Document::new().with("_id", Value::Null).with("n", sum(1.into())).with("v", sum("$v".into()));
+    let group = Document::new().with("$group", spec);
+    let cmd = Document::new()
+        .with("aggregate", "c")
+        .with("pipeline", Value::Array(vec![matched.into(), group.into()]))
+        .with("cursor", Document::new());
+    let r = c.run("app", cmd);
+    assert!(ok(&r), "{r:?}");
+    let first = common::batch(&r, "firstBatch");
+    let Some(Value::Document(d)) = first.first() else { return (0, 0) };
+    let number = |k: &str| match d.get(k) {
+        Some(Value::Int32(i)) => i64::from(*i),
+        Some(Value::Int64(i)) => *i,
+        other => panic!("{k}: {other:?}"),
+    };
+    (number("n"), number("v"))
+}
+
+#[test]
+fn a_client_s_aggregation_sees_each_write_it_was_answered() {
+    let config = NodeConfig { cores: Some(4), ..common::config(Vec::new()) };
+    let node = Node::start(config, DiskPlace::Memory, None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    assert!(ok(&c.run("app", Document::new().with("create", "c"))));
+    let (mut n, mut v) = (0i64, 0i64);
+    for round in 0..ROUNDS {
+        // Five new documents over the partitions, unordered.
+        let docs: Vec<Value> = (0..5)
+            .map(|k| {
+                let id = round * 5 + k;
+                Value::Document(Document::new().with("_id", id).with("c", 1).with("v", 0))
+            })
+            .collect();
+        let insert = Document::new()
+            .with("insert", "c")
+            .with("documents", Value::Array(docs))
+            .with("ordered", false);
+        assert!(ok(&c.run("app", insert)));
+        n += 5;
+        // One in three rounds, every document of the client one more.
+        if round % 3 == 0 {
+            let u = Document::new()
+                .with("q", Document::new().with("c", 1))
+                .with("u", Document::new().with("$inc", Document::new().with("v", 1)))
+                .with("multi", true);
+            let updates = Value::Array(vec![u.into()]);
+            assert!(ok(&c.run("app", Document::new().with("update", "c").with("updates", updates))));
+            v += n;
+        }
+        assert_eq!(count_and_sum(&mut c), (n, v), "round {round}");
+    }
+}
