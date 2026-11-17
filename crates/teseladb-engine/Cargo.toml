@@ -183,6 +183,11 @@ path = "benches/entry/fstream_perf.rs"
 harness = false
 
 [[bench]]
+name = "syscall_handoff_perf"
+path = "benches/entry/syscall_handoff_perf.rs"
+harness = false
+
+[[bench]]
 name = "fair_queue_perf"
 path = "benches/entry/fair_queue_perf.rs"
 harness = false
