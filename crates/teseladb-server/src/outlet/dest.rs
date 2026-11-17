@@ -33,7 +33,6 @@ use teseladb_raftlog::{FileId, IoDone, IoOp};
 use teseladb_types::Bytes;
 
 use super::{Batch, Dest, ShardWriter};
-use crate::shard_port::packet;
 
 /// `O_NONBLOCK` of Linux.
 const O_NONBLOCK: i32 = 0o4000;
@@ -215,7 +214,8 @@ impl Dest for StreamDest {
             StreamKind::Pollable => own(false)
                 .map(OwnedFd::from)
                 .or_else(|_| nonblocking_dup(&self.file))
-                .map(|fd| Rc::new(Pollable::new(fd)) as Rc<dyn ShardWriter>),
+                .and_then(Pollable::new)
+                .map(|p| Rc::new(p) as Rc<dyn ShardWriter>),
             StreamKind::Regular => own(true).map(|f| Rc::new(Plain(f)) as Rc<dyn ShardWriter>),
             StreamKind::Inline => Err(io::Error::other("written as it is")),
         };
@@ -237,34 +237,52 @@ fn nonblocking_dup(file: &File) -> io::Result<OwnedFd> {
     Ok(OwnedFd::from(sock))
 }
 
-/// A non-blocking descriptor written through the engine.
+/// A non-blocking descriptor written with `write(2)`, which waits for room through the engine.
+/// Not with the engine's packet writes: those are `sendmsg`, for sockets only, and fail on a pipe
+/// or a terminal (`ENOTSOCK`), so the log of a node whose standard error is a pipe was lost.
 struct Pollable {
-    fd: RefCell<PollableFd>,
+    /// The descriptor the bytes are written to.
+    file: File,
+    /// The same open file, polled for room when a write would block.
+    poll: RefCell<PollableFd>,
 }
 
 impl Pollable {
-    fn new(fd: OwnedFd) -> Pollable {
-        Pollable {
-            fd: RefCell::new(PollableFd::from_file_desc(FileDesc::from_fd(fd.into_raw_fd()))),
-        }
+    fn new(fd: OwnedFd) -> io::Result<Pollable> {
+        let polled = fd.try_clone()?;
+        Ok(Pollable {
+            file: File::from(fd),
+            poll: RefCell::new(PollableFd::from_file_desc(FileDesc::from_fd(polled.into_raw_fd()))),
+        })
     }
 
-    /// Writes `bytes` whole; a failure loses them.
-    fn send(self: &Rc<Self>, bytes: Vec<u8>) -> Future<()> {
-        let mut p = Box::new(packet(bytes));
-        let sent = self.fd.borrow_mut().write_all(&mut p);
-        let keep = Rc::clone(self);
-        sent.then_wrapped(move |r: Future<()>| {
-            drop((p, keep));
-            let _ = r.get();
-            Ok::<(), ExceptionPtr>(())
-        })
+    /// Writes `bytes` whole (on a datagram socket, as one datagram), waiting for room without
+    /// holding the shard; a failure loses them.
+    async fn send(&self, bytes: Vec<u8>) {
+        let mut at = 0;
+        while at < bytes.len() {
+            match (&self.file).write(&bytes[at..]) {
+                Ok(0) => return,
+                Ok(n) => at += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let room = self.poll.borrow_mut().writeable();
+                    if room.await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
     }
 }
 
 impl ShardWriter for Pollable {
     fn write(self: Rc<Self>, batch: Batch) -> Future<()> {
-        self.send(batch.into_bytes())
+        make_coroutine(async move {
+            self.send(batch.into_bytes()).await;
+            Ok::<(), ExceptionPtr>(())
+        })
     }
 }
 
@@ -317,13 +335,10 @@ impl Dest for SyslogDest {
         let own = UnixDatagram::unbound().and_then(|s| {
             s.connect(&self.path)?;
             s.set_nonblocking(true)?;
-            Ok(s)
+            Pollable::new(OwnedFd::from(s))
         });
         match own {
-            Ok(s) => Rc::new(Datagrams {
-                out: Rc::new(Pollable::new(OwnedFd::from(s))),
-                prefix: self.prefix.clone(),
-            }),
+            Ok(p) => Rc::new(Datagrams { out: Rc::new(p), prefix: self.prefix.clone() }),
             Err(_) => Rc::new(Lost),
         }
     }
@@ -345,7 +360,7 @@ impl ShardWriter for Datagrams {
     fn write(self: Rc<Self>, batch: Batch) -> Future<()> {
         make_coroutine(async move {
             for msg in batch.messages() {
-                let _ = self.out.send(datagram(&self.prefix, msg)).await;
+                self.out.send(datagram(&self.prefix, msg)).await;
             }
             Ok(())
         })
