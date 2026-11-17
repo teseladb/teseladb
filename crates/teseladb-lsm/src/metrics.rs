@@ -34,6 +34,15 @@ pub struct LsmMetrics {
     pub rejects_total: u64,
     /// Bytes in the block cache (pinned meta included).
     pub cache_bytes: u64,
+    /// Bytes in the block cache that readers on other threads share (FR-026), which has
+    /// `SHARED_CACHE_PERCENT` of the budget.
+    pub shared_cache_bytes: u64,
+    /// Bytes of the blocks of either cache whose files left the current version: what the
+    /// reads still under way of older views put back.
+    pub retired_cache_bytes: u64,
+    /// Bytes of the files no version uses that stay on disk until their readers let them go
+    /// ([`Lsm::unused_file_bytes`]).
+    pub unused_file_bytes: u64,
     /// Bytes in memtables, frozen ones included.
     pub memtable_bytes: u64,
     /// Files in every level.
@@ -141,6 +150,13 @@ impl Lsm {
         let values = v.value_files();
         let live = v.live_values();
         let sparse = v.sparse_values().len();
+        let mut current: std::collections::HashSet<u64> = values.keys().copied().collect();
+        for t in v.tables() {
+            current.extend(std::iter::once(t.number).chain(t.history.as_ref().map(|h| h.number)));
+        }
+        let in_version = |file: u64| current.contains(&file);
+        let retired_cache_bytes =
+            r.cache.bytes_outside(in_version) + self.shared.bytes_outside(&in_version);
         LsmMetrics {
             level_bytes: v.levels.iter().map(|l| l.iter().map(|t| t.bytes()).sum()).collect(),
             level_files: v.levels.iter().map(Vec::len).collect(),
@@ -155,6 +171,9 @@ impl Lsm {
             stalls_total: c.stalls,
             rejects_total: c.rejects,
             cache_bytes: r.cache.used(),
+            shared_cache_bytes: self.shared.cache_bytes(),
+            retired_cache_bytes,
+            unused_file_bytes: self.unused_file_bytes(),
             memtable_bytes: v.memtables.iter().map(|m| m.bytes()).sum(),
             files: v.tables().count(),
             history_files: v.tables().filter(|t| t.history.is_some()).count(),

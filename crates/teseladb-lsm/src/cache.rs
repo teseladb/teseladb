@@ -25,7 +25,9 @@ const META: u32 = u32::MAX;
 /// The cache.
 pub(crate) struct BlockCache {
     cache: ContentCache<(u64, u32)>,
-    slots: HashMap<(u64, u32), u32>,
+    /// The slot of each cached block, by file and block: a file's blocks go at once
+    /// ([`BlockCache::forget`]) without asking for each block it may have.
+    files: HashMap<u64, HashMap<u32, u32>>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
     memory: Option<Arc<dyn BlockMemory>>,
@@ -46,7 +48,20 @@ impl BlockCache {
     /// An empty cache of `budget` bytes.
     pub(crate) fn new(budget: u64) -> BlockCache {
         let cache = ContentCache::new(budget);
-        BlockCache { cache, slots: HashMap::new(), hits: 0, misses: 0, memory: None }
+        BlockCache { cache, files: HashMap::new(), hits: 0, misses: 0, memory: None }
+    }
+
+    fn slot(&self, file: u64, block: u32) -> Option<u32> {
+        self.files.get(&file).and_then(|blocks| blocks.get(&block)).copied()
+    }
+
+    fn unlist(&mut self, (file, block): (u64, u32)) -> Option<u32> {
+        let blocks = self.files.get_mut(&file)?;
+        let slot = blocks.remove(&block);
+        if blocks.is_empty() {
+            self.files.remove(&file);
+        }
+        slot
     }
 
     /// Keeps the blocks it takes from now on in `memory`.
@@ -62,7 +77,7 @@ impl BlockCache {
     /// The payload of block `block` of file `file`, if cached (a hit). A miss is counted by the
     /// reader when it asks the disk for the block ([`BlockCache::note_miss`], FR-013).
     pub(crate) fn get(&mut self, file: u64, block: u32) -> Option<Bytes> {
-        let found = self.slots.get(&(file, block)).and_then(|s| self.cache.get(*s));
+        let found = self.slot(file, block).and_then(|s| self.cache.get(s));
         if found.is_some() {
             self.hits += 1;
         }
@@ -72,7 +87,7 @@ impl BlockCache {
     /// Whether block `block` of file `file` is cached, without counting a hit: what a read ahead
     /// leaves out (FR-044).
     pub(crate) fn contains(&self, file: u64, block: u32) -> bool {
-        self.slots.contains_key(&(file, block))
+        self.slot(file, block).is_some()
     }
 
     /// Counts one block read from the disk.
@@ -85,14 +100,14 @@ impl BlockCache {
             Some(m) => m.place(data),
             None => data,
         };
-        if let Some(old) = self.slots.remove(&key) {
+        if let Some(old) = self.unlist(key) {
             self.cache.remove(old);
         }
         let (slot, evicted) = self.cache.insert(key, data, pinned);
         for gone in evicted {
-            self.slots.remove(&gone);
+            self.unlist(gone);
         }
-        self.slots.insert(key, slot);
+        self.files.entry(key.0).or_default().insert(key.1, slot);
     }
 
     /// Caches the payload of a block.
@@ -105,13 +120,22 @@ impl BlockCache {
         self.put((file, META), meta, true);
     }
 
-    /// Forgets every block of a file that is going away (`blocks` data blocks).
-    pub(crate) fn forget(&mut self, file: u64, blocks: usize) {
-        for b in (0..blocks as u32).chain([META]) {
-            if let Some(slot) = self.slots.remove(&(file, b)) {
-                self.cache.remove(slot);
-            }
+    /// Forgets every block of a file that is going away, its column blocks and its meta bytes
+    /// too.
+    pub(crate) fn forget(&mut self, file: u64) {
+        for (_, slot) in self.files.remove(&file).into_iter().flatten() {
+            self.cache.remove(slot);
         }
+    }
+
+    /// Bytes of the cached blocks (meta bytes left out) of the files `live` says no.
+    pub(crate) fn bytes_outside(&self, live: impl Fn(u64) -> bool) -> u64 {
+        let blocks = self.files.iter().filter(|(file, _)| !live(**file));
+        blocks
+            .flat_map(|(_, b)| b.iter())
+            .filter(|(b, _)| **b != META)
+            .map(|(_, s)| self.cache.len_of(*s))
+            .sum()
     }
 }
 
@@ -125,7 +149,7 @@ mod tests {
         let mut c = BlockCache::new(10_000);
         c.pin_meta(1, Bytes::from_vec(vec![0; 6000]));
         c.insert(1, 0, Bytes::from_vec(vec![1; 3000]));
-        assert!(c.slots.contains_key(&(1, 0)));
+        assert!(c.contains(1, 0));
         assert_eq!(c.get(1, 0).unwrap().len(), 3000);
         // Not cached: the lookup counts nothing; the reader counts the disk read it asks for.
         assert!(c.get(1, 1).is_none());
@@ -135,7 +159,7 @@ mod tests {
         // Two more blocks do not fit with the pinned meta: older blocks go, the meta stays.
         c.insert(1, 1, Bytes::from_vec(vec![2; 3000]));
         c.insert(1, 2, Bytes::from_vec(vec![3; 3000]));
-        assert!(c.slots.contains_key(&(1, META)));
+        assert!(c.contains(1, META));
         assert!(c.used() <= 10_000 + 3000);
         let held = c.get(1, 2).unwrap();
         c.insert(1, 3, Bytes::from_vec(vec![4; 3000]));
@@ -143,10 +167,29 @@ mod tests {
         // Replacing a block keeps one slot for it.
         c.insert(1, 3, Bytes::from_vec(vec![5; 100]));
         assert_eq!(c.get(1, 3).unwrap()[0], 5);
-        c.forget(1, 4);
-        assert!(!c.slots.contains_key(&(1, META)));
-        assert!(!c.slots.contains_key(&(1, 3)));
+        c.forget(1);
+        assert!(!c.contains(1, META));
+        assert!(!c.contains(1, 3));
         assert_eq!(c.used(), 0);
+    }
+
+    #[test]
+    fn a_forgotten_file_loses_every_block_column_ones_too() {
+        // Its column blocks, of slots from 2^31, stayed: forgetting asked for the data blocks
+        // and the meta bytes only.
+        let column = 1u32 << 31;
+        let mut c = BlockCache::new(1 << 20);
+        for file in [1, 2] {
+            c.pin_meta(file, Bytes::from_vec(vec![0; 10]));
+            c.insert(file, 0, Bytes::from_vec(vec![1; 100]));
+            c.insert(file, column + 3, Bytes::from_vec(vec![2; 50]));
+        }
+        assert_eq!(c.bytes_outside(|f| f == 2), 150, "file 1's blocks, without its meta");
+        c.forget(1);
+        assert!(!c.contains(1, 0) && !c.contains(1, column + 3) && !c.contains(1, META));
+        assert_eq!((c.used(), c.files.len()), (160, 1));
+        c.forget(2);
+        assert_eq!((c.used(), c.files.len()), (0, 0));
     }
 
     /// A memory that copies each block into a buffer of its own, and counts them.

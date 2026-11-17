@@ -180,12 +180,17 @@ impl SharedLsm {
         self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.used())).sum()
     }
 
-    /// Drops the blocks of file `file` (of `blocks` data blocks) from the shared cache: the file
-    /// is gone, and its blocks would hold the cache's memory until other blocks evict them.
-    pub(crate) fn forget(&self, file: u64, blocks: usize) {
+    /// Drops the blocks of file `file` from the shared cache: the file is gone, and its blocks
+    /// would hold the cache's memory until other blocks evict them.
+    pub(crate) fn forget(&self, file: u64) {
         for shard in self.inner.cache.iter() {
-            shard.with_waiting(|c| c.forget(file, blocks));
+            shard.with_waiting(|c| c.forget(file));
         }
+    }
+
+    /// Bytes of the blocks in the shared cache of the files `live` says no.
+    pub(crate) fn bytes_outside(&self, live: &dyn Fn(u64) -> bool) -> u64 {
+        self.inner.cache.iter().map(|shard| shard.with_waiting(|c| c.bytes_outside(live))).sum()
     }
 
     /// Gives the cache the block `need` names, read from its file as `bytes`.

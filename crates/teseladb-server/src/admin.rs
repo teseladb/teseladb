@@ -523,7 +523,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     }
     // The Raft log of each core, on disk and in memory, and what its LSM writes (012 FR-016).
     type Gauge = (&'static str, &'static str, fn(&crate::data::LsmSizes) -> f64);
-    let per_core: [Gauge; 8] = [
+    let per_core: [Gauge; 11] = [
         (
             "teseladb_lsm_history_bytes",
             "Bytes of each core's history files, which its levels count too.",
@@ -563,6 +563,21 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "teseladb_lsm_rejects_total",
             "Writes that came while each core's LSM rejected proposals.",
             |s| s.rejects as f64,
+        ),
+        (
+            "teseladb_lsm_shared_cache_bytes",
+            "Bytes in the block cache each core shares with the reads on other threads.",
+            |s| s.shared_cache_bytes as f64,
+        ),
+        (
+            "teseladb_lsm_retired_cache_bytes",
+            "Bytes of blocks in either cache of each core whose files left its current version.",
+            |s| s.retired_cache_bytes as f64,
+        ),
+        (
+            "teseladb_lsm_unused_file_bytes",
+            "Bytes of each core's files no version uses that stay until their readers let them go.",
+            |s| s.unused_file_bytes as f64,
         ),
     ];
     for (name, help, value) in per_core {
@@ -1742,6 +1757,26 @@ mod tests {
             out.lines().any(|l| l == "teseladb_lsm_cache_misses_total{core=\"2\"} 10"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_lsm_metrics_give_the_shared_cache_and_what_left_the_version() {
+        let sizes = crate::data::LsmSizes {
+            shared_cache_bytes: 300,
+            retired_cache_bytes: 7,
+            unused_file_bytes: 4096,
+            ..Default::default()
+        };
+        let mut out = String::new();
+        lsm_metrics(&mut out, &[(1, sizes)]);
+        for line in [
+            "teseladb_lsm_shared_cache_bytes{core=\"1\"} 300",
+            "teseladb_lsm_retired_cache_bytes{core=\"1\"} 7",
+            "teseladb_lsm_unused_file_bytes{core=\"1\"} 4096",
+            "# TYPE teseladb_lsm_shared_cache_bytes gauge",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line} in {out}");
+        }
     }
 
     #[test]

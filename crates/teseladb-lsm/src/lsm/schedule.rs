@@ -26,8 +26,8 @@ impl Lsm {
                 free.iter().flat_map(|t| std::iter::once(t).chain(t.history.as_ref())).collect();
             let numbers: Vec<u64> = gone.iter().map(|t| t.number).collect();
             for t in gone {
-                self.reader.cache.forget(t.number, t.blocks());
-                self.shared.forget(t.number, t.blocks());
+                self.reader.cache.forget(t.number);
+                self.shared.forget(t.number);
             }
             return Some(Job::Delete(Script::delete(&self.cfg, &numbers)));
         }
@@ -103,7 +103,14 @@ impl Lsm {
                 self.counters.note_codes(v);
             }
         }
-        self.obsolete.extend(old.into_iter().filter(|(n, _)| !new.contains_key(n)).map(|(_, v)| v));
+        for (_, v) in old.into_iter().filter(|(n, _)| !new.contains_key(n)) {
+            self.retire(v);
+        }
+    }
+
+    /// Leaves `t`, which left the current version, to go from the disk once nothing holds it.
+    fn retire(&mut self, t: Arc<Table>) {
+        self.obsolete.push(t);
     }
 
     /// Whether the files take more space than the live data allows (see [`Lsm::set_live_bytes`])
@@ -240,7 +247,9 @@ impl Lsm {
             let (gone, kept): (Vec<_>, Vec<_>) =
                 std::mem::take(level).into_iter().partition(|t| removed.contains(&t.number));
             *level = kept;
-            self.obsolete.extend(gone);
+            for t in gone {
+                self.retire(t);
+            }
         }
         for (level, t) in added {
             self.adopt(&t);

@@ -166,6 +166,12 @@ pub struct LsmSizes {
     pub memtable_bytes: u64,
     /// Bytes in its block cache.
     pub cache_bytes: u64,
+    /// Bytes in the block cache it shares with the reads on other threads.
+    pub shared_cache_bytes: u64,
+    /// Bytes of blocks in either cache whose files left its current version.
+    pub retired_cache_bytes: u64,
+    /// Bytes of its files no version uses that stay until their readers let them go.
+    pub unused_file_bytes: u64,
     /// Block lookups its cache answered, and those it read from the disk (004 FR-013).
     pub cache_hits: u64,
     /// Block lookups its cache read from the disk.
@@ -687,6 +693,9 @@ impl DataCore {
                     level_files: m.level_files,
                     memtable_bytes: m.memtable_bytes,
                     cache_bytes: m.cache_bytes,
+                    shared_cache_bytes: m.shared_cache_bytes,
+                    retired_cache_bytes: m.retired_cache_bytes,
+                    unused_file_bytes: m.unused_file_bytes,
                     cache_hits: m.cache_hits_total,
                     cache_misses: m.cache_misses_total,
                     compactions: m.compactions_total,
