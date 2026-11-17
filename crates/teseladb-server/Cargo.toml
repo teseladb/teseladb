@@ -134,6 +134,11 @@ harness = false
 name = "search_segments_engine"
 harness = false
 
+# Its own `main`: a node stopped while a segment file is being written, and started again (D4).
+[[test]]
+name = "search_segments_stop"
+harness = false
+
 [[test]]
 name = "sessions"
 harness = false
