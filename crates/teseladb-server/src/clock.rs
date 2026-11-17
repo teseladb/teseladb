@@ -294,7 +294,7 @@ mod tests {
         meta.node_id = 1;
         let (syncs, renames) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
         let disk = Counting { inner, syncs: syncs.clone(), renames: renames.clone() };
-        let (clock, keeper) = started(disk, meta);
+        let (clock, mut keeper) = started(disk, meta);
         let (base_syncs, base_renames) =
             (syncs.load(Ordering::Relaxed), renames.load(Ordering::Relaxed));
         let writes = teseladb_stages::count(teseladb_stages::Stage::HlcBoundWrite);
@@ -329,7 +329,7 @@ mod tests {
         meta.node_id = 1;
         let (syncs, renames) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
         let disk = Counting { inner, syncs: syncs.clone(), renames };
-        let (clock, keeper) = started(disk, meta);
+        let (clock, mut keeper) = started(disk, meta);
         let cfg = DeviceLogConfig { file_bytes: 1 << 20 };
         // The log's writer runs on shard 0 of an engine (023 FR-013): this test's own, in its
         // turn (one engine per process).
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn a_failed_renewal_is_kept_and_retried() {
         let (disk, meta, fail) = flaky(false);
-        let (clock, keeper) = started(disk, meta);
+        let (clock, mut keeper) = started(disk, meta);
         // Marks keep being asked for, the first refused until the thread writes a bound above it.
         let ask = || {
             let _ = clock.0.now(wall_ms());
