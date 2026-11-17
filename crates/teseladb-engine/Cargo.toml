@@ -100,6 +100,19 @@ name = "cov_reactor_options_test"
 path = "tests/entry/cov_reactor_options_test.rs"
 harness = false
 
+# High resolution timers on a reactor that never sleeps, once per backend, each in a process
+# of its own.
+[[test]]
+name = "hrtimer_busy_reactor_test"
+path = "tests/entry/hrtimer_busy_reactor_test.rs"
+harness = false
+
+# Three sleeping shards waking each other, once per backend, each in a process of its own.
+[[test]]
+name = "smp_cross_wakeups_test"
+path = "tests/entry/smp_cross_wakeups_test.rs"
+harness = false
+
 # Starts the engine once per group of logging and core options, each in a process of its own.
 [[test]]
 name = "cov3_core_startup_options_test"
