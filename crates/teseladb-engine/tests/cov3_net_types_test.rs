@@ -46,17 +46,17 @@ fn parse(s: &str) -> Result<usize, String> {
     })
 }
 
-// As in the original (config.cc, two `all_of` checks): a configuration whose devices all
-// use DHCP fails the first check ("when dhcp is off ..."), even with addresses given, so the
-// second check ("dhcp and ip cannot be used together") is never reached.
+// Each device is checked on its own: a dhcp device with static addresses fails the second
+// check ("dhcp and ip cannot be used together"); a dhcp device without them is valid.
 #[test]
-fn configurations_of_dhcp_devices_only_are_refused() {
+fn dhcp_devices_with_static_addresses_are_refused() {
     let e = parse(
         "{eth0: {port-index: 0, dhcp: true, ip: 10.0.0.2, gateway: 10.0.0.1, \
          netmask: 255.255.255.0}}",
     )
     .expect_err("refused");
-    assert!(e.contains("when dhcp is off then all of ip, gateway, netmask"), "{e}");
+    assert!(e.contains("dhcp and ip cannot be used together"), "{e}");
+    assert_eq!(parse("{eth0: {port-index: 0, dhcp: true}}"), Ok(1));
 }
 
 #[test]

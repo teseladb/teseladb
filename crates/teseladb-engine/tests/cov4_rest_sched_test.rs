@@ -77,7 +77,7 @@ engine_thread_test_case!(default_rename_hook_and_empty_value, {
     let mut x = 5i32;
     SchedulingGroupSpecificRename::rename(&mut x);
     assert_eq!(x, 5);
-    assert!(!<i32 as SchedulingGroupSpecificRename>::HAS_RENAME);
+    const { assert!(!<i32 as SchedulingGroupSpecificRename>::HAS_RENAME) };
     // An empty value holds no storage; renaming and dropping it do nothing.
     let mut v = SpecificVal::default();
     assert!(v.get().is_null());

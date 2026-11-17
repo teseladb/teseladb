@@ -1164,11 +1164,7 @@ const COLLECTD_TYPE_COUNTER: u8 = 0;
 /// The collectd type code of a value of data type `t`, matching how its 8 bytes are
 /// written: a gauge as a double, every other type as an unsigned integer.
 fn collectd_type_code(t: DataType) -> u8 {
-    if t == DataType::Gauge {
-        COLLECTD_TYPE_GAUGE
-    } else {
-        COLLECTD_TYPE_COUNTER
-    }
+    if t == DataType::Gauge { COLLECTD_TYPE_GAUGE } else { COLLECTD_TYPE_COUNTER }
 }
 
 /// "Time is defined in 2^–30 seconds since epoch. New in Version 5.0."

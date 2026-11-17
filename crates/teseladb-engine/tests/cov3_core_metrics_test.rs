@@ -63,42 +63,23 @@ fn hist(count: u64, sum: f64, buckets: &[(u64, f64)]) -> Histogram {
 }
 
 fn labels(kv: &[(&str, &str)]) -> BTreeMap<Sstring, Sstring> {
-    kv.iter()
-        .map(|(k, v)| (Sstring::from(*k), Sstring::from(*v)))
-        .collect()
+    kv.iter().map(|(k, v)| (Sstring::from(*k), Sstring::from(*v))).collect()
 }
 
 #[test]
 fn integer_conversions_reject_values_out_of_range() {
     // As the original's metric_value::ui()/i(): a value that does not fit is a range error,
     // NaN included (it compares false with both bounds).
-    assert_eq!(
-        MetricValue::from_double(2.6, DataType::Counter)
-            .ui()
-            .unwrap(),
-        3
-    );
-    assert_eq!(
-        MetricValue::from_double(-2.6, DataType::Gauge).i().unwrap(),
-        -3
-    );
+    assert_eq!(MetricValue::from_double(2.6, DataType::Counter).ui().unwrap(), 3);
+    assert_eq!(MetricValue::from_double(-2.6, DataType::Gauge).i().unwrap(), -3);
     for bad in [-1.0, f64::NAN, 1e300] {
-        let e = MetricValue::from_double(bad, DataType::Gauge)
-            .ui()
-            .unwrap_err();
+        let e = MetricValue::from_double(bad, DataType::Gauge).ui().unwrap_err();
         assert!(e.is::<RangeError>(), "{e:?}");
     }
     for bad in [f64::NAN, 1e300, -1e300] {
-        let e = MetricValue::from_double(bad, DataType::Gauge)
-            .i()
-            .unwrap_err();
+        let e = MetricValue::from_double(bad, DataType::Gauge).i().unwrap_err();
         assert!(e.is::<RangeError>());
-        assert!(
-            e.get()
-                .unwrap()
-                .what()
-                .contains("cannot convert double value")
-        );
+        assert!(e.get().unwrap().what().contains("cannot convert double value"));
     }
 }
 
@@ -108,10 +89,7 @@ fn default_values_are_zero_gauges() {
         assert_eq!(v.type_(), DataType::Gauge);
         assert_eq!(v.d(), 0.0);
         assert!(!v.is_empty(), "a gauge is never empty");
-        assert!(
-            v.get_histogram().buckets.is_empty(),
-            "a number has the empty histogram"
-        );
+        assert!(v.get_histogram().buckets.is_empty(), "a number has the empty histogram");
         assert_eq!(v.get_histogram().sample_count, 0);
     }
 }
@@ -145,15 +123,10 @@ fn sums_add_numbers_and_histograms_bucket_by_bucket() {
     assert!(s.add_assign(&other).is_err());
 
     // A histogram kind holding a number, or a number kind holding a histogram, keeps its value.
-    let odd = MetricValue {
-        u: MetricValueU::Double(4.0),
-        _type: DataType::Histogram,
-    };
+    let odd = MetricValue { u: MetricValueU::Double(4.0), _type: DataType::Histogram };
     assert_eq!(odd.add(&h1).unwrap().d(), 4.0);
-    let odd2 = MetricValue {
-        u: MetricValueU::Histogram(hist(1, 1.0, &[])),
-        _type: DataType::Gauge,
-    };
+    let odd2 =
+        MetricValue { u: MetricValueU::Histogram(hist(1, 1.0, &[])), _type: DataType::Gauge };
     assert_eq!(odd2.add(&a).unwrap().d(), 0.0);
 }
 
@@ -175,7 +148,7 @@ fn emptiness_follows_the_kind() {
 fn booleans_report_as_zero_or_one() {
     assert_eq!(true.to_metric_value(DataType::Gauge).d(), 1.0);
     assert_eq!(false.to_metric_value(DataType::Counter).d(), 0.0);
-    assert!(<bool as MetricNumber>::IS_INTEGRAL);
+    const { assert!(<bool as MetricNumber>::IS_INTEGRAL) };
 }
 
 #[test]
@@ -234,10 +207,7 @@ fn series_labels(family: &str) -> Vec<BTreeMap<Sstring, Sstring>> {
 engine_thread_test_case!(a_family_keeps_one_type, {
     let mut groups = MetricGroups::default();
     groups
-        .add_group(
-            "cov3reg",
-            vec![make_gauge("kind", || 1, Description::new("g"), vec![])],
-        )
+        .add_group("cov3reg", vec![make_gauge("kind", || 1, Description::new("g"), vec![])])
         .unwrap();
     // The same name with other labels but another type is rejected (the original's
     // "registered with different type").
@@ -245,31 +215,20 @@ engine_thread_test_case!(a_family_keeps_one_type, {
     let e = groups
         .add_group(
             "cov3reg",
-            vec![make_counter(
-                "kind",
-                || 1u64,
-                Description::new("c"),
-                vec![lb.call("2")],
-            )],
+            vec![make_counter("kind", || 1u64, Description::new("c"), vec![lb.call("2")])],
         )
         .err()
         .expect("a counter in a gauge family");
     assert!(e.get().unwrap().what().contains("different type"), "{e:?}");
     // The same series twice is a double registration.
     let e = groups
-        .add_group(
-            "cov3reg",
-            vec![make_gauge("kind", || 1, Description::new("g"), vec![])],
-        )
+        .add_group("cov3reg", vec![make_gauge("kind", || 1, Description::new("g"), vec![])])
         .err()
         .expect("twice");
     assert!(e.is::<DoubleRegistration>());
     // Dashes and spaces become underscores in the full name; '+', '(' and ')' are dropped.
     groups
-        .add_group(
-            "cov3-reg",
-            vec![make_gauge("a b(+)", || 1, Description::new("g"), vec![])],
-        )
+        .add_group("cov3-reg", vec![make_gauge("a b(+)", || 1, Description::new("g"), vec![])])
         .unwrap();
     assert_eq!(series_labels("cov3_reg_a_b").len(), 1);
     drop(groups);
@@ -288,18 +247,8 @@ engine_thread_test_case!(relabeling_joins_source_labels_and_ignores_no_op_rules,
         .add_group(
             "cov3rl",
             vec![
-                make_gauge(
-                    "g",
-                    || 1,
-                    Description::new("g"),
-                    vec![a.call("x"), b.call("y")],
-                ),
-                make_gauge(
-                    "g",
-                    || 2,
-                    Description::new("g"),
-                    vec![a.call("z"), b.call("w")],
-                ),
+                make_gauge("g", || 1, Description::new("g"), vec![a.call("x"), b.call("y")]),
+                make_gauge("g", || 2, Description::new("g"), vec![a.call("z"), b.call("w")]),
             ],
         )
         .unwrap();
@@ -330,32 +279,20 @@ engine_thread_test_case!(relabeling_joins_source_labels_and_ignores_no_op_rules,
     assert_eq!(get_relabel_configs().len(), 3);
     let series = series_labels("cov3rl_g");
     assert_eq!(series.len(), 2);
-    let hits: Vec<_> = series
-        .iter()
-        .filter(|l| l.contains_key(&Sstring::from("j")))
-        .collect();
+    let hits: Vec<_> = series.iter().filter(|l| l.contains_key(&Sstring::from("j"))).collect();
     assert_eq!(hits.len(), 1, "{series:?}");
     assert_eq!(hits[0].get(&Sstring::from("a")).unwrap(), "x");
     // A new registration gets the rules too.
     groups
         .add_group(
             "cov3rl",
-            vec![make_gauge(
-                "g",
-                || 3,
-                Description::new("g"),
-                vec![a.call("x"), b.call("v")],
-            )],
+            vec![make_gauge("g", || 3, Description::new("g"), vec![a.call("x"), b.call("v")])],
         )
         .unwrap();
     assert_eq!(series_labels("cov3rl_g").len(), 3);
     set_relabel_configs(&[]).get().unwrap();
     assert!(get_relabel_configs().is_empty());
-    assert!(
-        series_labels("cov3rl_g")
-            .iter()
-            .all(|l| !l.contains_key(&Sstring::from("j")))
-    );
+    assert!(series_labels("cov3rl_g").iter().all(|l| !l.contains_key(&Sstring::from("j"))));
     drop(groups);
 });
 
@@ -390,10 +327,7 @@ engine_thread_test_case!(family_configs_reach_metadata_already_built, {
     let values = get_values();
     let md = values.get_local().unwrap().metadata.as_ref().unwrap();
     let agg = |name: &str| {
-        md.iter()
-            .find(|f| f.mf.name == name)
-            .map(|f| f.mf.aggregate_labels.clone())
-            .unwrap()
+        md.iter().find(|f| f.mf.name == name).map(|f| f.mf.aggregate_labels.clone()).unwrap()
     };
     assert_eq!(agg("cov3fc_one"), vec!["n".to_string()]);
     assert_eq!(agg("cov3fc_two"), vec!["shard".to_string()]);
@@ -408,27 +342,12 @@ engine_thread_test_case!(family_configs_reach_metadata_already_built, {
 
 #[test]
 fn values_are_written_with_six_decimals_and_counters_as_integers() {
-    assert_eq!(
-        value_text(&MetricValue::from_double(1.25, DataType::Gauge)).unwrap(),
-        "1.250000"
-    );
-    assert_eq!(
-        value_text(&MetricValue::from_double(f64::NAN, DataType::Gauge)).unwrap(),
-        "nan"
-    );
-    assert_eq!(
-        value_text(&MetricValue::from_double(-f64::NAN, DataType::Gauge)).unwrap(),
-        "-nan"
-    );
-    assert_eq!(
-        value_text(&MetricValue::from_double(7.0, DataType::Counter)).unwrap(),
-        "7"
-    );
+    assert_eq!(value_text(&MetricValue::from_double(1.25, DataType::Gauge)).unwrap(), "1.250000");
+    assert_eq!(value_text(&MetricValue::from_double(f64::NAN, DataType::Gauge)).unwrap(), "nan");
+    assert_eq!(value_text(&MetricValue::from_double(-f64::NAN, DataType::Gauge)).unwrap(), "-nan");
+    assert_eq!(value_text(&MetricValue::from_double(7.0, DataType::Counter)).unwrap(), "7");
     // A counter that does not fit in an integer is written as NaN.
-    assert_eq!(
-        value_text(&MetricValue::from_double(1e300, DataType::Counter)).unwrap(),
-        "NaN"
-    );
+    assert_eq!(value_text(&MetricValue::from_double(1e300, DataType::Counter)).unwrap(), "NaN");
     // A histogram has no single value.
     let h = MetricValue::from_histogram(hist(1, 1.0, &[]), DataType::Histogram);
     assert_eq!(value_text(&h).unwrap(), "");
@@ -445,12 +364,7 @@ fn sum_text(sum: f64) -> String {
         labels(&[]),
     );
     let t = text(&s);
-    t.lines()
-        .next()
-        .unwrap()
-        .strip_prefix("h_sum{} ")
-        .unwrap()
-        .to_string()
+    t.lines().next().unwrap().strip_prefix("h_sum{} ").unwrap().to_string()
 }
 
 #[test]
@@ -486,37 +400,19 @@ fn histogram_lines_escape_labels_and_skip_reserved_ones() {
     };
     let mut s = Vec::new();
     let l = labels(&[("__hidden", "x"), ("v", "line\nbreak\\")]);
-    write_histogram(
-        &mut s,
-        &ctx,
-        &"h".into(),
-        &hist(2, 3.0, &[(1, f64::NAN)]),
-        l,
-    );
+    write_histogram(&mut s, &ctx, &"h".into(), &hist(2, 3.0, &[(1, f64::NAN)]), l);
     let t = text(&s);
-    assert!(
-        t.contains(r#"h_sum{inst="a\"b",v="line\nbreak\\"} 3"#),
-        "{t}"
-    );
+    assert!(t.contains(r#"h_sum{inst="a\"b",v="line\nbreak\\"} 3"#), "{t}");
     assert!(!t.contains("__hidden"));
     assert!(t.contains(r#"le="nan""#), "{t}");
-    assert!(
-        t.contains(r#"h_bucket{inst="a\"b",le="+Inf",v="line\nbreak\\"} 2"#),
-        "{t}"
-    );
+    assert!(t.contains(r#"h_bucket{inst="a\"b",le="+Inf",v="line\nbreak\\"} 2"#), "{t}");
 }
 
 #[test]
 fn summaries_without_sum_or_count_write_only_quantiles() {
     let mut s = Vec::new();
     let ctx = prometheus::Config::default();
-    write_summary(
-        &mut s,
-        &ctx,
-        &"q".into(),
-        &hist(0, 0.0, &[(4, 0.5)]),
-        labels(&[]),
-    );
+    write_summary(&mut s, &ctx, &"q".into(), &hist(0, 0.0, &[(4, 0.5)]), labels(&[]));
     assert_eq!(text(&s), "q{quantile=\"0.500000\"} 4\n");
     let mut s = Vec::new();
     write_summary(&mut s, &ctx, &"q".into(), &hist(3, 1.5, &[]), labels(&[]));
@@ -539,11 +435,7 @@ fn aggregating_mismatched_histograms_reports_and_keeps_the_first() {
     assert_eq!(v.len(), 1);
     let (k, sum) = v.iter().next().unwrap();
     assert_eq!(k, &labels(&[("x", "1")]));
-    assert_eq!(
-        sum.get_histogram().sample_count,
-        2,
-        "the mismatched one is not added"
-    );
+    assert_eq!(sum.get_histogram().sample_count, 2, "the mismatched one is not added");
 }
 
 engine_thread_test_case!(family_ranges_by_name_and_prefix, {
@@ -579,10 +471,7 @@ engine_thread_test_case!(family_ranges_by_name_and_prefix, {
     assert_eq!(names, vec!["cov3rg_aa", "cov3rg_ab"]);
 
     // A name that is not there, between two families or after the last, is an empty range.
-    assert_eq!(
-        get_range(&fams, &"cov3rg_a".into(), false).iter().count(),
-        0
-    );
+    assert_eq!(get_range(&fams, &"cov3rg_a".into(), false).iter().count(), 0);
     assert_eq!(get_range(&fams, &"zzzz".into(), false).iter().count(), 0);
 
     // upper_bound is the first family after the name.
@@ -616,17 +505,11 @@ fn blocking_get(port: u16, target: &str, accept: &str) -> (String, Vec<u8>) {
     .unwrap();
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).unwrap();
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("end of headers");
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("end of headers");
     let head = String::from_utf8_lossy(&raw[..split]).into_owned();
     let mut rest = &raw[split + 4..];
     let mut body = Vec::new();
-    if head
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
         loop {
             let eol = rest.windows(2).position(|w| w == b"\r\n").unwrap();
             let n = usize::from_str_radix(std::str::from_utf8(&rest[..eol]).unwrap().trim(), 16)
@@ -734,15 +617,9 @@ fn native_ending_in_span() -> Histogram {
         buckets: [0u64, 2, 2, 3, 5]
             .iter()
             .enumerate()
-            .map(|(i, &count)| HistogramBucket {
-                count,
-                upper_bound: i as f64,
-            })
+            .map(|(i, &count)| HistogramBucket { count, upper_bound: i as f64 })
             .collect(),
-        native_histogram: Some(NativeHistogramInfo {
-            schema: 1,
-            min_id: 0,
-        }),
+        native_histogram: Some(NativeHistogramInfo { schema: 1, min_id: 0 }),
     }
 }
 
@@ -777,40 +654,24 @@ engine_thread_test_case!(endpoint_aggregates_histograms_and_encodes_open_spans, 
     }]);
     let mut server = Box::new(HttpServerControl::new());
     server.start(&Sstring::from("cov3ep")).get().unwrap();
-    let ctx = prometheus::Config {
-        allow_protobuf: true,
-        ..prometheus::Config::default()
-    };
+    let ctx = prometheus::Config { allow_protobuf: true, ..prometheus::Config::default() };
     prometheus::start(&mut server, ctx).get().unwrap();
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let ip = InetAddress::from_sstring(&"127.0.0.1".into()).unwrap();
-    server
-        .listen(SocketAddress::from_inet_address(&ip, port))
-        .get()
-        .unwrap();
+    server.listen(SocketAddress::from_inet_address(&ip, port)).get().unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // The two histograms of the aggregated family add up bucket by bucket.
         let (head, body) = get(port, "/metrics?__name__=cov3ep_lat", "text/plain");
         assert!(head.starts_with("HTTP/1.1 200"), "{head}");
         let t = text(&body);
         assert!(t.contains("engine_cov3ep_lat_count{shard=\"0\"} 3"), "{t}");
-        assert!(
-            t.contains("engine_cov3ep_lat_bucket{le=\"1.000000\",shard=\"0\"} 3"),
-            "{t}"
-        );
+        assert!(t.contains("engine_cov3ep_lat_bucket{le=\"1.000000\",shard=\"0\"} 3"), "{t}");
         assert!(!t.contains("node="), "{t}");
 
         // "%252A" reaches the handler as "%2A", the encoded asterisk: a prefix match.
         let (_, body) = get(port, "/metrics?__name__=cov3ep_p%252A", "text/plain");
         let t = text(&body);
-        assert!(
-            t.contains("engine_cov3ep_p%2A{shard=\"0\"} 1.000000"),
-            "{t}"
-        );
+        assert!(t.contains("engine_cov3ep_p%2A{shard=\"0\"} 1.000000"), "{t}");
 
         let (head, body) = get(port, "/metrics?__name__=cov3ep_nat", PROTOBUF);
         assert!(head.starts_with("HTTP/1.1 200"), "{head}");
@@ -822,18 +683,9 @@ engine_thread_test_case!(endpoint_aggregates_histograms_and_encodes_open_spans, 
         assert_eq!(varint_field(h, 1), Some(5));
         let spans: Vec<(i64, u64)> = submessages(h, 12)
             .iter()
-            .map(|s| {
-                (
-                    varint_field(s, 1).map_or(0, unzigzag),
-                    varint_field(s, 2).unwrap_or(0),
-                )
-            })
+            .map(|s| (varint_field(s, 1).map_or(0, unzigzag), varint_field(s, 2).unwrap_or(0)))
             .collect();
-        assert_eq!(
-            spans,
-            vec![(1, 1), (1, 2)],
-            "offsets are relative to the previous span"
-        );
+        assert_eq!(spans, vec![(1, 1), (1, 2)], "offsets are relative to the previous span");
         let packed = &submessages(h, 13)[0];
         let mut p = 0;
         let mut deltas = Vec::new();

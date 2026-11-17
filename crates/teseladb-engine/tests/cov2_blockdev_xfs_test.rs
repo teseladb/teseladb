@@ -43,11 +43,7 @@ impl Loop {
         f.set_len(mib << 20).ok()?;
         drop(f);
         match run("losetup", &["-f", "--show", image.to_str()?]) {
-            Some(dev) => Some(Loop {
-                dev,
-                image,
-                mount: None,
-            }),
+            Some(dev) => Some(Loop { dev, image, mount: None }),
             None => {
                 let _ = std::fs::remove_file(&image);
                 None
@@ -123,10 +119,7 @@ fn dioinfo(path: &Path) -> Option<(u32, u32)> {
 /// Whether the running kernel is at least `major.minor`.
 fn kernel_at_least(major: u32, minor: u32) -> bool {
     let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
-    let mut it = rel
-        .trim()
-        .split(['.', '-'])
-        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let mut it = rel.trim().split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
     let (a, b) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
     (a, b) >= (major, minor)
 }
@@ -149,10 +142,7 @@ engine_test_case!(a_block_device_file_sizes_discards_and_round_trips, {
         // A discarded range of a loop device reads back as zeros.
         f.discard(1 << 20, 4096).get()?;
         let after = read_at(&mut f, 1 << 20, 8192)?;
-        assert!(
-            after.as_slice()[..4096].iter().all(|&b| b == 0),
-            "discarded"
-        );
+        assert!(after.as_slice()[..4096].iter().all(|&b| b == 0), "discarded");
         assert!(after.as_slice()[4096..].iter().all(|&b| b == 0x5a), "kept");
         let st = f.stat().get()?;
         assert_eq!(st.st_mode & 0o170000, 0o060000, "a block device");
@@ -178,10 +168,7 @@ engine_test_case!(an_xfs_file_takes_its_alignments_from_dioinfo_and_grows, {
         assert_eq!(f.memory_dma_alignment(), u64::from(d_mem));
         assert_eq!(f.disk_read_dma_alignment(), u64::from(d_miniosz));
         assert!(f.disk_write_dma_alignment() >= u64::from(d_miniosz));
-        assert!(
-            f.disk_write_dma_alignment() >= 4096,
-            "at least the block size"
-        );
+        assert!(f.disk_write_dma_alignment() >= 4096, "at least the block size");
         let overwrite = if kernel_at_least(5, 12) {
             u64::from(d_miniosz)
         } else {
@@ -196,18 +183,9 @@ engine_test_case!(an_xfs_file_takes_its_alignments_from_dioinfo_and_grows, {
         assert_eq!(f.size().get()?, 4 * 4096);
         f.flush().get()?;
         f.close().get()?;
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            4 * 4096,
-            "trimmed on close"
-        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 4 * 4096, "trimmed on close");
         let mut r = open_file_dma(path.to_str().unwrap(), OpenFlags::RO).get()?;
-        assert!(
-            read_at(&mut r, 8192, 4096)?
-                .as_slice()
-                .iter()
-                .all(|&b| b == 1)
-        );
+        assert!(read_at(&mut r, 8192, 4096)?.as_slice().iter().all(|&b| b == 1));
         r.close().get()?;
         Ok(())
     })

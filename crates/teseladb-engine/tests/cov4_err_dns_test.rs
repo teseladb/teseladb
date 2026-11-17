@@ -87,7 +87,7 @@ fn answer(q: &[u8]) -> Option<Vec<u8>> {
     let mut r = Vec::new();
     r.extend_from_slice(&q[..2]);
     let flags =
-        0x8000 | (u16::from_be_bytes([q[2], q[3]]) & 0x0100) | 0x0080 | u16::from(!found) * 3;
+        0x8000 | (u16::from_be_bytes([q[2], q[3]]) & 0x0100) | 0x0080 | (u16::from(!found) * 3);
     r.extend_from_slice(&flags.to_be_bytes());
     r.extend_from_slice(&1u16.to_be_bytes());
     r.extend_from_slice(&u16::from(found).to_be_bytes());
@@ -169,7 +169,7 @@ fn lookup_fails_then_answers(
     let failed = r.get_host_by_name(&name, Some(Family::INET)).get();
     let hits: u32 = rules.into_iter().map(|r| r.disarm()).sum();
     assert!(hits >= 1, "the fault was never hit");
-    let e = failed.err().expect("the lookup over a failing socket");
+    let e = failed.expect_err("the lookup over a failing socket");
     assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
     let a = r.resolve_name(&name, Some(Family::INET)).get()?;
     assert_eq!(a, InetAddress::from_sstring(&Sstring::from("10.1.2.3"))?);

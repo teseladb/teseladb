@@ -2435,7 +2435,12 @@ impl ReactorBackendEpoll {
                 pfd.events_epoll = 0;
                 // SAFETY: plain epoll_ctl on a registered descriptor; DEL takes no event.
                 unsafe {
-                    epoll_ctl(self._epollfd.get(), EPOLL_CTL_DEL, pfd.fd.get(), std::ptr::null_mut())
+                    epoll_ctl(
+                        self._epollfd.get(),
+                        EPOLL_CTL_DEL,
+                        pfd.fd.get(),
+                        std::ptr::null_mut(),
+                    )
                 };
             }
         }

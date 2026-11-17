@@ -49,11 +49,7 @@ unsafe impl PromiseHost for Waiter {
 }
 
 fn waiter(tag: u32) -> HostBox<Waiter> {
-    HostBox::new(Waiter {
-        tag,
-        pr: HostedPromise::default(),
-        _pin: PhantomPinned,
-    })
+    HostBox::new(Waiter { tag, pr: HostedPromise::default(), _pin: PhantomPinned })
 }
 
 #[test]

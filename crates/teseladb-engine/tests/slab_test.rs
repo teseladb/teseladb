@@ -121,7 +121,7 @@ fn test_allocation_1(growth_factor: f64, slab_limit_size: u32) {
 
     let mut items: Vec<*mut Item> = Vec::new();
 
-    assert!(slab_limit_size as usize % size == 0);
+    assert!((slab_limit_size as usize).is_multiple_of(size));
     for _ in 0..(slab_limit_size as usize / size) {
         let item = slab.create(size, ()).expect("create");
         items.push(item);

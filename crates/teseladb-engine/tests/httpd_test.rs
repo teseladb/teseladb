@@ -3304,7 +3304,11 @@ teseladb::engine_test_case!(test_client_close_connection, {
 /// keeps the connection open, sending nothing more, until the client closes it; checks that
 /// the reply handler reads an empty body at once, the reply's Content-Length notwithstanding.
 /// A client reading the declared body would wait for it forever.
-fn check_bodyless_reply(method: &'static str, reply_head: &'static str, expected: StatusType) -> Result<(), ExceptionPtr> {
+fn check_bodyless_reply(
+    method: &'static str,
+    reply_head: &'static str,
+    expected: StatusType,
+) -> Result<(), ExceptionPtr> {
     let mut lcf = LoopbackConnectionFactory::new(1);
     let mut ss_ = lcf.get_server_socket();
     let server = ss_.accept().then(move |ar: AcceptResult| {
@@ -3335,7 +3339,11 @@ fn check_bodyless_reply(method: &'static str, reply_head: &'static str, expected
                     async_(move || -> Result<(), ExceptionPtr> {
                         assert!(content_length > 0);
                         let buf = in_.read().get()?;
-                        assert!(buf.empty(), "the handler read {} bytes of a bodyless reply", buf.size());
+                        assert!(
+                            buf.empty(),
+                            "the handler read {} bytes of a bodyless reply",
+                            buf.size()
+                        );
                         in_.close().get()?;
                         h.set(true);
                         Ok(())
@@ -3395,7 +3403,8 @@ fn head_handler_no_body(chunked: bool) -> Result<(), ExceptionPtr> {
     let lsip: *mut LoopbackSocketImpl = &mut lsi;
     let client = async_(move || -> Result<(), ExceptionPtr> {
         // SAFETY: the socket outlives the client thread, joined below.
-        let mut c_socket = unsafe { (*lsip).connect(any_addr(), any_addr(), Transport::TCP) }.get()?;
+        let mut c_socket =
+            unsafe { (*lsip).connect(any_addr(), any_addr(), Transport::TCP) }.get()?;
         let mut input = c_socket.input(Default::default());
         let mut output = c_socket.output(8192);
 
@@ -3430,7 +3439,11 @@ fn head_handler_no_body(chunked: bool) -> Result<(), ExceptionPtr> {
         Ok(())
     });
 
-    server.get()._routes.put(OperationType::Head, "/test", raw_handler(EchoStringHandler::new(chunked)))?;
+    server.get()._routes.put(
+        OperationType::Head,
+        "/test",
+        raw_handler(EchoStringHandler::new(chunked)),
+    )?;
     server.pin().do_accepts(0).get()?;
 
     client.get()?;
@@ -3529,7 +3542,9 @@ teseladb::engine_test_case!(test_request_body_ends_early, {
             // None of the declared body arrives, so the server's probe reads straight to the
             // end of the stream with all 32 bytes still owed.
             output
-                .write_sstring(&ss("GET /test HTTP/1.1\r\nHost: test\r\nContent-Length: 32\r\n\r\n"))
+                .write_sstring(&ss(
+                    "GET /test HTTP/1.1\r\nHost: test\r\nContent-Length: 32\r\n\r\n",
+                ))
                 .get()?;
             output.flush().get()?;
             output.close().get()?;
@@ -3608,7 +3623,9 @@ teseladb::engine_test_case!(test_text_route, {
                 &ss("txt"),
             )),
         );
-        let reply = route.handle(&ss("/hello"), Box::new(Request::default()), Box::new(Reply::new())).get()?;
+        let reply = route
+            .handle(&ss("/hello"), Box::new(Request::default()), Box::new(Reply::new()))
+            .get()?;
         assert_eq!(reply._status, StatusType::OK);
         assert_eq!(reply.get_header("Content-Type"), ss("text/plain"));
         assert_eq!(reply._content, ss("hello, you"));
@@ -3628,7 +3645,8 @@ teseladb::engine_test_case!(test_client_pooled_connection_outlives_scheduling_gr
                 let mut in_ = sk.input(Default::default());
                 read_simple_http_request(&mut in_)?;
                 let mut out = sk.output(8192);
-                out.write_str("HTTP/1.1 200 OK\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n").get()?;
+                out.write_str("HTTP/1.1 200 OK\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+                    .get()?;
                 out.flush().get()?;
                 while !in_.read().get()?.empty() {}
                 out.close().get()?;

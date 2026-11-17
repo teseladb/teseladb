@@ -42,19 +42,12 @@ fn all_series() -> BTreeMap<String, Series> {
 }
 
 fn sum(all: &BTreeMap<String, Series>, name: &str) -> f64 {
-    all.get(name)
-        .unwrap_or_else(|| panic!("no family {name}"))
-        .iter()
-        .map(|(_, v)| v.d())
-        .sum()
+    all.get(name).unwrap_or_else(|| panic!("no family {name}")).iter().map(|(_, v)| v.d()).sum()
 }
 
 fn write_and_read(path: &str) -> Result<(), ExceptionPtr> {
-    let mut f = open_file_dma(
-        path,
-        OpenFlags::RW | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-    )
-    .get()?;
+    let mut f =
+        open_file_dma(path, OpenFlags::RW | OpenFlags::CREATE | OpenFlags::TRUNCATE).get()?;
     let mut buf = TemporaryBuffer::<u8>::aligned(BLOCK, 2 * BLOCK);
     // SAFETY: the buffer holds 2 * BLOCK writable bytes.
     unsafe { std::ptr::write_bytes(buf.get_write(), b'm', 2 * BLOCK) };
@@ -70,19 +63,13 @@ fn write_and_read(path: &str) -> Result<(), ExceptionPtr> {
 
 engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
     let dir = std::env::temp_dir();
-    let path = dir
-        .join(format!("cov3_io_metrics_{}", std::process::id()))
-        .display()
-        .to_string();
+    let path = dir.join(format!("cov3_io_metrics_{}", std::process::id())).display().to_string();
     let before = all_series();
-    let bytes_before = before
-        .get("io_queue_total_bytes")
-        .map_or(0.0, |s| s.iter().map(|(_, v)| v.d()).sum());
+    let bytes_before =
+        before.get("io_queue_total_bytes").map_or(0.0, |s| s.iter().map(|(_, v)| v.d()).sum());
     write_and_read(&path).unwrap();
     if Smp::count() > 1 {
-        let r = Smp::submit_to(1, || Ok::<u32, ExceptionPtr>(7))
-            .get()
-            .unwrap();
+        let r = Smp::submit_to(1, || Ok::<u32, ExceptionPtr>(7)).get().unwrap();
         assert_eq!(r, 7);
     }
     let all = all_series();
@@ -105,10 +92,7 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
     assert!(sum(&all, "io_queue_total_split_ops") >= 0.0);
     assert!(sum(&all, "io_queue_total_split_bytes") >= 0.0);
     assert!(sum(&all, "io_queue_total_delay_sec") >= 0.0);
-    assert!(
-        sum(&all, "io_queue_total_exec_sec") > 0.0,
-        "the disk took some time"
-    );
+    assert!(sum(&all, "io_queue_total_exec_sec") > 0.0, "the disk took some time");
     assert!(sum(&all, "io_queue_starvation_time_sec") >= 0.0);
     assert_eq!(sum(&all, "io_queue_queue_length"), 0.0);
     assert_eq!(sum(&all, "io_queue_disk_queue_length"), 0.0);
@@ -116,12 +100,9 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
     assert!(sum(&all, "io_queue_shares") > 0.0, "every class has shares");
     // The fair queue's consumption, per stream.
     let consumption = all.get("io_queue_consumption").expect("consumption");
-    assert!(
-        consumption
-            .iter()
-            .all(|(l, _)| l.contains_key(&Sstring::from("stream")))
-    );
-    assert!(sum(&all, "io_queue_consumption") > 0.0);
+    assert!(consumption.iter().all(|(l, _)| l.contains_key(&Sstring::from("stream"))));
+    // The queue has no io-properties: it does not throttle, so usual requests cost nothing.
+    assert_eq!(sum(&all, "io_queue_consumption"), 0.0, "an unconfigured queue charges nothing");
     assert!(sum(&all, "io_queue_adjusted_consumption") >= 0.0);
     assert!(sum(&all, "io_queue_activations") >= 1.0);
 
@@ -135,11 +116,7 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
             let rules = vec![RelabelConfig {
                 source_labels: vec!["__name__".into()],
                 expr: RelabelConfigRegex::new("smp_.*")?,
-                action: if keep {
-                    RelabelAction::Keep
-                } else {
-                    RelabelAction::Drop
-                },
+                action: if keep { RelabelAction::Keep } else { RelabelAction::Drop },
                 ..RelabelConfig::default()
             }];
             set_relabel_configs(&rules).get()?;
@@ -149,9 +126,7 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
             Ok(())
         }
         Smp::invoke_on_all(|| keep_smp(true)).get().unwrap();
-        let r = Smp::submit_to(1, || Ok::<u32, ExceptionPtr>(8))
-            .get()
-            .unwrap();
+        let r = Smp::submit_to(1, || Ok::<u32, ExceptionPtr>(8)).get().unwrap();
         assert_eq!(r, 8);
         let all = all_series();
         let messages = |all: &BTreeMap<String, Series>, suffix: &str| -> f64 {
@@ -173,18 +148,9 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
         let sent = messages(&all, "total_sent_messages") + there.0;
         let received = messages(&all, "total_received_messages") + there.1;
         let completed = messages(&all, "total_completed_messages") + there.2;
-        assert!(
-            sent >= 1.0,
-            "sent {sent} received {received} completed {completed}"
-        );
-        assert!(
-            received >= 1.0,
-            "sent {sent} received {received} completed {completed}"
-        );
-        assert!(
-            completed >= 1.0,
-            "sent {sent} received {received} completed {completed}"
-        );
+        assert!(sent >= 1.0, "sent {sent} received {received} completed {completed}");
+        assert!(received >= 1.0, "sent {sent} received {received} completed {completed}");
+        assert!(completed >= 1.0, "sent {sent} received {received} completed {completed}");
         for name in [
             "send_batch_queue_length",
             "receive_batch_queue_length",
@@ -196,10 +162,7 @@ engine_thread_test_case!(every_registered_metric_reads_the_work_done, {
             assert!(all.keys().any(|k| k.ends_with(name)), "{name}");
         }
         Smp::invoke_on_all(|| keep_smp(false)).get().unwrap();
-        assert!(
-            !all_series().keys().any(|k| k.starts_with("smp_")),
-            "disabled again"
-        );
+        assert!(!all_series().keys().any(|k| k.starts_with("smp_")), "disabled again");
     }
     std::fs::remove_file(&path).unwrap();
 });

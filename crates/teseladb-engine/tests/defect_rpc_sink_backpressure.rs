@@ -77,7 +77,11 @@ impl Write<Sstring> for Serializer {
 }
 
 impl Read<Sstring> for Serializer {
-    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<Sstring>) -> Result<Sstring, ExceptionPtr> {
+    fn read<I: SerializerInput>(
+        &self,
+        in_: &mut I,
+        _: Type<Sstring>,
+    ) -> Result<Sstring, ExceptionPtr> {
         let mut l = [0u8; 4];
         in_.read(&mut l)?;
         let mut s = uninitialized_string(u32::from_ne_bytes(l) as usize);
@@ -208,7 +212,12 @@ impl HoldSocket {
 }
 
 impl SocketImpl for HoldSocket {
-    fn connect(&mut self, _: SocketAddress, _: SocketAddress, _: Transport) -> Future<ConnectedSocket> {
+    fn connect(
+        &mut self,
+        _: SocketAddress,
+        _: SocketAddress,
+        _: Transport,
+    ) -> Future<ConnectedSocket> {
         let b1 = make_lw_shared(LoopbackBuffer::new(None, LoopbackBufferType::ServerTx));
         let b2 = make_lw_shared(LoopbackBuffer::new(None, LoopbackBufferType::ClientTx));
         let hold = self.hold.clone();
@@ -218,7 +227,10 @@ impl SocketImpl for HoldSocket {
             .make_new_server_connection(make_foreign(b1.clone()), b2.clone())
             .then(move |()| {
                 let inner = LoopbackConnectedSocketImpl::new(make_foreign(b2), b1);
-                make_ready_future(ConnectedSocket::from_impl(Box::new(HoldConnection { inner, hold })))
+                make_ready_future(ConnectedSocket::from_impl(Box::new(HoldConnection {
+                    inner,
+                    hold,
+                })))
             })
     }
     fn set_reuseaddr(&mut self, _: bool) -> Result<(), ExceptionPtr> {
@@ -342,7 +354,10 @@ teseladb::engine_test_case!(a_sink_waits_for_its_frames_to_be_freed, {
         lcf.destroy_all_shards().get()?;
 
         assert!(close_ok, "the sink did not close");
-        assert_eq!(sent, 1, "the sink sent {sent} frames of {PAYLOAD} bytes while the first was held");
+        assert_eq!(
+            sent, 1,
+            "the sink sent {sent} frames of {PAYLOAD} bytes while the first was held"
+        );
         Ok(())
     })
 });

@@ -24,18 +24,11 @@ engine_test_case!(an_unread_item_comes_back_first_and_only_one_may_wait, {
         let first = unsafe { p.reader.read() }.get()?;
         assert_eq!(first, Some(1));
         p.reader.unread(1)?;
-        let e = p.reader.unread(2).err().expect("a second unread overflows");
+        let e = p.reader.unread(2).expect_err("a second unread overflows");
         assert!(e.downcast_ref::<UnreadOverflowException>().is_some());
-        assert!(
-            e.to_string().ends_with("(pipe_reader::unread() overflow)"),
-            "{e}"
-        );
+        assert!(e.to_string().ends_with("(pipe_reader::unread() overflow)"), "{e}");
         // SAFETY: as above.
-        assert_eq!(
-            unsafe { p.reader.read() }.get()?,
-            Some(1),
-            "the unread item comes back"
-        );
+        assert_eq!(unsafe { p.reader.read() }.get()?, Some(1), "the unread item comes back");
         // SAFETY: as above.
         unsafe { p.writer.write(3) }.get()?;
         // SAFETY: as above.
@@ -53,14 +46,11 @@ engine_test_case!(a_blocked_writer_fails_when_the_reader_goes_away, {
         let blocked = unsafe { writer.write(2) };
         assert!(!blocked.available(), "the pipe is full");
         drop(reader);
-        let e = blocked.get().err().expect("broken pipe");
+        let e = blocked.get().expect_err("broken pipe");
         assert!(e.downcast_ref::<BrokenPipeException>().is_some());
         assert!(e.to_string().ends_with("(Broken pipe)"), "{e}");
         // SAFETY: as above.
-        let e = unsafe { writer.write(3) }
-            .get()
-            .err()
-            .expect("the reader is gone");
+        let e = unsafe { writer.write(3) }.get().expect_err("the reader is gone");
         assert!(e.downcast_ref::<BrokenPipeException>().is_some());
         Ok(())
     })
@@ -68,10 +58,7 @@ engine_test_case!(a_blocked_writer_fails_when_the_reader_goes_away, {
 
 engine_test_case!(a_reader_drains_a_closed_writer_then_sees_the_end, {
     thread_async(move || -> Result<(), ExceptionPtr> {
-        let Pipe {
-            mut reader,
-            mut writer,
-        } = Pipe::<String>::new(3);
+        let Pipe { mut reader, mut writer } = Pipe::<String>::new(3);
         // SAFETY: the futures are resolved while the reader (and so the buffer) is alive.
         unsafe { writer.write("a".into()) }.get()?;
         // SAFETY: as above.
@@ -83,11 +70,7 @@ engine_test_case!(a_reader_drains_a_closed_writer_then_sees_the_end, {
         assert_eq!(unsafe { reader.read() }.get()?.as_deref(), Some("b"));
         for _ in 0..2 {
             // SAFETY: as above.
-            assert_eq!(
-                unsafe { reader.read() }.get()?,
-                None,
-                "end of file, every time"
-            );
+            assert_eq!(unsafe { reader.read() }.get()?, None, "end of file, every time");
         }
         Ok(())
     })

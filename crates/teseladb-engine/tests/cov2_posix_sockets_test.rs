@@ -27,32 +27,18 @@ const SOL_SOCKET: i32 = 1;
 const SO_KEEPALIVE: i32 = 9;
 
 fn addr(host: &str, port: u16) -> Result<SocketAddress, ExceptionPtr> {
-    Ok(SocketAddress::from_ipv4_addr(Ipv4Addr::from_string_port(
-        host, port,
-    )?))
+    Ok(SocketAddress::from_ipv4_addr(Ipv4Addr::from_string_port(host, port)?))
 }
 
 fn opts(proto: Transport) -> ListenOptions {
-    ListenOptions {
-        reuse_address: true,
-        proto,
-        ..ListenOptions::default()
-    }
+    ListenOptions { reuse_address: true, proto, ..ListenOptions::default() }
 }
 
 /// A connected client and its accepted server side over `proto` at `sa`.
 fn pair(
     sa: SocketAddress,
     proto: Transport,
-) -> Result<
-    (
-        ServerSocket,
-        ConnectedSocket,
-        ConnectedSocket,
-        SocketAddress,
-    ),
-    ExceptionPtr,
-> {
+) -> Result<(ServerSocket, ConnectedSocket, ConnectedSocket, SocketAddress), ExceptionPtr> {
     let mut ss = listen_with(sa, opts(proto))?;
     let client = connect_from(sa, SocketAddress::default(), proto).get()?;
     let accepted = ss.accept().get()?;
@@ -60,8 +46,7 @@ fn pair(
 }
 
 fn is_bad_variant(r: Result<(), ExceptionPtr>) -> bool {
-    r.err()
-        .is_some_and(|e| e.to_string().contains("bad_variant_access"))
+    r.err().is_some_and(|e| e.to_string().contains("bad_variant_access"))
 }
 
 engine_test_case!(tcp_connections_nodelay_keepalive_and_addresses, {
@@ -92,10 +77,7 @@ engine_test_case!(tcp_connections_nodelay_keepalive_and_addresses, {
         // SAFETY: `off` is an int of the size given.
         unsafe { client.set_sockopt(SOL_SOCKET, SO_KEEPALIVE, (&raw const off).cast(), 4) }?;
         assert!(!client.get_keepalive()?);
-        assert!(
-            client.remote_address() == sa,
-            "the client's peer is the listener"
-        );
+        assert!(client.remote_address() == sa, "the client's peer is the listener");
         assert!(server.remote_address() == peer);
         assert!(server.remote_address() == client.local_address());
         ss.abort_accept();
@@ -125,11 +107,7 @@ engine_test_case!(sctp_connections_map_options_to_sctp, {
             count: 3,
         });
         client.set_keepalive_parameters(&p)?;
-        assert_eq!(
-            client.get_keepalive_parameters()?,
-            p,
-            "interval in ms, count as retries"
-        );
+        assert_eq!(client.get_keepalive_parameters()?, p, "interval in ms, count as retries");
         let tcp = KeepaliveParams::Tcp(TcpKeepaliveParams::default());
         assert!(is_bad_variant(client.set_keepalive_parameters(&tcp)));
         assert!(client.remote_address() == sa);
@@ -146,17 +124,11 @@ engine_test_case!(unix_connections_have_fixed_options, {
         let mut ss = listen_with(sa, ListenOptions::default())?;
         let mut client = connect_from(sa, SocketAddress::default(), Transport::TCP).get()?;
         let mut server = ss.accept().get()?.connection;
-        assert!(
-            client.get_nodelay()?,
-            "a UNIX socket has no Nagle: always on"
-        );
+        assert!(client.get_nodelay()?, "a UNIX socket has no Nagle: always on");
         client.set_nodelay(true)?;
         assert!(!client.get_keepalive()?);
         client.set_keepalive(true)?;
-        assert!(
-            !client.get_keepalive()?,
-            "keepalive does not apply and stays off"
-        );
+        assert!(!client.get_keepalive()?, "keepalive does not apply and stays off");
         let p = KeepaliveParams::Tcp(TcpKeepaliveParams {
             idle: Duration::from_secs(1),
             interval: Duration::from_secs(1),
@@ -182,9 +154,7 @@ engine_test_case!(reuseaddr_on_an_open_socket_reaches_the_kernel, {
         let mut sk = make_socket();
         assert!(!sk.get_reuseaddr()?, "the default before the socket exists");
         sk.set_reuseaddr(true)?;
-        let mut c = sk
-            .connect(sa, SocketAddress::default(), Transport::TCP)
-            .get()?;
+        let mut c = sk.connect(sa, SocketAddress::default(), Transport::TCP).get()?;
         assert!(sk.get_reuseaddr()?, "read back from the open socket");
         sk.set_reuseaddr(false)?;
         assert!(!sk.get_reuseaddr()?);
@@ -205,9 +175,7 @@ engine_test_case!(a_link_local_destination_without_a_route_fails_to_connect, {
         assert_eq!(ip.scope(), InetAddress::INVALID_SCOPE);
         let sa = SocketAddress::from_inet_address(&ip, 9);
         let mut sk = make_socket();
-        let r = sk
-            .connect(sa, SocketAddress::default(), Transport::TCP)
-            .get();
+        let r = sk.connect(sa, SocketAddress::default(), Transport::TCP).get();
         assert!(r.is_err(), "no interface for the link-local address");
         Ok(())
     })

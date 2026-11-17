@@ -205,11 +205,9 @@ engine_thread_test_case!(limited_slabs_fill_their_pages, {
         items.iter().map(|&it| unsafe { (*it).page }).collect();
     assert_eq!(pages.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3]);
 
-    // A class that has no page yet still gets one past the limit.
-    let other = slab.create(second, 1000).unwrap();
-    assert!(!other.is_null());
-    let other2 = slab.create(second, 1001).unwrap();
-    assert!(!other2.is_null(), "the class's page has free objects");
+    // The limit holds for all classes together (upstream): a class that has no page yet gets
+    // none past it either, and without an eraser it has nothing to evict.
+    assert!(slab.create(second, 1000).unwrap().is_null(), "a new class went past the limit");
 
     // Freed slots are reused without new pages; null is ignored.
     // SAFETY: the entries are live and freed once.
@@ -231,8 +229,6 @@ engine_thread_test_case!(limited_slabs_fill_their_pages, {
                 slab.free(it);
             }
         }
-        slab.free(other);
-        slab.free(other2);
     }
 });
 
@@ -267,7 +263,7 @@ engine_thread_test_case!(full_classes_evict_their_least_recently_used_item, {
     assert_eq!(erased.borrow().len(), 2);
 });
 
-engine_thread_test_case!(pinned_classes_get_pages_past_the_limit, {
+engine_thread_test_case!(pinned_classes_get_no_page_past_the_limit, {
     // A growth factor of 100 gives the classes 96, 9600 and the page size.
     let (erased, eraser) = recording_eraser();
     let mut slab =
@@ -277,20 +273,26 @@ engine_thread_test_case!(pinned_classes_get_pages_past_the_limit, {
     let per_page = SLAB_PAGE as usize / 9600;
     let items: Vec<*mut Entry> =
         (0..per_page).map(|i| slab.create(9600, i as u32).unwrap()).collect();
-    // With every item pinned the class's LRU is empty, so a new page is allowed.
+    // With every item pinned the class's LRU is empty. The limit's only page is taken, and
+    // it holds for every class (upstream), so no new page is allowed and there is nothing to
+    // evict: the allocation fails.
     for &it in &items {
         // SAFETY: the entries are live and unlocked.
         unsafe { slab.lock_item(it) };
     }
-    let extra = slab.create(9600, 99).unwrap();
-    assert!(!extra.is_null());
-    // SAFETY: as above.
-    assert_eq!(unsafe { (*extra).page }, 1);
-    assert!(erased.borrow().is_empty());
+    let e = slab.create(9600, 99).unwrap_err();
+    assert!(e.downcast_ref::<BadAlloc>().is_some(), "{e}");
+    assert!(erased.borrow().is_empty(), "a pinned item was evicted");
+    // Unpinned, the least recently used item is evicted for the new one.
     for &it in &items {
         // SAFETY: the entries were locked above.
         unsafe { slab.unlock_item(it) };
     }
+    let extra = slab.create(9600, 99).unwrap();
+    assert!(!extra.is_null());
+    // SAFETY: the entry is live.
+    assert_eq!(unsafe { (*extra).page }, 0);
+    assert_eq!(erased.borrow().len(), 1);
 });
 
 engine_thread_test_case!(slab_metrics_count_operations_and_refuse_a_second_slab, {

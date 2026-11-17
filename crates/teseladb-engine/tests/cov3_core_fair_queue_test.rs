@@ -41,10 +41,7 @@ fn a_group_whose_minimum_exceeds_its_threshold_is_refused() {
         ..FairGroupConfig::default()
     };
     let e = FairGroup::new(cfg, 1).err().expect("refused");
-    assert_eq!(
-        e.get().unwrap().what(),
-        "Fair-group replenisher limit is lower than threshold"
-    );
+    assert_eq!(e.get().unwrap().what(), "Fair-group replenisher limit is lower than threshold");
 }
 
 #[test]
@@ -89,17 +86,10 @@ fn a_request_beyond_the_tokens_at_hand_waits_for_its_reservation() {
     let d = dispatched.clone();
     // SAFETY: the queue is live; the callback does not touch it.
     unsafe { FairQueue::dispatch_requests(&mut fq, move |e| d.borrow_mut().push(e as usize)) };
-    assert_eq!(
-        *dispatched.borrow(),
-        vec![ent as usize],
-        "one bucket's worth"
-    );
+    assert_eq!(*dispatched.borrow(), vec![ent as usize], "one bucket's worth");
     let now = <SteadyClock as TokenBucketClock>::now();
     let when = fq.next_pending_aio();
-    assert!(
-        when != i64::MAX && when >= now,
-        "a reservation is pending ({when} vs {now})"
-    );
+    assert!(when != i64::MAX && when >= now, "a reservation is pending ({when} vs {now})");
 
     // Refill the bucket and dispatch again.
     fg.replenish_capacity(fg.replenished_ts() + nanos(Duration::from_secs(1)));
@@ -138,11 +128,7 @@ fn an_unplugged_class_is_skipped_until_plugged() {
     let d = dispatched.clone();
     // SAFETY: the queue is live; the callback does not touch it.
     unsafe { FairQueue::dispatch_requests(&mut fq, move |e| d.borrow_mut().push(e as usize)) };
-    assert_eq!(
-        *dispatched.borrow(),
-        vec![b as usize],
-        "class 0 is unplugged"
-    );
+    assert_eq!(*dispatched.borrow(), vec![b as usize], "class 0 is unplugged");
     fq.plug_class(0);
     let d = dispatched.clone();
     // SAFETY: as above.

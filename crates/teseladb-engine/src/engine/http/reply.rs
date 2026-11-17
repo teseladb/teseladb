@@ -496,7 +496,6 @@ mod status_strings {
             _ => return None,
         })
     }
-
 }
 /// Writes the status code and its reason phrase (for example `200 OK`); an unknown code is
 /// written as the number alone.

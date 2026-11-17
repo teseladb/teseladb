@@ -135,10 +135,7 @@ fn feed(p: &mut UntilSemicolon, s: &[u8]) -> UnconsumedRemainder {
 
 #[test]
 fn call_returns_the_rest_or_asks_for_more() {
-    let mut p = UntilSemicolon {
-        base: ParserBase::default(),
-        eof_seen: false,
-    };
+    let mut p = UntilSemicolon { base: ParserBase::default(), eof_seen: false };
     assert!(p.base()._builder.get().empty());
     let rest = feed(&mut p, b"ab;cd").expect("stopped inside the buffer");
     assert_eq!(rest.as_slice(), b"cd");
@@ -159,13 +156,7 @@ fn call_returns_the_rest_or_asks_for_more() {
 
 #[test]
 fn trailing_spaces_and_tabs_are_trimmed() {
-    for (input, want) in [
-        ("a \t ", "a"),
-        ("", ""),
-        (" \t", ""),
-        ("a b", "a b"),
-        ("x\n ", "x\n"),
-    ] {
+    for (input, want) in [("a \t ", "a"), ("", ""), (" \t", ""), ("a b", "a b"), ("x\n ", "x\n")] {
         let mut s = Sstring::from(input);
         trim_trailing_spaces_and_tabs(&mut s);
         assert_eq!(s.as_bytes(), want.as_bytes(), "{input:?}");

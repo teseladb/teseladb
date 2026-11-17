@@ -92,7 +92,12 @@ teseladb::engine_test_case!(test_incomplete_content, {
         assert!(tb("asdfghjkl;") == content1);
         // The body ends before its declared length: a protocol error, not a clean end.
         let r = content_strm.read().get();
-        assert_eq!(r.as_ref().err().and_then(system_error_code), Some(EPROTO), "{:?}", r.as_ref().err());
+        assert_eq!(
+            r.as_ref().err().and_then(system_error_code),
+            Some(EPROTO),
+            "{:?}",
+            r.as_ref().err()
+        );
         assert!(inp.eof());
 
         inp = buf_input("4\r\n132");
@@ -104,7 +109,12 @@ teseladb::engine_test_case!(test_incomplete_content, {
         assert!(tb("132") == content1);
         // The stream ends before the last chunk: a protocol error, not a clean end.
         let r = content_strm.read().get();
-        assert_eq!(r.as_ref().err().and_then(system_error_code), Some(EPROTO), "{:?}", r.as_ref().err());
+        assert_eq!(
+            r.as_ref().err().and_then(system_error_code),
+            Some(EPROTO),
+            "{:?}",
+            r.as_ref().err()
+        );
         Ok(())
     })
 });

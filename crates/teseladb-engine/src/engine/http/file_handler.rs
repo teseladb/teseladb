@@ -125,8 +125,10 @@ fn redirect_if_needed(req: &Request, rep: &mut Reply) -> bool {
         redirected.push(b'/');
         redirected.extend_from_slice(&b[insert_pos..]);
         rep.set_status(StatusType::MOVED_PERMANENTLY, Sstring::new());
-        rep._headers
-            .insert(CaseInsensitiveKey(Sstring::from("Location")), Sstring::from_bytes(&redirected));
+        rep._headers.insert(
+            CaseInsensitiveKey(Sstring::from("Location")),
+            Sstring::from_bytes(&redirected),
+        );
         rep.done();
         return true;
     }

@@ -154,7 +154,9 @@ pub fn parse_config(input: &mut dyn Read) -> Result<HashMap<String, DeviceConfig
     // check each device: when dhcp is off, all of ip, gw, nm must be specified
     if device_configs.values().any(|p| {
         !p.ip_cfg.dhcp
-            && (p.ip_cfg.ip.is_empty() || p.ip_cfg.gateway.is_empty() || p.ip_cfg.netmask.is_empty())
+            && (p.ip_cfg.ip.is_empty()
+                || p.ip_cfg.gateway.is_empty()
+                || p.ip_cfg.netmask.is_empty())
     }) {
         return Err(ExceptionPtr::from(ConfigException::new(
             "when dhcp is off then all of ip, gateway, netmask has to be specified",
@@ -164,7 +166,9 @@ pub fn parse_config(input: &mut dyn Read) -> Result<HashMap<String, DeviceConfig
     // check each device: dhcp cannot be used together with static ip/gw/nm
     if device_configs.values().any(|p| {
         p.ip_cfg.dhcp
-            && (!p.ip_cfg.ip.is_empty() || !p.ip_cfg.gateway.is_empty() || !p.ip_cfg.netmask.is_empty())
+            && (!p.ip_cfg.ip.is_empty()
+                || !p.ip_cfg.gateway.is_empty()
+                || !p.ip_cfg.netmask.is_empty())
     }) {
         return Err(ExceptionPtr::from(ConfigException::new(
             "dhcp and ip cannot be used together",

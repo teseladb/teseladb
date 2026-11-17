@@ -2620,7 +2620,10 @@ impl DatagramChannelImpl for PosixDatagramChannel {
                     let covers = |payload: usize| {
                         len >= cmsg_align(std::mem::size_of::<cmsghdr>()) + payload
                     };
-                    if level == IPPROTO_IP && ty == IP_PKTINFO && covers(std::mem::size_of::<in_pktinfo>()) {
+                    if level == IPPROTO_IP
+                        && ty == IP_PKTINFO
+                        && covers(std::mem::size_of::<in_pktinfo>())
+                    {
                         // SAFETY: an IP_PKTINFO message carries an in_pktinfo.
                         let pi: in_pktinfo = copy_reinterpret_cast(unsafe { cmsg_data(cmsg) });
                         dst = Some(SocketAddress::from_ipv4_addr(Ipv4Addr::from_in_addr(

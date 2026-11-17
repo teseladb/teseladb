@@ -27,7 +27,8 @@ engine_test_case!(test_unconfigured_io_queue, {
     while reqsize < 128 << 10 {
         for idx in [IoDirectionAndLength::READ_IDX, IoDirectionAndLength::WRITE_IDX] {
             // SAFETY: the queue was built above and is not otherwise referenced.
-            let cost = unsafe { (*queue).request_capacity(IoDirectionAndLength::new(idx, reqsize)) };
+            let cost =
+                unsafe { (*queue).request_capacity(IoDirectionAndLength::new(idx, reqsize)) };
             assert_eq!(cost, 0, "a {reqsize}-byte request (direction {idx}) costs {cost}");
         }
         reqsize <<= 1;

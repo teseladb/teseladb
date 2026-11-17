@@ -87,10 +87,7 @@ engine_test_case!(a_read_woken_without_data_polls_again, {
         let mut y = [0u8; 4];
         // SAFETY: the buffers outlive the reads, resolved in race().
         let (f1, f2) = unsafe {
-            (
-                b.read_some_bytes(x.as_mut_ptr(), x.len()),
-                c.read_some_chars(y.as_mut_ptr(), y.len()),
-            )
+            (b.read_some_bytes(x.as_mut_ptr(), x.len()), c.read_some_chars(y.as_mut_ptr(), y.len()))
         };
         race(&mut a, f1, f2, |n| n)
     })
@@ -127,14 +124,8 @@ engine_test_case!(a_scattered_read_woken_without_data_polls_again, {
         let (mut a, mut b, mut c) = pair_and_dup();
         let mut x = [0u8; 4];
         let mut y = [0u8; 4];
-        let vx = vec![Iovec {
-            iov_base: x.as_mut_ptr().cast::<c_void>(),
-            iov_len: x.len(),
-        }];
-        let vy = vec![Iovec {
-            iov_base: y.as_mut_ptr().cast::<c_void>(),
-            iov_len: y.len(),
-        }];
+        let vx = vec![Iovec { iov_base: x.as_mut_ptr().cast::<c_void>(), iov_len: x.len() }];
+        let vy = vec![Iovec { iov_base: y.as_mut_ptr().cast::<c_void>(), iov_len: y.len() }];
         let (f1, f2) = (b.read_some_iov(&vx), c.read_some_iov(&vy));
         race(&mut a, f1, f2, |n| n)
     })

@@ -147,11 +147,7 @@ engine_test_case!(test_pending_io_wakes_for_first_request, {
         let after = now_ns();
         assert!(wakeup != ClockTypeTimePoint::MAX, "no reservation is pending");
         let wait_ns = (wakeup - after) as f64;
-        eprintln!(
-            "wake-up in {:.3} ms; first request in {:.3} ms",
-            wait_ns / 1e6,
-            first / 1e6
-        );
+        eprintln!("wake-up in {:.3} ms; first request in {:.3} ms", wait_ns / 1e6, first / 1e6);
         assert!(
             wait_ns <= first * 2.0,
             "the queue wakes in {:.3} ms; its first request can go in {:.3} ms",

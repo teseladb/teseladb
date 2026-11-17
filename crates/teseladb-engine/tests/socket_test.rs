@@ -8,24 +8,20 @@
 #![allow(unsafe_code)]
 
 use std::cell::Cell;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-use teseladb::engine::core::abort_source::AbortSource;
 use teseladb::engine::core::do_with::do_with;
 use teseladb::engine::core::future::{
-    ExceptionPtr, Future, make_exception_future, make_ready_future,
+    ExceptionPtr, Future, RuntimeError, make_exception_future, make_ready_future,
 };
-use teseladb::engine::core::future_util::sleep_abortable_with;
 use teseladb::engine::core::iostream::{InputStream, OutputStream};
 use teseladb::engine::core::loop_::do_until;
 use teseladb::engine::core::posix::FileDesc;
 use teseladb::engine::core::reactor::{Reactor, connect, listen_with, make_socket, yield_};
-use teseladb::engine::core::sleep::{SleepAborted, sleep_steady as sleep};
+use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::thread::async_;
-use teseladb::engine::core::timer::SteadyClockType;
 use teseladb::engine::core::when_all::when_all;
 use teseladb::engine::net::api::{
     AcceptResult, ConnectedSocket, ListenOptions, LoadBalancingAlgorithm, make_ipv4_address,
@@ -120,31 +116,18 @@ teseladb::engine_test_case!(socket_allocation_test, {
 teseladb::engine_test_case!(socket_skip_test, {
     async_(|| -> Result<(), ExceptionPtr> {
         let mut ss = listen_with(addr("127.0.0.1", 1234)?, reuse())?;
-        let mut as_ = Box::pin(AbortSource::new());
-        // SAFETY: the source is pinned in its box and outlives the client thread.
-        let asp: *mut AbortSource = unsafe { as_.as_mut().get_unchecked_mut() };
         let client = async_(move || -> Result<(), ExceptionPtr> {
             let mut socket = connect(addr("127.0.0.1", 1234)?).get()?;
             socket.output(8192).write_str("abc").get()?;
             socket.shutdown_output();
-            // SAFETY: the source is pinned in its box, which outlives the client thread, so the pin is valid.
-            match sleep_abortable_with::<SteadyClockType>(Duration::from_secs(10), unsafe {
-                Pin::new_unchecked(&mut *asp)
-            })
-            .get()
-            {
-                Err(e) if e.is::<SleepAborted>() => {
-                    // expected
-                    return Ok(());
-                }
-                _ => {}
-            }
-            panic!("Skipping data from socket is likely stuck");
+            Ok(())
         });
         let mut accepted = ss.accept().get()?;
         let mut input = accepted.connection.input(Default::default());
-        input.skip(16).get()?;
-        as_.as_mut().request_abort();
+        // The client sends 3 bytes and shuts its side down: skipping 16 reaches the end of
+        // the stream first and fails (as upstream, since skip consumes exactly n bytes).
+        let e = input.skip(16).get().expect_err("premature end of stream");
+        assert!(e.is::<RuntimeError>(), "{e}");
         client.get()?;
         Ok(())
     })

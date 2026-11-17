@@ -29,10 +29,7 @@ fn stage_metric(metric: &str, stage: &str) -> Option<f64> {
     let values = unsafe { registry.get_mut_unchecked() }.get_value_map();
     let fam = values.get(&name(&format!("execution_stages_{metric}")))?;
     for (labels, slot) in fam.iter() {
-        if labels
-            .labels()
-            .get(&name("execution_stage"))
-            .is_some_and(|v| *v == stage)
+        if labels.labels().get(&name("execution_stage")).is_some_and(|v| *v == stage)
             && let Some(m) = slot
         {
             return Some(m.call().d());
@@ -59,26 +56,13 @@ engine_test_case!(accessors_flush_poll_and_exported_counters, {
         assert_eq!(st.function_calls_executed, 1);
         assert_eq!(st.tasks_scheduled, 1);
         assert_eq!(stage_metric("tasks_scheduled", "cov2_acc"), Some(1.0));
-        assert_eq!(
-            stage_metric("function_calls_enqueued", "cov2_acc"),
-            Some(1.0)
-        );
-        assert_eq!(
-            stage_metric("function_calls_executed", "cov2_acc"),
-            Some(1.0)
-        );
+        assert_eq!(stage_metric("function_calls_enqueued", "cov2_acc"), Some(1.0));
+        assert_eq!(stage_metric("function_calls_executed", "cov2_acc"), Some(1.0));
         // Whether the one flush was preempted depends on timing; the metric reports the counter.
-        assert_eq!(
-            stage_metric("tasks_preempted", "cov2_acc"),
-            Some(st.tasks_preempted as f64)
-        );
+        assert_eq!(stage_metric("tasks_preempted", "cov2_acc"), Some(st.tasks_preempted as f64));
         assert!(st.tasks_preempted <= 1);
         drop(stage);
-        assert_eq!(
-            stage_metric("tasks_scheduled", "cov2_acc"),
-            None,
-            "unregistered"
-        );
+        assert_eq!(stage_metric("tasks_scheduled", "cov2_acc"), None, "unregistered");
         Ok(())
     })
 });
@@ -93,7 +77,7 @@ engine_test_case!(dropping_a_stage_with_a_pending_flush_breaks_its_calls, {
         let f2 = stage.call(2);
         drop(stage);
         for f in [f1, f2] {
-            let e = f.get().err().expect("the call was dropped with the stage");
+            let e = f.get().expect_err("the call was dropped with the stage");
             assert!(e.downcast_ref::<BrokenPromise>().is_some(), "{e}");
         }
         // The pending flush task runs now and frees the orphaned stage.
@@ -159,7 +143,7 @@ engine_test_case!(inheriting_stage_reports_per_group_stats_and_name_clashes, {
         let mut clash = InheritingConcreteExecutionStage::new(&name("cov2_clash"), |x: i32| {
             Ok::<i32, ExceptionPtr>(x)
         });
-        let e = clash.call(1).get().err().expect("name taken");
+        let e = clash.call(1).get().expect_err("name taken");
         assert!(e.downcast_ref::<InvalidArgument>().is_some(), "{e}");
         assert!(e.to_string().contains("already exists"), "{e}");
         Ok(())
