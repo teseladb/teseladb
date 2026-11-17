@@ -10,6 +10,7 @@
 //! | `--memory-limit <bytes>` | `--memory` (split evenly between the shards) |
 //! | huge pages reserved | `--hugepages <hugetlbfs mount>` |
 //! | `--direct-io auto` / `on` / `off` | `--relaxed-dma` / nothing / `--kernel-page-cache 1` |
+//! | `--idle-poll-us <µs>` | `--idle-poll-time-us` (by default [`DEFAULT_IDLE_POLL_US`]) |
 //! | always | `--network-stack posix`, `--blocked-reactor-notify-ms 25`, `--task-quota-ms 0.5` |
 //!
 //! The engine's allocator is the global one (D-181) and its reactor backend is the one it picks
@@ -23,6 +24,14 @@ use std::path::{Path, PathBuf};
 
 /// The stall detector's threshold (SC-013): a shard that does not yield for this long is reported.
 pub const STALL_NOTIFY_MS: u32 = 25;
+
+/// How long an idle shard polls before it sleeps, without `--idle-poll-us`: not at all. The
+/// engine's own default, 2 ms on a virtual machine, kept every idle shard of a loaded node on its
+/// CPU: on a host shared with other work (one-node load, 17-11-2026, three pairs) a node without
+/// it served 18-31 % more operations with 37-40 % less CPU per operation and its writes' p50
+/// 20-30 % lower; a sleeping shard is woken by the engine when work comes. A dedicated host
+/// that wants the polling back gives the option.
+pub const DEFAULT_IDLE_POLL_US: u32 = 0;
 
 /// The engine's task quota, its default: the longest a task runs before the reactor polls.
 pub const TASK_QUOTA_MS: &str = "0.5";
@@ -94,6 +103,9 @@ pub struct EngineConfig {
     pub hugepages: Option<PathBuf>,
     /// The mode of the engine's files (`--direct-io`).
     pub direct_io: DirectIo,
+    /// How long, in microseconds, an idle shard polls before it sleeps (`--idle-poll-us`);
+    /// `None`: [`DEFAULT_IDLE_POLL_US`].
+    pub idle_poll_us: Option<u32>,
 }
 
 impl EngineConfig {
@@ -126,6 +138,8 @@ impl EngineConfig {
             DirectIo::On => {}
             DirectIo::Off => a.extend(["--kernel-page-cache".to_owned(), "1".to_owned()]),
         }
+        let idle_poll = self.idle_poll_us.unwrap_or(DEFAULT_IDLE_POLL_US);
+        a.extend(["--idle-poll-time-us".to_owned(), idle_poll.to_string()]);
         a.extend([
             "--network-stack".to_owned(),
             "posix".to_owned(),
@@ -344,6 +358,7 @@ mod tests {
             memory: Some(3 << 30),
             hugepages: Some(PathBuf::from("/dev/hugepages")),
             direct_io: DirectIo::Auto,
+            idle_poll_us: None,
         };
         let a = cfg.args();
         assert_eq!(a[0], "teseladb");
@@ -358,8 +373,9 @@ mod tests {
         assert_eq!(pair(&a, "--network-stack").as_deref(), Some("posix"));
         assert_eq!(pair(&a, "--blocked-reactor-notify-ms").as_deref(), Some("25"));
         assert_eq!(pair(&a, "--task-quota-ms").as_deref(), Some("0.5"));
-        // The engine picks its backend and polls before sleeping: neither is set.
+        // The engine picks its backend, and an idle shard sleeps: neither is set.
         assert!(!a.iter().any(|x| x == "--reactor-backend" || x == "--poll-mode"));
+        assert_eq!(pair(&a, "--idle-poll-time-us").as_deref(), Some("0"));
     }
 
     #[test]
@@ -373,6 +389,16 @@ mod tests {
         assert!(!a.iter().any(|x| x == "--hugepages"));
         let off = EngineConfig { direct_io: DirectIo::Off, ..on };
         assert_eq!(pair(&off.args(), "--kernel-page-cache").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn the_idle_poll_is_the_node_s_default_unless_given() {
+        let plain = EngineConfig::default();
+        assert_eq!(pair(&plain.args(), "--idle-poll-time-us").as_deref(), Some("0"));
+        let zero = EngineConfig { idle_poll_us: Some(0), ..EngineConfig::default() };
+        assert_eq!(pair(&zero.args(), "--idle-poll-time-us").as_deref(), Some("0"));
+        let some = EngineConfig { idle_poll_us: Some(200), ..EngineConfig::default() };
+        assert_eq!(pair(&some.args(), "--idle-poll-time-us").as_deref(), Some("200"));
     }
 
     #[test]
@@ -392,6 +418,7 @@ mod tests {
             memory: Some(1024),
             hugepages: Some(PathBuf::from("/mnt/huge")),
             direct_io: DirectIo::On,
+            idle_poll_us: None,
         };
         assert_eq!(
             cfg.describe("io_uring").to_string(),
