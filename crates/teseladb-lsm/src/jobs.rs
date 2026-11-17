@@ -206,6 +206,11 @@ pub(crate) enum Outcome {
 /// else (FR-030): merging a megabyte kept the core for several milliseconds.
 pub(crate) const STEP_BYTES: usize = 64 << 10;
 
+/// Work of the end of a file a background job does in one step, in keys of its filter
+/// ([`TableWriter::prepare`]): about a quarter of a millisecond (FR-030). Building the filter of
+/// a file of a million keys at once kept its core 65 ms.
+pub(crate) const END_STEP: usize = 4 << 10;
+
 /// The next thing a job wants.
 #[derive(Debug)]
 pub(crate) enum Next {
@@ -226,6 +231,8 @@ pub(crate) struct FlushJob {
     /// The number of its value file, which exists once a value goes apart (FR-034).
     values_number: u64,
     values: ValueSink,
+    /// Its value file once ended, for the file's references.
+    values_file: Option<Arc<Table>>,
     dir: PathBuf,
     chunk: usize,
     /// How its files are written: block size, codec and key ring.
@@ -248,6 +255,9 @@ pub(crate) struct FlushJob {
 #[derive(Debug, PartialEq, Eq)]
 enum FlushStage {
     Fill,
+    /// Every version is written: the ends of the file and of its history file are prepared in
+    /// steps (FR-030).
+    Close,
     Edit,
     Done,
 }
@@ -283,6 +293,7 @@ impl FlushJob {
             history_number,
             values_number,
             values: ValueSink::new(cfg.value_separation_bytes),
+            values_file: None,
             dir: cfg.dir.clone(),
             chunk: cfg.io_chunk_bytes,
             writer: has_data.then(|| packing(new_writer(&format), cfg.pack_documents)),
@@ -374,8 +385,20 @@ impl FlushJob {
             self.write_full_chunks();
             return;
         }
-        let values = self.values.finish(&mut self.queued);
+        self.values_file = self.values.finish(&mut self.queued);
+        self.stage = FlushStage::Close;
+    }
+
+    /// One step of the ends of the file and of its history file; once both are ready, their last
+    /// writes and syncs are queued and the flush goes on to its edit.
+    fn close(&mut self) {
+        let ready = |w: &mut Option<TableWriter>| w.as_mut().is_none_or(|w| w.prepare(END_STEP));
+        if !ready(&mut self.writer) || !ready(&mut self.history) {
+            return;
+        }
+        let values = self.values_file.take();
         let find = |_| values.clone().expect("the flush's value file");
+        let mem = Arc::clone(&self.mem);
         let w = self.writer.take().expect("a flush with data has a writer");
         let numbers = w.value_numbers();
         let (at, chunk, mut table) = w
@@ -408,6 +431,12 @@ impl FlushJob {
                 FlushStage::Fill => {
                     self.fill();
                     if self.queued.is_empty() && self.stage == FlushStage::Fill {
+                        return Next::More;
+                    }
+                }
+                FlushStage::Close => {
+                    self.close();
+                    if self.queued.is_empty() && self.stage == FlushStage::Close {
                         return Next::More;
                     }
                 }
