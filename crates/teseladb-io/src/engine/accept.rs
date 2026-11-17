@@ -236,8 +236,7 @@ fn listen_all(
     let mut bound = Vec::with_capacity(addrs.len());
     for a in addrs {
         let (l, at) = listen_concrete(*a, &options).map_err(|e| {
-            let kind = e.downcast_ref::<io::Error>().map_or(io::ErrorKind::Other, io::Error::kind);
-            ExceptionPtr::from(io::Error::new(kind, format!("{name} {a}: {e}")))
+            ExceptionPtr::from(io::Error::new(error_kind(&e), format!("{name} {a}: {e}")))
         })?;
         bound.push(at);
         listeners.push(Rc::new(RefCell::new(l)));
@@ -284,10 +283,17 @@ pub(crate) fn listen_concrete(
 
 /// Whether a failed listen failed because the address is in use.
 fn is_addr_in_use(e: &ExceptionPtr) -> bool {
-    e.downcast_ref::<io::Error>().is_some_and(|e| e.kind() == io::ErrorKind::AddrInUse)
-        || e.downcast_ref::<SystemError>().is_some_and(|s| {
-            io::Error::from_raw_os_error(s.code()).kind() == io::ErrorKind::AddrInUse
-        })
+    error_kind(e) == io::ErrorKind::AddrInUse
+}
+
+/// The kind of an engine error: an I/O error's, or that of a system error's code (the engine's
+/// listen fails with the latter), or [`io::ErrorKind::Other`].
+fn error_kind(e: &ExceptionPtr) -> io::ErrorKind {
+    if let Some(io) = e.downcast_ref::<io::Error>() {
+        return io.kind();
+    }
+    e.downcast_ref::<SystemError>()
+        .map_or(io::ErrorKind::Other, |s| io::Error::from_raw_os_error(s.code()).kind())
 }
 
 /// Stops port `id` on this shard.
