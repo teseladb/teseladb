@@ -222,12 +222,15 @@ impl Proc {
     /// line to the other may still arrive first.
     fn wait_each(&self, whats: &[&str]) -> Vec<String> {
         let mut found: Vec<Option<String>> = vec![None; whats.len()];
+        // The lines read meanwhile, for the message of a line that never comes.
+        let mut seen = Vec::new();
         while found.iter().any(Option::is_none) {
             let line = self.lines.recv_timeout(READY).unwrap_or_else(|_| {
                 let missing: Vec<&&str> =
                     whats.iter().zip(&found).filter(|(_, f)| f.is_none()).map(|(w, _)| w).collect();
-                panic!("no {missing:?}")
+                panic!("no {missing:?}; the lines read:\n{}", seen.join("\n"))
             });
+            seen.push(line.clone());
             for (what, slot) in whats.iter().zip(found.iter_mut()) {
                 if slot.is_none() && Self::is(&line, what) {
                     *slot = Some(line.clone());
@@ -289,8 +292,9 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     let (id1, seed) = p1.ready();
     assert_eq!(id1, 1);
     let p2 = Proc::start("2", Some(&seed));
-    // The disk executor and O_DIRECT are logged before the node starts (012 FR-003, FR-007).
-    let lines = p2.wait_each(&[READY_LINE, "disk: "]);
+    // The engine's backend and whether its files bypass the page cache are logged before the
+    // node starts (012 FR-003, FR-007; 023: the engine's line replaced the disk executor's).
+    let lines = p2.wait_each(&[READY_LINE, "engine: backend "]);
     let (id2, peer2) = Proc::ready_fields(&lines[0]);
     let p3 = Proc::start("3", Some(&seed));
     // Its cores are pinned to the CPUs the process may use (012 FR-006), a line that goes to
@@ -313,7 +317,11 @@ fn three_processes_join_and_survive_the_loss_of_the_leader() {
     // A clean stop ends with code 0.
     let mut p4 = p4;
     p4.signal("-TERM");
-    assert_eq!(p4.child.wait().unwrap().code(), Some(0));
+    let ended = p4.child.wait().unwrap();
+    // Its readers end with its pipes.
+    let rest: Vec<String> =
+        std::iter::from_fn(|| p4.lines.recv_timeout(Duration::from_secs(2)).ok()).collect();
+    assert_eq!(ended.code(), Some(0), "{ended:?}; its last lines:\n{}", rest.join("\n"));
     drop((p2, p3));
 }
 

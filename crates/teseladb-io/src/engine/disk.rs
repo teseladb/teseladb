@@ -657,8 +657,11 @@ impl CoreDisk for ShardDisk {
         true
     }
 
+    /// Only on files: a disk in memory has no file the executor reads for a send, so every piece
+    /// would go as its fallback ("not ready") and a snapshot's data would never arrive; there the
+    /// logic answers whole, as with the loop this replaces (an io_uring disk only).
     fn sends_files(&self) -> bool {
-        true
+        matches!(self.inner.borrow().backend, Backend::Files { .. })
     }
 
     fn read_for_send(
@@ -749,6 +752,14 @@ mod tests {
         );
         end(&mut i, 1, IoClass::Log, &batch);
         assert_eq!(taken(&mut i), [(IoDone::Ok(batch), IoClass::Log)]);
+    }
+
+    #[test]
+    fn a_disk_in_memory_leaves_the_sends_of_files_to_the_logic() {
+        // Its reads for a send find no file: the pieces of a snapshot would all go as "not
+        // ready" and a replica added to a range would wait for its data for ever.
+        let disk = ShardDisk::mem(MemDisk::new());
+        assert!(!CoreDisk::sends_files(&disk));
     }
 
     #[test]

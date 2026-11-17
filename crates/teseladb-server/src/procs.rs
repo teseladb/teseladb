@@ -215,7 +215,7 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
         println!("{ERROR} io cannot handle stop signals: {e}");
         return 1;
     }
-    let cfg = a.apply(recipe(&a));
+    let cfg = with_stderr_log(a.apply(recipe(&a)));
     let stop = teseladb_io::engine::signals::stop_requested;
     let input = Box::new(BufReader::new(io::stdin()));
     let out = &mut io::stdout();
@@ -238,6 +238,31 @@ pub fn run_node_process(args: &[String], recipe: &dyn Fn(&NodeArgs) -> NodeConfi
             1
         }
     }
+}
+
+/// `cfg` whose start writes its steps to standard error (the node process's log, which
+/// [`NodeProc`] keeps in a file and a failed test shows) when the recipe sends them nowhere.
+#[must_use]
+pub fn with_stderr_log(cfg: NodeConfig) -> NodeConfig {
+    if cfg.startup_log.is_on() {
+        return cfg;
+    }
+    let log = crate::node::StartupLog::new(|msg, fields| eprintln!("{}", log_line(msg, fields)));
+    NodeConfig { startup_log: log, ..cfg }
+}
+
+/// A log line of a node process: the time in milliseconds since the epoch, the message and its
+/// fields as `name=value`.
+#[must_use]
+pub fn log_line(msg: &str, fields: &[(&str, &dyn std::fmt::Display)]) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let mut line = format!("{ms} {msg}");
+    for (k, v) in fields {
+        let _ = write!(line, " {k}={v}");
+    }
+    line
 }
 
 /// The line of a node process that could not start: its kind and message.
