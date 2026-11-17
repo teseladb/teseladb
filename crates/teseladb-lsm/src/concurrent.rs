@@ -291,23 +291,46 @@ struct Source<'a> {
     need: Option<BlockNeed>,
 }
 
-impl Blocks for Source<'_> {
-    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
-        let cached = self.inner.shard(table.number, i).try_with(|c| c.get(table.number, i as u32));
+impl Source<'_> {
+    /// The payload of slot `slot` of `table` from the shared cache, or `None` after naming the
+    /// read it needs (the first miss of the attempt).
+    fn payload(&mut self, table: &Arc<Table>, slot: usize) -> Option<Bytes> {
+        let cached =
+            self.inner.shard(table.number, slot).try_with(|c| c.get(table.number, slot as u32));
         if let Some(Some(payload)) = cached {
-            return Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i));
+            return Some(payload);
         }
         if self.need.is_none() {
-            let (offset, len) = table.pages(i);
+            let (offset, len) = table.pages(slot);
             self.need = Some(BlockNeed {
                 path: self.inner.dir.join(file_name(table.number)).display().to_string(),
                 offset,
                 len,
                 table: table.clone(),
-                block: i,
+                block: slot,
             });
         }
-        Ok(Fetch::Wait(ReadToken(0)))
+        None
+    }
+}
+
+impl Blocks for Source<'_> {
+    fn block(&mut self, table: &Arc<Table>, i: usize) -> Result<Fetch, LsmError> {
+        match self.payload(table, i) {
+            Some(payload) => Block::parse(payload).map(Fetch::Ready).map_err(|_| corrupt(table, i)),
+            None => Ok(Fetch::Wait(ReadToken(0))),
+        }
+    }
+
+    /// The column block of data block `i` (010 FR-033), from the shared cache or named as the
+    /// read the caller supplies: without it a scan from another thread never took columns.
+    fn columns(
+        &mut self,
+        table: &Arc<Table>,
+        i: usize,
+    ) -> Result<Option<Result<Bytes, ReadToken>>, LsmError> {
+        let slot = crate::sst::reader::COLUMN_SLOT + i;
+        Ok(Some(self.payload(table, slot).ok_or(ReadToken(0))))
     }
 
     fn failure(&self) -> Option<&LsmError> {
