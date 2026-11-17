@@ -266,6 +266,11 @@ pub struct Lsm {
     requests: std::collections::VecDeque<Request>,
     next_request: u64,
     pub(crate) obsolete: Vec<Arc<Table>>,
+    /// Memtables that left the version after their flush, kept until no view holds them, so
+    /// that the last one to go never frees one whole on the shard that drops it.
+    graveyard: Vec<Arc<Memtable>>,
+    /// Memtables nothing holds any more, freed a few nodes at a time ([`Lsm::bury`]).
+    tearing: Vec<crate::memtable::MemTeardown>,
     done: Completions,
     pub(crate) counters: Counters,
     /// Bytes compactions wrote per collection since its dictionary was trained (004 FR-022).
@@ -362,6 +367,8 @@ impl Lsm {
             requests: std::collections::VecDeque::new(),
             next_request: 1,
             obsolete: Vec::new(),
+            graveyard: Vec::new(),
+            tearing: Vec::new(),
             done: Completions::default(),
             counters: Counters::default(),
             dict_written: crate::dict::Written::new(),

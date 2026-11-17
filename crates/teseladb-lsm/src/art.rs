@@ -954,6 +954,77 @@ fn retire<V, T>(art: &Art<V>, list: &mut Vec<*mut T>, old: *mut T) {
     art.grow((list.capacity() - before) * size_of::<*mut T>());
 }
 
+/// The nodes and values of a map taken out of it to be freed a few at a time
+/// ([`Art::teardown`]): a map of millions of keys took a shard 170 ms to free at once. What a
+/// teardown has not freed when it drops is freed then.
+pub(crate) struct Teardown<V> {
+    values: Vec<*mut V>,
+    retired: Vec<*mut Node<V>>,
+    stack: Vec<*mut Node<V>>,
+}
+
+// SAFETY: the teardown owns the nodes and values it holds, which nobody else reaches any more
+// (they left their map with `&mut`); sending it moves that ownership.
+unsafe impl<V: Send> Send for Teardown<V> {}
+
+impl<V> Teardown<V> {
+    /// Frees up to `budget` nodes and values; whether all are freed.
+    pub(crate) fn step(&mut self, budget: usize) -> bool {
+        let mut left = budget;
+        while left > 0 {
+            left -= 1;
+            if let Some(v) = self.values.pop() {
+                // SAFETY: a retired value, allocated by `Box::into_raw` in `insert`, in no leaf
+                // and reached by nobody (the map gave it up with `&mut`).
+                drop(unsafe { Box::from_raw(v) });
+            } else if let Some(n) = self.retired.pop() {
+                // SAFETY: a retired inner node, allocated by `Box::into_raw`, out of the tree;
+                // its links do not own its children, which are in the tree or retired too.
+                drop(unsafe { Box::from_raw(n) });
+            } else if let Some(p) = self.stack.pop() {
+                if p.is_null() {
+                    continue;
+                }
+                // SAFETY: a node of the tree, allocated by `Box::into_raw` and reachable from
+                // the root once; nobody reads the tree any more.
+                let node = unsafe { Box::from_raw(p) };
+                match &*node {
+                    Node::Leaf(l) => {
+                        // SAFETY: a leaf's current value, allocated by `Box::into_raw` in
+                        // `insert` and in no other leaf or list.
+                        drop(unsafe { Box::from_raw(l.value.load(Ordering::Relaxed)) });
+                    }
+                    Node::Inner(i) => self.stack.extend(i.kids.children().into_iter().map(|c| c.1)),
+                }
+            } else {
+                return true;
+            }
+        }
+        self.values.is_empty() && self.retired.is_empty() && self.stack.is_empty()
+    }
+}
+
+impl<V> Drop for Teardown<V> {
+    fn drop(&mut self) {
+        while !self.step(usize::MAX) {}
+    }
+}
+
+impl<V> Art<V> {
+    /// Takes every node and value out of the map, which is left empty, to be freed a few at a
+    /// time.
+    pub(crate) fn teardown(&mut self) -> Teardown<V> {
+        let w = self.writer.get_mut();
+        let root = self.root.swap(ptr::null_mut(), Ordering::Relaxed);
+        self.len.store(0, Ordering::Relaxed);
+        Teardown {
+            values: std::mem::take(&mut w.values),
+            retired: std::mem::take(&mut w.nodes),
+            stack: vec![root],
+        }
+    }
+}
+
 impl<V> Drop for Art<V> {
     fn drop(&mut self) {
         let w = self.writer.get_mut();
@@ -1001,6 +1072,47 @@ mod tests {
 
     fn keys(m: &Art<u64>) -> Vec<Vec<u8>> {
         m.iter().map(|e| e.key().to_vec()).collect()
+    }
+
+    /// A value that counts how many of its kind are alive.
+    struct Counted(Arc<()>);
+
+    #[test]
+    fn a_teardown_frees_a_few_nodes_and_values_per_step_and_the_rest_when_dropped() {
+        let alive = Arc::new(());
+        let n: u32 = if cfg!(miri) { 60 } else { 3000 };
+        let mut m: Art<Counted> = Art::new(BYTES_ORDER);
+        for k in 0..n {
+            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+        }
+        // Written again: the replaced values are retired, and freed by the teardown too.
+        for k in 0..n / 2 {
+            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+        }
+        let before = Arc::strong_count(&alive);
+        assert_eq!(before, 1 + n as usize + n as usize / 2);
+        let mut t = m.teardown();
+        assert_eq!((m.len(), m.iter().count()), (0, 0), "the map is left empty");
+        assert!(!t.step(10));
+        assert!(Arc::strong_count(&alive) < before, "a step frees some");
+        assert!(Arc::strong_count(&alive) >= before - 10, "and no more than its budget");
+        let mut steps = 1;
+        while !t.step(100) {
+            steps += 1;
+        }
+        assert_eq!(Arc::strong_count(&alive), 1, "every value freed");
+        assert!(steps > n as usize / 100, "{steps} steps");
+        drop(m);
+        // A teardown dropped half way frees the rest.
+        let mut m: Art<Counted> = Art::new(BYTES_ORDER);
+        for k in 0..n {
+            m.insert(&k.to_be_bytes(), Counted(alive.clone()));
+        }
+        let mut t = m.teardown();
+        t.step(5);
+        drop(t);
+        assert_eq!(Arc::strong_count(&alive), 1);
+        assert_eq!(Arc::strong_count(&Counted(alive.clone()).0), 2, "a value holds one count");
     }
 
     #[test]

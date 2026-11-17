@@ -137,6 +137,7 @@ impl Lsm {
     /// As [`Lsm::poll_io`], with at most one step of background work (FR-030): a core asks once
     /// a turn and serves its requests between two steps.
     pub fn poll_io_step(&mut self, now: Nanos) -> Polled {
+        self.bury();
         if let Some(op) = self.reader.pop_op() {
             return Polled::Op(op);
         }
