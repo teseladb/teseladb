@@ -198,10 +198,11 @@ pub fn increase_thrown_exceptions_counter() {
 }
 
 #[cfg(not(no_exception_intercept))]
-pub(crate) static EXCEPTION_LOGGER: std::sync::LazyLock<std::pin::Pin<Box<crate::engine::util::log::Logger>>> =
-    std::sync::LazyLock::new(|| {
-        crate::engine::util::log::Logger::new("exception").expect("logger registered once")
-    });
+pub(crate) static EXCEPTION_LOGGER: std::sync::LazyLock<
+    std::pin::Pin<Box<crate::engine::util::log::Logger>>,
+> = std::sync::LazyLock::new(|| {
+    crate::engine::util::log::Logger::new("exception").expect("logger registered once")
+});
 
 #[cfg(not(no_exception_intercept))]
 thread_local! {

@@ -58,7 +58,11 @@ impl Write<Sstring> for Serializer {
 }
 
 impl Read<Sstring> for Serializer {
-    fn read<I: SerializerInput>(&self, in_: &mut I, _: Type<Sstring>) -> Result<Sstring, ExceptionPtr> {
+    fn read<I: SerializerInput>(
+        &self,
+        in_: &mut I,
+        _: Type<Sstring>,
+    ) -> Result<Sstring, ExceptionPtr> {
         let mut l = [0u8; 4];
         in_.read(&mut l)?;
         let mut s = uninitialized_string(u32::from_ne_bytes(l) as usize);
@@ -167,15 +171,18 @@ teseladb::engine_test_case!(the_end_of_a_stream_survives_the_close_of_its_connec
         let kept = register_keeper::<(i32,), (Sstring,)>(&mut env, 1)?;
         // Verb 2 gets a sink over the stream of the source the client passes, and closes
         // it: the client's source gets the end of the stream.
-        env.proto.as_mut().register_handler(2, move |mut sink: Sink<(Sstring,)>| -> Future<u64> {
-            let id = sink.get_id().id();
-            let keep = sink.clone();
-            // SAFETY: `keep`, a copy of the sink, lives until the close resolves.
-            unsafe { sink.close() }.then(move |()| {
-                drop(keep);
-                make_ready_future(id)
-            })
-        })?;
+        env.proto.as_mut().register_handler(
+            2,
+            move |mut sink: Sink<(Sstring,)>| -> Future<u64> {
+                let id = sink.get_id().id();
+                let keep = sink.clone();
+                // SAFETY: `keep`, a copy of the sink, lives until the close resolves.
+                unsafe { sink.close() }.then(move |()| {
+                    drop(keep);
+                    make_ready_future(id)
+                })
+            },
+        )?;
         let mut c = env.client()?;
         let mut sink = cm(&mut c).make_stream_sink::<Serializer, (i32,)>().get()?;
         let open = env.proto.make_client::<fn(Sink<(i32,)>) -> Future<Source<(Sstring,)>>>(1);

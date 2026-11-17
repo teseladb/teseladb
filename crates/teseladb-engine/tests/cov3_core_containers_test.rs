@@ -81,11 +81,7 @@ fn erasing_a_middle_range_closes_the_gap() {
 #[test]
 fn bitsets_count_test_set_and_reset() {
     assert_eq!(count_leading_zeros(1u64), 63);
-    assert_eq!(
-        count_leading_zeros(1i64),
-        62,
-        "the sign bit is not a value bit"
-    );
+    assert_eq!(count_leading_zeros(1i64), 62, "the sign bit is not a value bit");
     assert_eq!(count_trailing_zeros(8i64), 3);
     assert_eq!(count_trailing_zeros(8u64), 3);
     let mut b = Bitset::<16>(0);

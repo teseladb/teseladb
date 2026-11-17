@@ -567,7 +567,8 @@ pub mod experimental {
         // SAFETY: the contract above; the reference to the reply ends with the statement.
         let status = unsafe { (*rep)._status };
         if method_is_head
-            || Reply::classify_status(status) == crate::engine::http::reply::StatusClass::Informational
+            || Reply::classify_status(status)
+                == crate::engine::http::reply::StatusClass::Informational
             || status == StatusType::NO_CONTENT
             || status == StatusType::NOT_MODIFIED
         {

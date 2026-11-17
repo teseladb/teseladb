@@ -60,11 +60,7 @@ fn release_hands_over_external_blocks_and_copies_inline_ones() {
     let p = ext.as_bytes().as_ptr();
     let buf = ext.release();
     assert_eq!(buf.as_slice(), b"a string that does not fit inline");
-    assert_eq!(
-        buf.get(),
-        p,
-        "the external block moves into the buffer without a copy"
-    );
+    assert_eq!(buf.get(), p, "the external block moves into the buffer without a copy");
     let buf = Sstring::from("short").release();
     assert_eq!(buf.as_slice(), b"short");
 }
@@ -72,8 +68,7 @@ fn release_hands_over_external_blocks_and_copies_inline_ones() {
 #[test]
 fn a_size_beyond_32_bits_overflows() {
     let e = Sstring::initialized_later(InitializedLater, (u32::MAX as usize) + 1)
-        .err()
-        .expect("overflow");
+        .expect_err("overflow");
     assert!(e.downcast_ref::<OverflowError>().is_some(), "{e}");
     assert!(e.to_string().contains("sstring overflow"), "{e}");
     let s = Sstring::initialized_later(InitializedLater, 3).unwrap();
@@ -93,10 +88,7 @@ fn comparisons_three_way_and_by_range() {
     assert!(s.compare_range(0, 5, b"hellp").unwrap() < 0);
     assert!(s.compare_range(0, 5, b"hell").unwrap() > 0);
     assert_eq!(s.compare_range(11, 3, b"").unwrap(), 0);
-    assert!(
-        s.compare_range(12, 1, b"").is_err(),
-        "a position past the end is out of range"
-    );
+    assert!(s.compare_range(12, 1, b"").is_err(), "a position past the end is out of range");
 }
 
 #[test]
@@ -162,11 +154,7 @@ fn invalid_utf8_in_views_conversions_and_printing() {
     assert_eq!(s.as_str(), "ok", "the longest valid prefix");
     assert_eq!(String::from(&s), "ok\u{fffd}rest");
     assert_eq!(format!("{s}"), "ok\u{fffd}rest");
-    assert_eq!(
-        format!("[{s:>9}]"),
-        "[  ok\u{fffd}rest]",
-        "padded to the width"
-    );
+    assert_eq!(format!("[{s:>9}]"), "[  ok\u{fffd}rest]", "padded to the width");
     assert_eq!(format!("{s:?}"), "\"ok\u{fffd}rest\"");
 }
 
@@ -215,10 +203,7 @@ impl fmt::Display for Shrinking {
 fn format_sstring_with_literals_and_unstable_displays() {
     assert_eq!(format_sstring(format_args!("literal")), "literal");
     assert_eq!(format_sstring(format_args!("{}-{}", 1, "a")), "1-a");
-    assert!(
-        to_sstring(&Failing).empty(),
-        "a failing Display formats nothing"
-    );
+    assert!(to_sstring(&Failing).empty(), "a failing Display formats nothing");
     // A Display that writes more the second time: what fitted is kept.
     let g = Growing(std::cell::Cell::new(0));
     assert_eq!(format_sstring(format_args!("{g}")), "");

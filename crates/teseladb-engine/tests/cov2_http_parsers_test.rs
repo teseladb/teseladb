@@ -11,10 +11,7 @@ use teseladb::engine::http::response_parser::HttpResponseParser;
 fn request_ok(msg: &[u8]) -> bool {
     let mut p = HttpRequestParser::default();
     p.init();
-    let rest = p
-        .call(TemporaryBuffer::copy_from(msg))
-        .get()
-        .expect("parse");
+    let rest = p.call(TemporaryBuffer::copy_from(msg)).get().expect("parse");
     rest.is_some() && !p.failed() && p.get_parsed_request().is_some()
 }
 
@@ -22,10 +19,7 @@ fn request_ok(msg: &[u8]) -> bool {
 fn response_ok(msg: &[u8]) -> bool {
     let mut p = HttpResponseParser::default();
     p.init();
-    let rest = p
-        .call(TemporaryBuffer::copy_from(msg))
-        .get()
-        .expect("parse");
+    let rest = p.call(TemporaryBuffer::copy_from(msg)).get().expect("parse");
     rest.is_some() && !p.failed() && p.get_parsed_response().is_some()
 }
 
@@ -84,17 +78,11 @@ fn a_start_line_split_anywhere_still_parses() {
     for cut in 1..msg.len() {
         let mut p = HttpRequestParser::default();
         p.init();
-        let first = p
-            .call(TemporaryBuffer::copy_from(&msg[..cut]))
-            .get()
-            .expect("parse");
+        let first = p.call(TemporaryBuffer::copy_from(&msg[..cut])).get().expect("parse");
         // Asking for more data leaves the state the original leaves too (`error` until the
         // message completes): `failed()` only means something once a remainder is returned.
         assert!(first.is_none(), "needs more data at {cut}");
-        let rest = p
-            .call(TemporaryBuffer::copy_from(&msg[cut..]))
-            .get()
-            .expect("parse");
+        let rest = p.call(TemporaryBuffer::copy_from(&msg[cut..])).get().expect("parse");
         assert!(rest.is_some() && !p.failed(), "cut at {cut}");
         let req = p.get_parsed_request().expect("request");
         assert_eq!(req._method.as_str(), "POST", "cut at {cut}");

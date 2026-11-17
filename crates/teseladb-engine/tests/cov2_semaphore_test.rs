@@ -32,23 +32,11 @@ fn error_messages() {
     assert_eq!(BrokenSemaphore.to_string(), "Semaphore broken");
     assert_eq!(SemaphoreTimedOut.to_string(), "Semaphore timedout");
     assert_eq!(SemaphoreAborted.to_string(), "Semaphore aborted");
-    assert_eq!(
-        NamedSemaphoreTimedOut::new("s").to_string(),
-        "Semaphore timed out: s"
-    );
-    assert_eq!(
-        BrokenNamedSemaphore::new("s").to_string(),
-        "Semaphore broken: s"
-    );
-    assert_eq!(
-        NamedSemaphoreAborted::new("s").to_string(),
-        "Semaphore aborted: s"
-    );
+    assert_eq!(NamedSemaphoreTimedOut::new("s").to_string(), "Semaphore timed out: s");
+    assert_eq!(BrokenNamedSemaphore::new("s").to_string(), "Semaphore broken: s");
+    assert_eq!(NamedSemaphoreAborted::new("s").to_string(), "Semaphore aborted: s");
     // An empty message falls back to the static one.
-    assert_eq!(
-        NamedSemaphoreTimedOut::default().to_string(),
-        "Named semaphore timed out"
-    );
+    assert_eq!(NamedSemaphoreTimedOut::default().to_string(), "Named semaphore timed out");
 }
 
 engine_test_case!(a_deadline_in_the_past_times_out_at_once, {
@@ -58,12 +46,9 @@ engine_test_case!(a_deadline_in_the_past_times_out_at_once, {
         // SAFETY: the semaphore stays in place until the future is resolved.
         let f = unsafe { sem.wait_until(past, 1) };
         assert!(f.available(), "no wait is queued");
-        let e = f.get().err().expect("timed out");
+        let e = f.get().expect_err("timed out");
         assert!(e.downcast_ref::<NamedSemaphoreTimedOut>().is_some(), "{e}");
-        assert!(
-            e.downcast_ref::<SemaphoreTimedOut>().is_some(),
-            "a named timeout is a timeout"
-        );
+        assert!(e.downcast_ref::<SemaphoreTimedOut>().is_some(), "a named timeout is a timeout");
         assert_eq!(sem.waiters(), 0);
         Ok(())
     })
@@ -78,20 +63,14 @@ engine_test_case!(abortable_waits_ready_broken_and_already_aborted, {
         assert_eq!(sem.current(), 1, "served at once");
         src.as_mut().request_abort();
         // SAFETY: as above.
-        let e = unsafe { sem.wait_abortable(src.as_mut(), 2) }
-            .get()
-            .err()
-            .expect("aborted");
+        let e = unsafe { sem.wait_abortable(src.as_mut(), 2) }.get().expect_err("aborted");
         assert!(e.downcast_ref::<NamedSemaphoreAborted>().is_some(), "{e}");
         assert!(e.to_string().ends_with("(Semaphore aborted: ab)"), "{e}");
         assert_eq!(sem.waiters(), 0);
         sem.broken();
         let mut fresh = pin!(AbortSource::new());
         // SAFETY: as above.
-        let e = unsafe { sem.wait_abortable(fresh.as_mut(), 5) }
-            .get()
-            .err()
-            .expect("broken");
+        let e = unsafe { sem.wait_abortable(fresh.as_mut(), 5) }.get().expect_err("broken");
         assert!(e.downcast_ref::<BrokenNamedSemaphore>().is_some(), "{e}");
         Ok(())
     })
@@ -105,7 +84,7 @@ engine_test_case!(signal_and_consume_do_nothing_on_a_broken_semaphore, {
     sem.consume(2);
     assert_eq!(sem.available_units(), before);
     // SAFETY: the semaphore outlives the future, resolved right here.
-    let e = sem.wait(1).get().err().expect("broken");
+    let e = sem.wait(1).get().expect_err("broken");
     assert!(e.downcast_ref::<BrokenSemaphore>().is_some());
     make_ready_future(())
 });
@@ -119,15 +98,12 @@ engine_test_case!(move_assignment_takes_the_units_and_the_broken_state, {
     c.broken();
     a.assign_from(&mut c);
     // SAFETY: the semaphore outlives the future, resolved right here.
-    let e = a.wait(1).get().err().expect("the broken state moved");
+    let e = a.wait(1).get().expect_err("the broken state moved");
     assert!(e.downcast_ref::<BrokenSemaphore>().is_some());
     // SAFETY: as above.
     assert_eq!(c.available_units(), 0, "breaking emptied the counter");
     c.signal(1);
-    assert!(
-        c.wait(1).get().is_ok(),
-        "the moved-from semaphore is not broken"
-    );
+    assert!(c.wait(1).get().is_ok(), "the moved-from semaphore is not broken");
     make_ready_future(())
 });
 
@@ -166,8 +142,7 @@ engine_test_case!(with_semaphore_for_runs_or_times_out, {
             })
         }
         .get()
-        .err()
-        .expect("timed out");
+        .expect_err("timed out");
         assert!(e.downcast_ref::<SemaphoreTimedOut>().is_some(), "{e}");
         assert_eq!(ran.get(), 1, "the function did not run");
         Ok(())

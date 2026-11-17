@@ -133,7 +133,7 @@ engine_thread_test_case!(queued_sends_are_merged_into_one_segment, {
     s.expect_data();
     s.window = 0;
     s.peer_ack(s.sseq + 100);
-    for b in [b'a', b'b', b'c'] {
+    for b in *b"abc" {
         wait(s.conn.send(Packet::from_data(&[b; 100]))).expect("queued");
     }
     // The probe splits the first packet.
@@ -187,15 +187,30 @@ engine_thread_test_case!(a_window_below_the_data_in_flight_stops_sending, {
 });
 
 engine_thread_test_case!(a_large_peer_mss_is_cut_to_the_local_mtu, {
-    // An MSS above 2190 bytes (RFC 5681: an initial window of two segments). The congestion
-    // window caps each transmission, not the data in flight (as in the original's
-    // `can_send`), so all of it goes, in segments cut to the local MTU.
+    // An MSS above 2190 bytes (RFC 5681: an initial window of two segments, 6000 bytes, which
+    // the acknowledgment of the SYN grows by its one byte in slow start, as the original's
+    // `cwnd += min(acked_bytes, smss)`). The congestion window bounds the bytes in flight (as
+    // upstream's `can_send`), so the first flight stops at it; each acknowledgment lets more
+    // go, always in segments cut to the local MTU.
     let mut s = Session::passive(&mss_ws_options(3000, 0));
     wait(s.conn.send(Packet::from_data(&pattern(9000)))).expect("send");
-    let segs = data_within(&s, Duration::from_millis(100));
-    assert_eq!(segs.iter().map(|t| t.payload.len()).sum::<usize>(), 9000);
-    assert!(segs.iter().all(|t| t.payload.len() <= 1460), "{segs:?}");
-    s.peer_ack(s.sseq + 9000);
+    let first = data_within(&s, Duration::from_millis(100));
+    let n = first.iter().map(|t| t.payload.len()).sum::<usize>();
+    let lens: Vec<usize> = first.iter().map(|t| t.payload.len()).collect();
+    assert_eq!(n, 2 * 3000 + 1, "the first flight is the congestion window: {lens:?}");
+    assert!(lens.iter().all(|&l| l <= 1460), "{lens:?}");
+    let mut sent = n;
+    s.peer_ack(s.sseq + n as u32);
+    while sent < 9000 {
+        let more = data_within(&s, Duration::from_millis(100));
+        assert!(!more.is_empty(), "the acknowledged flight let nothing more go after {sent}");
+        let lens: Vec<usize> = more.iter().map(|t| t.payload.len()).collect();
+        assert!(lens.iter().all(|&l| l <= 1460), "{lens:?}");
+        let m = lens.iter().sum::<usize>();
+        sent += m;
+        s.peer_ack(s.sseq + m as u32);
+    }
+    assert_eq!(sent, 9000);
 });
 
 engine_thread_test_case!(a_full_receive_buffer_closes_the_window, {

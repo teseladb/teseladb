@@ -766,7 +766,8 @@ pub mod httpd {
     fn set_header_connection(resp: &mut Reply, keep_alive: bool) {
         let (version, value) = if keep_alive { (b"1.0", "Keep-Alive") } else { (b"1.1", "close") };
         if resp._version.as_bytes() == version {
-            resp._headers.insert(CaseInsensitiveKey(Sstring::from("Connection")), Sstring::from(value));
+            resp._headers
+                .insert(CaseInsensitiveKey(Sstring::from("Connection")), Sstring::from(value));
         }
     }
 

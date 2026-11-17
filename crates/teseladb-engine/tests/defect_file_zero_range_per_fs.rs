@@ -35,14 +35,9 @@ fn zero_range_errno(dir: &str) -> i32 {
     let name = format!("{dir}/defect_zero_range_probe_{}", std::process::id());
     let f = std::fs::File::create(&name).unwrap();
     // SAFETY: plain system call on a descriptor `f` owns.
-    let r = unsafe {
-        fallocate(f.as_raw_fd(), FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, 0, 4096)
-    };
-    let errno = if r == 0 {
-        0
-    } else {
-        std::io::Error::last_os_error().raw_os_error().unwrap()
-    };
+    let r =
+        unsafe { fallocate(f.as_raw_fd(), FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, 0, 4096) };
+    let errno = if r == 0 { 0 } else { std::io::Error::last_os_error().raw_os_error().unwrap() };
     drop(f);
     std::fs::remove_file(&name).unwrap();
     errno

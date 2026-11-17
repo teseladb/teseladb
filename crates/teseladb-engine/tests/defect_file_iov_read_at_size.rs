@@ -43,9 +43,8 @@ engine_thread_test_case!(a_gathered_read_across_the_size_returns_the_whole_file,
         std::ptr::write_bytes(data.get_write().add(2 * BLOCK), b'c', BLOCK);
     }
     // SAFETY: the buffer lives until the write resolves.
-    let n = unsafe { f.dma_write::<u8>(0, data.get(), 3 * BLOCK, std::ptr::null_mut()) }
-        .get()
-        .unwrap();
+    let n =
+        unsafe { f.dma_write::<u8>(0, data.get(), 3 * BLOCK, std::ptr::null_mut()) }.get().unwrap();
     assert_eq!(n, 3 * BLOCK);
 
     // One block, then three: the second buffer crosses the size after two blocks.

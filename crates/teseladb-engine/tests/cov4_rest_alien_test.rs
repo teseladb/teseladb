@@ -4,6 +4,8 @@
 //! result delivered.
 
 #![cfg(target_os = "linux")]
+// The test covers the deprecated default-instance entry points on purpose.
+#![allow(deprecated)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

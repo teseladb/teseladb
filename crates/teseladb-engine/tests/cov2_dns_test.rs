@@ -100,8 +100,7 @@ struct Server {
 impl Server {
     fn start() -> Server {
         let udp = UdpSocket::bind("127.0.0.1:0").expect("udp");
-        udp.set_read_timeout(Some(Duration::from_millis(5)))
-            .expect("timeout");
+        udp.set_read_timeout(Some(Duration::from_millis(5))).expect("timeout");
         let tcp = TcpListener::bind("127.0.0.1:0").expect("tcp");
         tcp.set_nonblocking(true).expect("nonblocking");
         let udp_port = udp.local_addr().expect("addr").port();
@@ -126,12 +125,7 @@ impl Server {
                 }
             }
         });
-        Server {
-            udp_port,
-            tcp_port,
-            stop,
-            thread: Some(thread),
-        }
+        Server { udp_port, tcp_port, stop, thread: Some(thread) }
     }
 
     fn options(&self) -> DnsResolverOptions {
@@ -156,57 +150,21 @@ impl Drop for Server {
 
 engine_thread_test_case!(shard_functions_and_address_helpers_use_the_hosts_file, {
     let lo = inet("127.0.0.1");
-    assert_eq!(
-        dns::resolve_name(&s("localhost"), Some(Family::INET))
-            .get()
-            .expect("found"),
-        lo
-    );
-    let h = dns::get_host_by_name(&s("localhost"), Some(Family::INET))
-        .get()
-        .expect("found");
+    assert_eq!(dns::resolve_name(&s("localhost"), Some(Family::INET)).get().expect("found"), lo);
+    let h = dns::get_host_by_name(&s("localhost"), Some(Family::INET)).get().expect("found");
     assert!(h.addr_list.contains(&lo));
-    assert_eq!(
-        dns::resolve_addr(&lo).get().expect("reverse").as_str(),
-        "localhost"
-    );
+    assert_eq!(dns::resolve_addr(&lo).get().expect("reverse").as_str(), "localhost");
     let h = dns::get_host_by_addr(&lo).get().expect("reverse");
     assert!(h.names.iter().any(|n| n.as_str() == "localhost"));
-    assert_eq!(
-        InetAddress::find(&s("localhost"))
-            .get()
-            .expect("found")
-            .in_family(),
-        Family::INET
-    );
-    assert_eq!(
-        InetAddress::find_family(&s("localhost"), Family::INET)
-            .get()
-            .expect("found"),
-        lo
-    );
-    assert!(
-        InetAddress::find_all(&s("localhost"))
-            .get()
-            .expect("found")
-            .contains(&lo)
-    );
-    let all = InetAddress::find_all_family(&s("localhost"), Family::INET)
-        .get()
-        .expect("found");
-    assert_eq!(all, vec![lo.clone()]);
+    assert_eq!(InetAddress::find(&s("localhost")).get().expect("found").in_family(), Family::INET);
+    assert_eq!(InetAddress::find_family(&s("localhost"), Family::INET).get().expect("found"), lo);
+    assert!(InetAddress::find_all(&s("localhost")).get().expect("found").contains(&lo));
+    let all = InetAddress::find_all_family(&s("localhost"), Family::INET).get().expect("found");
+    assert_eq!(all, vec![lo]);
     assert_eq!(lo.hostname().get().expect("name").as_str(), "localhost");
-    assert!(
-        lo.aliases()
-            .get()
-            .expect("names")
-            .iter()
-            .any(|n| n.as_str() == "localhost")
-    );
+    assert!(lo.aliases().get().expect("names").iter().any(|n| n.as_str() == "localhost"));
     // A numeric name is its own answer, with no query.
-    let h = dns::get_host_by_name(&s("10.20.30.40"), None)
-        .get()
-        .expect("numeric");
+    let h = dns::get_host_by_name(&s("10.20.30.40"), None).get().expect("numeric");
     assert_eq!(h.addr_list, vec![inet("10.20.30.40")]);
     assert_eq!(h.names[0].as_str(), "10.20.30.40");
 });
@@ -214,15 +172,9 @@ engine_thread_test_case!(shard_functions_and_address_helpers_use_the_hosts_file,
 engine_thread_test_case!(names_with_a_nul_and_names_without_addresses, {
     let server = Server::start();
     let mut r = DnsResolver::with_options(&server.options()).expect("a resolver");
-    let e = r
-        .get_host_by_name(&s("bad\0name"), Some(Family::INET))
-        .get()
-        .expect_err("NUL");
+    let e = r.get_host_by_name(&s("bad\0name"), Some(Family::INET)).get().expect_err("NUL");
     assert!(e.downcast_ref::<InvalidArgument>().is_some(), "{e}");
-    let e = r
-        .resolve_name(&s("noaddr.test"), Some(Family::INET))
-        .get()
-        .expect_err("no data");
+    let e = r.resolve_name(&s("noaddr.test"), Some(Family::INET)).get().expect_err("no data");
     assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
     r.close().get().expect("closed");
 });
@@ -232,10 +184,7 @@ engine_thread_test_case!(a_tcp_server_that_drops_the_connection_fails_the_lookup
     let mut opts = server.options();
     opts.use_tcp_query = Some(true);
     let mut r = DnsResolver::with_options(&opts).expect("a resolver");
-    let e = r
-        .get_host_by_name(&s("noaddr.test"), Some(Family::INET))
-        .get()
-        .expect_err("dropped");
+    let e = r.get_host_by_name(&s("noaddr.test"), Some(Family::INET)).get().expect_err("dropped");
     assert!(e.downcast_ref::<DnsError>().is_some(), "{e}");
     r.close().get().expect("closed");
 });
@@ -246,10 +195,7 @@ engine_thread_test_case!(an_ipv6_address_resolves_back_to_its_name, {
     let v6 = inet("2001:db8::1");
     let h = r.get_host_by_addr(&v6).get().expect("reverse");
     assert_eq!(h.names[0].as_str(), "v6host.test");
-    assert_eq!(h.addr_list, vec![v6.clone()], "an AF_INET6 host entry");
-    assert_eq!(
-        r.resolve_addr(&v6).get().expect("reverse").as_str(),
-        "v6host.test"
-    );
+    assert_eq!(h.addr_list, vec![v6], "an AF_INET6 host entry");
+    assert_eq!(r.resolve_addr(&v6).get().expect("reverse").as_str(), "v6host.test");
     r.close().get().expect("closed");
 });

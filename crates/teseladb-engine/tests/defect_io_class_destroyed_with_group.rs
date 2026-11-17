@@ -13,7 +13,9 @@ use teseladb::engine::core::file::open_file_dma;
 use teseladb::engine::core::file_types::OpenFlags;
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::metrics::impl_fns::get_value_map;
-use teseladb::engine::core::reactor::{create_scheduling_group_with_shares, destroy_scheduling_group};
+use teseladb::engine::core::reactor::{
+    create_scheduling_group_with_shares, destroy_scheduling_group,
+};
 use teseladb::engine::core::scheduling::SchedulingGroup;
 use teseladb::engine::core::scheduling::internal::scheduling_group_index;
 use teseladb::engine::core::sstring::Sstring;
@@ -68,8 +70,14 @@ engine_test_case!(test_io_class_is_destroyed_with_its_group, {
         write_in(b, path)?;
         let classes = io_classes();
         destroy_scheduling_group(b).get()?;
-        assert!(classes.contains("upstream_io_b"), "the new group's requests are not its own: {classes:?}");
-        assert!(!classes.contains("upstream_io_a"), "the destroyed group's class is still there: {classes:?}");
+        assert!(
+            classes.contains("upstream_io_b"),
+            "the new group's requests are not its own: {classes:?}"
+        );
+        assert!(
+            !classes.contains("upstream_io_a"),
+            "the destroyed group's class is still there: {classes:?}"
+        );
         Ok(())
     })
 });

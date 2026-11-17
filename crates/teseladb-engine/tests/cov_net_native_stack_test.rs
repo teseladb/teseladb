@@ -283,22 +283,22 @@ engine_thread_test_case!(native_stack_options_and_registration, {
     std::mem::forget(dhcp);
 });
 
+#[cfg(not(feature = "dpdk"))]
 engine_thread_test_case!(device_creation_needs_a_supported_driver, {
-    // The configuration format names devices only DPDK can drive.
+    // The configuration format names devices only DPDK can drive: without DPDK the creation
+    // fails with that reason.
     let config = "{eth0: {pci-address: 0000:06:00.0, ip: 192.168.100.10, gateway: 192.168.100.1, netmask: 255.255.255.0}}";
     let mut o = NativeStackOptions::new();
     o.net_config.set_value(config.to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
     let e = create_native_net_device(o).expect_err("no device");
-    assert_eq!(message(&e), "no network device");
+    assert_eq!(message(&e), "only DPDK supports new configuration format");
     // The same through the stack's factory path on this shard.
     if this_shard_id() == 0 {
         assert!(wait(NativeNetworkStack::create(o)).is_err());
     }
 
-    // Two interfaces, read from a file. As in the reference parser, at least one interface must
-    // have DHCP off and all three addresses: a configuration where every interface uses DHCP
-    // is refused ("when dhcp is off then all of ip, gateway, netmask has to be specified").
+    // Two valid interfaces, read from a file: only one interface is supported.
     let path = std::env::temp_dir().join(format!("cov-net-config-{}.yaml", std::process::id()));
     std::fs::write(
         &path,
@@ -309,7 +309,10 @@ engine_thread_test_case!(device_creation_needs_a_supported_driver, {
     let mut o = NativeStackOptions::new();
     o.net_config_file.set_value(path.display().to_string());
     let o: &'static NativeStackOptions = Box::leak(Box::new(o));
-    assert_eq!(message(&create_native_net_device(o).expect_err("no device")), "no network device");
+    assert_eq!(
+        message(&create_native_net_device(o).expect_err("no device")),
+        "only one network interface is supported"
+    );
     let _ = std::fs::remove_file(&path);
 
     // A configuration that does not parse.

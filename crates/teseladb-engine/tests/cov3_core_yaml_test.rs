@@ -20,10 +20,7 @@ fn load(text: &str) -> Node {
 }
 
 fn error(text: &str) -> String {
-    yaml::load(text)
-        .err()
-        .unwrap_or_else(|| panic!("{text:?} parsed"))
-        .to_string()
+    yaml::load(text).err().unwrap_or_else(|| panic!("{text:?} parsed")).to_string()
 }
 
 #[test]
@@ -60,10 +57,7 @@ fn flow_collections_take_tabs_and_newlines() {
 #[test]
 fn flow_sequences_hold_single_pair_mappings() {
     assert_eq!(load("[a: b]"), Node::Sequence(vec![map(&[("a", s("b"))])]));
-    assert_eq!(
-        load("[: b, c]"),
-        Node::Sequence(vec![map(&[("", s("b"))]), s("c")])
-    );
+    assert_eq!(load("[: b, c]"), Node::Sequence(vec![map(&[("", s("b"))]), s("c")]));
 }
 
 #[test]
@@ -101,19 +95,12 @@ fn dash_lines_in_every_form() {
 
 #[test]
 fn malformed_flow_collections() {
-    assert!(
-        error("{a: 1,").contains("end of map flow not found"),
-        "{}",
-        error("{a: 1,")
-    );
+    assert!(error("{a: 1,").contains("end of map flow not found"), "{}", error("{a: 1,"));
     assert!(error("{a: 1 b: 2}").contains("end of map flow not found"));
     assert!(error("[a,").contains("end of sequence flow not found"));
     assert!(error("[\"a\" b]").contains("end of sequence flow not found"));
     // A plain item may hold blanks, and a colon after it makes a single-pair mapping.
-    assert_eq!(
-        load("[a b: c d]"),
-        Node::Sequence(vec![map(&[("a b", s("c d"))])])
-    );
+    assert_eq!(load("[a b: c d]"), Node::Sequence(vec![map(&[("a b", s("c d"))])]));
     assert!(error("{[a]: b}").contains("illegal map value"));
     assert!(error("[[a]: b]").contains("illegal map value"));
     assert!(error("[a[b]]").contains("unknown token"));
@@ -141,10 +128,7 @@ fn malformed_blocks() {
     assert!(error("x\n  y").contains("illegal map value"));
     // A line of a mapping that is not a key.
     let e = error("a: 1\nb");
-    assert!(
-        e.contains("end of map not found") && e.contains("line 2"),
-        "{e}"
-    );
+    assert!(e.contains("end of map not found") && e.contains("line 2"), "{e}");
     // A mapping followed by a dash line at its indentation: the mapping ends there and the
     // document has text left.
     assert!(error("a: 1\n- b").contains("end of map not found"));

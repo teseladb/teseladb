@@ -46,45 +46,18 @@ fn cases() -> Vec<(&'static str, Vec<&'static str>, &'static [i32])> {
             ],
             OK,
         ),
-        (
-            "warn_level",
-            vec![
-                "--default-log-level=warn",
-                "--logger-stdout-timestamps=real",
-            ],
-            OK,
-        ),
-        (
-            "unknown_log_level",
-            vec!["--default-log-level=loud"],
-            INVALID,
-        ),
-        (
-            "unknown_timestamp_style",
-            vec!["--logger-stdout-timestamps=sundial"],
-            INVALID,
-        ),
-        (
-            "unknown_ostream_type",
-            vec!["--logger-ostream-type=printer"],
-            INVALID,
-        ),
+        ("warn_level", vec!["--default-log-level=warn", "--logger-stdout-timestamps=real"], OK),
+        ("unknown_log_level", vec!["--default-log-level=loud"], INVALID),
+        ("unknown_timestamp_style", vec!["--logger-stdout-timestamps=sundial"], INVALID),
+        ("unknown_ostream_type", vec!["--logger-ostream-type=printer"], INVALID),
         (
             "unknown_diagnostics_kind",
             vec!["--dump-memory-diagnostics-on-alloc-failure-kind=some"],
             INVALID,
         ),
         ("malformed_cpuset", vec!["--cpuset=zero-one"], INVALID),
-        (
-            "unknown_reactor_backend",
-            vec!["--reactor-backend=carrier-pigeon"],
-            INVALID,
-        ),
-        (
-            "missing_hugepages_directory",
-            vec!["--hugepages=/nonexistent/cov3"],
-            &[1, 134],
-        ),
+        ("unknown_reactor_backend", vec!["--reactor-backend=carrier-pigeon"], INVALID),
+        ("missing_hugepages_directory", vec!["--hugepages=/nonexistent/cov3"], &[1, 134]),
         ("help_loggers", vec!["--help-loggers"], OK),
     ]
 }
@@ -111,10 +84,7 @@ fn run_all() -> i32 {
     let mut failures = Vec::new();
     for (name, _, codes) in cases() {
         let start = Instant::now();
-        let mut child = Command::new(&exe)
-            .env(CASE_VAR, name)
-            .spawn()
-            .expect("the case's process");
+        let mut child = Command::new(&exe).env(CASE_VAR, name).spawn().expect("the case's process");
         let status = loop {
             if let Some(status) = child.try_wait().expect("the case's status") {
                 break Some(status);
@@ -134,19 +104,9 @@ fn run_all() -> i32 {
     }
     // The engine's own loggers are listed before anything logged (the original's are
     // registered before main).
-    let out = Command::new(&exe)
-        .env(CASE_VAR, "help_loggers")
-        .output()
-        .expect("help");
+    let out = Command::new(&exe).env(CASE_VAR, "help_loggers").output().expect("help");
     let listed = String::from_utf8_lossy(&out.stdout).into_owned();
-    for name in [
-        "engine",
-        "engine_memory",
-        "io",
-        "scollectd",
-        "httpd",
-        "http",
-    ] {
+    for name in ["engine", "engine_memory", "io", "scollectd", "httpd", "http"] {
         if !listed.lines().any(|l| l.trim() == name) {
             eprintln!("--help-loggers does not list {name}:\n{listed}");
             failures.push("help_loggers lists the engine's loggers");

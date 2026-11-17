@@ -43,11 +43,12 @@ fn buf_input(s: &[u8]) -> InputStream<u8> {
     })))
 }
 
+/// The decoded bytes of a chunked body, its extensions and its trailing headers.
+type Decoded = (Vec<u8>, HashMap<Sstring, Sstring>, HashMap<Sstring, Sstring>);
+
 /// Reads the chunked body `body` to its end: the decoded bytes, the extensions and the
 /// trailing headers, or the error.
-fn decode(
-    body: &[u8],
-) -> Result<(Vec<u8>, HashMap<Sstring, Sstring>, HashMap<Sstring, Sstring>), ExceptionPtr> {
+fn decode(body: &[u8]) -> Result<Decoded, ExceptionPtr> {
     let targets = ChunkTargets::new();
     let mut inp = buf_input(body);
     let mut ext: HashMap<Sstring, Sstring> = HashMap::new();
@@ -113,7 +114,6 @@ teseladb::engine_test_case!(content_length_bodies_can_be_skipped, {
         // Nothing is left of the body: a skip past it skips nothing.
         assert!(src.skip(100).get()?.empty());
         src.close().get()?;
-        drop(src);
         assert_eq!(consumed, 10);
         let mut inp2 = buf_input(b"abc");
         // SAFETY: as above.

@@ -622,23 +622,21 @@ where
             crate::engine::core::future::futurize_invoke(func)
         }))
         .unwrap_or_else(|e| make_exception_future(ExceptionPtr::from_panic(e)));
-        let _ = invoked.then_wrapped(
-            move |f: Future<<R as Futurize>::Output>| {
-                // SAFETY: the work item stays alive until the origin shard deletes it after
-                // complete(); the target shard alone touches it until respond() hands it back.
-                unsafe {
-                    match f.get() {
-                        Ok(v) => (*this)._result = Some(v),
-                        Err(ex) => (*this)._ex = Some(ex),
-                    }
-                    // The queue outlives every work item in flight; this is its receiving side.
-                    SmpMessageQueue::respond(
-                        (*this)._queue,
-                        WorkItemPtr::from_item(std::ptr::NonNull::new_unchecked(this)),
-                    );
+        let _ = invoked.then_wrapped(move |f: Future<<R as Futurize>::Output>| {
+            // SAFETY: the work item stays alive until the origin shard deletes it after
+            // complete(); the target shard alone touches it until respond() hands it back.
+            unsafe {
+                match f.get() {
+                    Ok(v) => (*this)._result = Some(v),
+                    Err(ex) => (*this)._ex = Some(ex),
                 }
-            },
-        );
+                // The queue outlives every work item in flight; this is its receiving side.
+                SmpMessageQueue::respond(
+                    (*this)._queue,
+                    WorkItemPtr::from_item(std::ptr::NonNull::new_unchecked(this)),
+                );
+            }
+        });
         // The item is not freed here: its creator frees it on the origin shard.
     }
 }

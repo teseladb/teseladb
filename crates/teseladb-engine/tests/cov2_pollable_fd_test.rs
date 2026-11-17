@@ -31,10 +31,7 @@ fn pair() -> (PollableFd, PollableFd) {
 }
 
 fn iov(buf: &mut [u8]) -> Iovec {
-    Iovec {
-        iov_base: buf.as_mut_ptr().cast::<c_void>(),
-        iov_len: buf.len(),
-    }
+    Iovec { iov_base: buf.as_mut_ptr().cast::<c_void>(), iov_len: buf.len() }
 }
 
 fn send(fd: &mut PollableFd, data: &[u8]) -> Result<(), ExceptionPtr> {

@@ -22,5 +22,9 @@ fn retrieving_missing_auxiliary_data_is_an_error() {
 
     let e = info.retrieve_auxiliary::<i32>(&Sstring::from("never_attached")).expect_err("missing");
     let rpc_error = e.downcast_ref::<Error>().expect("an rpc error");
-    assert!(rpc_error.what().contains("missing auxiliary data 'never_attached'"), "{}", rpc_error.what());
+    assert!(
+        rpc_error.what().contains("missing auxiliary data 'never_attached'"),
+        "{}",
+        rpc_error.what()
+    );
 }

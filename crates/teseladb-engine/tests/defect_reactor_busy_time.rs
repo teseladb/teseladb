@@ -36,12 +36,7 @@ struct BusyTimeSampler {
 
 impl BusyTimeSampler {
     fn new() -> Self {
-        Self {
-            last: busy_time(),
-            samples: 0,
-            decreases: 0,
-            max_decrease: SchedDuration::default(),
-        }
+        Self { last: busy_time(), samples: 0, decreases: 0, max_decrease: SchedDuration::default() }
     }
 
     fn sample(&mut self) {

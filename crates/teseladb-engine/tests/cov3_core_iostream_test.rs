@@ -60,10 +60,7 @@ fn recorder() -> (DataSink, Rc<RefCell<Vec<u8>>>) {
 
 engine_thread_test_case!(sinks_take_vectors_of_buffers_by_default, {
     let (mut sink, out) = recorder();
-    let bufs = vec![
-        TemporaryBuffer::copy_of("ab"),
-        TemporaryBuffer::copy_of("cd"),
-    ];
+    let bufs = vec![TemporaryBuffer::copy_of("ab"), TemporaryBuffer::copy_of("cd")];
     sink.put_vec(bufs).get().unwrap();
     assert_eq!(&*out.borrow(), b"abcd");
     Closeable::close(&mut sink).get().unwrap();
@@ -92,19 +89,12 @@ engine_thread_test_case!(detaching_streams, {
     let mut os = OutputStream::<u8>::new(sink);
     let mut sink = os.detach().unwrap();
     drop(os);
-    sink.put_vec(vec![TemporaryBuffer::copy_of("x")])
-        .get()
-        .unwrap();
+    sink.put_vec(vec![TemporaryBuffer::copy_of("x")]).get().unwrap();
     assert_eq!(&*out.borrow(), b"x");
     let mut os = OutputStream::<u8>::new(sink);
     os.write(b"abc").get().unwrap();
     let e = os.detach().err().expect("a used stream");
-    assert!(
-        e.get()
-            .unwrap()
-            .what()
-            .contains("detach() called on a used output_stream")
-    );
+    assert!(e.get().unwrap().what().contains("detach() called on a used output_stream"));
     // The refused stream is still the caller's: its buffered bytes are flushed on close (as
     // after the original's throwing `std::move(os).detach()`), and dropping it is fine.
     os.close().get().unwrap();
@@ -117,19 +107,13 @@ engine_thread_test_case!(detaching_streams, {
     let first = src.get().get().unwrap();
     assert_eq!(first.as_slice(), b"in");
     Closeable::close(&mut src).get().unwrap();
-    let mut is = InputStream::<u8>::new(DataSource::new(Box::new(OneBuffer(Some(
-        "more".to_string(),
-    )))));
+    let mut is =
+        InputStream::<u8>::new(DataSource::new(Box::new(OneBuffer(Some("more".to_string())))));
     // A partial read leaves bytes in the stream's buffer.
     let two = is.read_exactly(2).get().unwrap();
     assert_eq!(two.as_slice(), b"mo");
     let e = is.detach().err().expect("a used stream");
-    assert!(
-        e.get()
-            .unwrap()
-            .what()
-            .contains("detach() called on a used input_stream")
-    );
+    assert!(e.get().unwrap().what().contains("detach() called on a used input_stream"));
 });
 
 engine_thread_test_case!(input_streams_close_through_closeable, {

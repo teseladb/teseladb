@@ -15,11 +15,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use teseladb::engine::core::future::ExceptionPtr;
+use teseladb::engine::core::iostream::OutputStream;
 use teseladb::engine::core::reactor::{listen, make_socket};
 use teseladb::engine::core::thread::async_ as thread_async;
 use teseladb::engine::core::timer::{Clock, SteadyClockType};
 use teseladb::engine::core::with_timeout::with_timeout;
-use teseladb::engine::core::iostream::OutputStream;
 use teseladb::engine::net::api::{ConnectedSocket, ServerSocket};
 use teseladb::engine::net::socket_defs::{SocketAddress, Transport};
 use teseladb::engine::net::unix_address::UnixDomainAddr;

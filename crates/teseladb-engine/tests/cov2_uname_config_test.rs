@@ -38,14 +38,9 @@ fn malformed_releases_read_as_zero() {
 
 #[test]
 fn releases_print_as_they_were_written() {
-    for s in [
-        "5.4",
-        "5.4.0",
-        "5.4.0.1",
-        "3.10.0-957.el7",
-        "3.10.0-957.5.1.el7.x86_64",
-        "6.1.0-.custom",
-    ] {
+    for s in
+        ["5.4", "5.4.0", "5.4.0.1", "3.10.0-957.el7", "3.10.0-957.5.1.el7.x86_64", "6.1.0-.custom"]
+    {
         assert_eq!(parse_uname(s).to_string(), s);
     }
     let u = parse_uname("3.10.0-957.5.1.el7.x86_64");
@@ -59,9 +54,7 @@ fn parse(
 ) -> Result<std::collections::HashMap<String, teseladb::engine::net::config::DeviceConfig>, String>
 {
     parse_config(&mut Cursor::new(s.as_bytes().to_vec())).map_err(|e| {
-        e.downcast_ref::<ConfigException>()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| e.to_string())
+        e.downcast_ref::<ConfigException>().map(|c| c.to_string()).unwrap_or_else(|| e.to_string())
     })
 }
 
@@ -91,59 +84,38 @@ fn hardware_flags_ring_sizes_and_boolean_spellings() {
 #[test]
 fn bad_values_and_bad_documents_are_refused() {
     let base = "eth0:\n  ip: 1.1.1.1\n  gateway: 1.1.1.2\n  netmask: 255.0.0.0\n";
-    for bad in [
-        "  lro: maybe\n",
-        "  ring-size: -1\n",
-        "  ring-size: 0xzz\n",
-        "  tso: 1\n",
-    ] {
+    for bad in ["  lro: maybe\n", "  ring-size: -1\n", "  ring-size: 0xzz\n", "  tso: 1\n"] {
         assert_eq!(
             parse(&format!("{base}{bad}")).err().as_deref(),
             Some("bad conversion"),
             "{bad:?}"
         );
     }
-    assert!(
-        parse("  indented: first\n")
-            .err()
-            .unwrap()
-            .contains("unexpected indentation")
-    );
-    assert!(
-        parse("eth0:\n  no-colon-here\n")
-            .err()
-            .unwrap()
-            .contains("invalid mapping entry")
-    );
+    assert!(parse("  indented: first\n").err().unwrap().contains("unexpected indentation"));
+    assert!(parse("eth0:\n  no-colon-here\n").err().unwrap().contains("invalid mapping entry"));
     assert!(parse("eth0: {ip 1.1.1.1}\n").is_err());
-    assert!(
-        parse("{eth0: {dhcp: true}").is_err(),
-        "an unterminated flow document"
-    );
+    assert!(parse("{eth0: {dhcp: true}").is_err(), "an unterminated flow document");
     let e = ConfigException::new("the message");
     assert_eq!(e.to_string(), "the message");
 }
 
 #[test]
-fn consistency_checks_hold_over_all_devices() {
-    // Like the original, the static-address check only fails when no device has dhcp off with
-    // all three addresses; a document where every device uses dhcp fails it too.
-    assert_eq!(
-        parse("eth0:\n  dhcp: true\n").err().as_deref(),
-        Some("when dhcp is off then all of ip, gateway, netmask has to be specified")
-    );
+fn consistency_checks_hold_for_each_device() {
+    // Each device is checked on its own: a device on dhcp alone is valid, and so is a mix of
+    // a complete static device and a dhcp device.
+    assert_eq!(parse("eth0:\n  dhcp: true\n").map(|m| m.len()), Ok(1));
     let ok =
         "eth0:\n  ip: 1.1.1.1\n  gateway: 1.1.1.2\n  netmask: 255.0.0.0\neth1:\n  dhcp: true\n";
-    assert!(
-        parse(ok).is_ok(),
-        "one complete static device satisfies the check"
+    assert!(parse(ok).is_ok(), "a complete static device and a dhcp device");
+    // A static device missing an address fails, even next to a complete one.
+    let partial = "eth0:\n  ip: 1.1.1.1\n  gateway: 1.1.1.2\n  netmask: 255.0.0.0\n\
+                   eth1:\n  ip: 2.2.2.2\n  gateway: 2.2.2.1\n";
+    assert_eq!(
+        parse(partial).err().as_deref(),
+        Some("when dhcp is off then all of ip, gateway, netmask has to be specified")
     );
-    // "dhcp and ip" fails only when every device has dhcp on and all addresses; with one
-    // complete static device the first check passes and this one decides.
+    // One device mixing dhcp and addresses fails, even next to a complete static one.
     let both = "eth0:\n  dhcp: false\n  ip: 1.1.1.1\n  gateway: 1.1.1.2\n  netmask: 255.0.0.0\n\
                 eth1:\n  dhcp: true\n  ip: 2.2.2.2\n  gateway: 2.2.2.1\n  netmask: 255.0.0.0\n";
-    assert!(
-        parse(both).is_ok(),
-        "not every device mixes dhcp and addresses"
-    );
+    assert_eq!(parse(both).err().as_deref(), Some("dhcp and ip cannot be used together"));
 }

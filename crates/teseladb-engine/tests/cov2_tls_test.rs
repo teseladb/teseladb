@@ -56,20 +56,15 @@ fn reuse() -> ListenOptions {
 /// A TLS listener on 127.0.0.1:`port` serving test.crt.
 fn server(port: u16) -> Result<(ServerSocket, SocketAddress), ExceptionPtr> {
     let mut b = tls::CredentialsBuilder::default();
-    b.set_x509_key_file(&cf("test.crt"), &cf("test.key"), X509CrtFormat::PEM)
-        .get()?;
+    b.set_x509_key_file(&cf("test.crt"), &cf("test.key"), X509CrtFormat::PEM).get()?;
     let addr = make_ipv4_address_ip_port(0x7f00_0001, port);
-    Ok((
-        tls::listen(b.build_server_credentials()?, addr, reuse())?,
-        addr,
-    ))
+    Ok((tls::listen(b.build_server_credentials()?, addr, reuse())?, addr))
 }
 
 /// Client credentials that trust the test CA.
 fn client_creds() -> Result<SharedPtr<CertificateCredentials>, ExceptionPtr> {
     let mut b = tls::CredentialsBuilder::default();
-    b.set_x509_trust_file(&cf("catest.pem"), X509CrtFormat::PEM)
-        .get()?;
+    b.set_x509_trust_file(&cf("catest.pem"), X509CrtFormat::PEM).get()?;
     b.build_certificate_credentials()
 }
 
@@ -110,10 +105,7 @@ fn failed_handshake(
     let mut s = accepted.get()?.connection;
     let mut in_ = s.input(Default::default());
     let server_read = in_.read();
-    let e = tls::get_dn_information(&mut c)
-        .get()
-        .err()
-        .expect("the handshake fails");
+    let e = tls::get_dn_information(&mut c).get().expect_err("the handshake fails");
     drop(c);
     let _ = server_read.get();
     Ok(e)
@@ -160,24 +152,12 @@ engine_test_case!(named_and_local_connect_helpers_verify_the_name, {
             &mut ss,
             tls::connect_local_with_name(client_creds()?, addr, local, NAME.into()),
         )?;
-        let opts = TlsOptions {
-            server_name: NAME.into(),
-            ..Default::default()
-        };
-        serve_one(
-            &mut ss,
-            tls::connect_local(client_creds()?, addr, local, opts),
-        )?;
+        let opts = TlsOptions { server_name: NAME.into(), ..Default::default() };
+        serve_one(&mut ss, tls::connect_local(client_creds()?, addr, local, opts))?;
         let plain = connect_from(addr, SocketAddress::default(), Transport::TCP).get()?;
-        serve_one(
-            &mut ss,
-            tls::wrap_client_with_name(client_creds()?, plain, NAME.into()),
-        )?;
+        serve_one(&mut ss, tls::wrap_client_with_name(client_creds()?, plain, NAME.into()))?;
         // A wrong name fails the verification.
-        let opts = TlsOptions {
-            server_name: "wrong.example.org".into(),
-            ..Default::default()
-        };
+        let opts = TlsOptions { server_name: "wrong.example.org".into(), ..Default::default() };
         let e = failed_handshake(&mut ss, tls::connect(client_creds()?, addr, opts))?;
         assert!(e.downcast_ref::<VerificationError>().is_some(), "{e}");
         ss.abort_accept();
@@ -192,18 +172,14 @@ engine_test_case!(a_tls_socket_connects_once_with_its_credentials, {
         sk.set_reuseaddr(true)?;
         assert!(sk.get_reuseaddr()?);
         let accepted = ss.accept();
-        let mut c = sk
-            .connect(addr, SocketAddress::default(), Transport::TCP)
-            .get()?;
+        let mut c = sk.connect(addr, SocketAddress::default(), Transport::TCP).get()?;
         let mut s = accepted.get()?.connection;
         exchange(&mut c, &mut s, "socket")?;
         sk.shutdown()?;
         // The credentials went to the first connection: a second connect has none.
         let mut again = tls::socket(client_creds()?, TlsOptions::default());
         let accepted = ss.accept();
-        let _first = again
-            .connect(addr, SocketAddress::default(), Transport::TCP)
-            .get()?;
+        let _first = again.connect(addr, SocketAddress::default(), Transport::TCP).get()?;
         let _ = accepted.get()?;
         let accepted = ss.accept();
         let e = again
@@ -211,10 +187,7 @@ engine_test_case!(a_tls_socket_connects_once_with_its_credentials, {
             .get()
             .err()
             .expect("no credentials left");
-        assert!(
-            e.to_string().contains("not connected") || e.to_string().contains("107"),
-            "{e}"
-        );
+        assert!(e.to_string().contains("not connected") || e.to_string().contains("107"), "{e}");
         let _ = accepted.get();
         ss.abort_accept();
         Ok(())
@@ -223,11 +196,7 @@ engine_test_case!(a_tls_socket_connects_once_with_its_credentials, {
 
 /// Runs `openssl args...` in `dir`.
 fn openssl(dir: &Path, args: &[&str]) {
-    let status = Command::new("openssl")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .expect("openssl");
+    let status = Command::new("openssl").args(args).current_dir(dir).status().expect("openssl");
     assert!(status.success(), "openssl {args:?}: {status}");
 }
 
@@ -261,40 +230,24 @@ engine_test_case!(a_pkcs12_bundle_serves_connections, {
         let p12s = Sstring::from(p12.to_str().unwrap());
         // Through the builder.
         let mut b = tls::CredentialsBuilder::default();
-        b.set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"cov2pw".into())
-            .get()?;
+        b.set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"cov2pw".into()).get()?;
         let addr = make_ipv4_address_ip_port(0x7f00_0001, 14814);
         let mut ss = tls::listen(b.build_server_credentials()?, addr, reuse())?;
-        serve_one(
-            &mut ss,
-            tls::connect_with_name(client_creds()?, addr, NAME.into()),
-        )?;
+        serve_one(&mut ss, tls::connect_with_name(client_creds()?, addr, NAME.into()))?;
         ss.abort_accept();
         drop(ss);
         // Directly on server credentials.
         let mut direct = tls::ServerCredentials::new()?;
-        direct
-            .set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"cov2pw".into())
-            .get()?;
+        direct.set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"cov2pw".into()).get()?;
         let addr2 = make_ipv4_address_ip_port(0x7f00_0001, 14815);
-        let mut ss2 = tls::listen(
-            teseladb::engine::core::shared_ptr::make_shared(direct),
-            addr2,
-            reuse(),
-        )?;
-        serve_one(
-            &mut ss2,
-            tls::connect_with_name(client_creds()?, addr2, NAME.into()),
-        )?;
+        let mut ss2 =
+            tls::listen(teseladb::engine::core::shared_ptr::make_shared(direct), addr2, reuse())?;
+        serve_one(&mut ss2, tls::connect_with_name(client_creds()?, addr2, NAME.into()))?;
         ss2.abort_accept();
         // A wrong password is refused.
         let mut bad = tls::CredentialsBuilder::default();
-        bad.set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"nope".into())
-            .get()?;
-        assert!(
-            bad.build_server_credentials().is_err(),
-            "the bundle does not open"
-        );
+        bad.set_simple_pkcs12_file(&p12s, X509CrtFormat::DER, &"nope".into()).get()?;
+        assert!(bad.build_server_credentials().is_err(), "the bundle does not open");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     })
@@ -311,16 +264,10 @@ engine_test_case!(a_revocation_list_rejects_the_revoked_server, {
              default_md = sha256\ndefault_crl_days = 30\n",
         )
         .unwrap();
-        let (key, ca, crt) = (
-            certfile("catest.key"),
-            certfile("catest.pem"),
-            certfile("test.crt"),
-        );
+        let (key, ca, crt) = (certfile("catest.key"), certfile("catest.pem"), certfile("test.crt"));
         openssl(
             &dir,
-            &[
-                "ca", "-config", "ca.cnf", "-keyfile", &key, "-cert", &ca, "-revoke", &crt,
-            ],
+            &["ca", "-config", "ca.cnf", "-keyfile", &key, "-cert", &ca, "-revoke", &crt],
         );
         openssl(
             &dir,
@@ -333,19 +280,12 @@ engine_test_case!(a_revocation_list_rejects_the_revoked_server, {
         let (mut ss, addr) = server(14816)?;
 
         // Without the list the server is accepted.
-        serve_one(
-            &mut ss,
-            tls::connect_with_name(client_creds()?, addr, NAME.into()),
-        )?;
+        serve_one(&mut ss, tls::connect_with_name(client_creds()?, addr, NAME.into()))?;
 
         let mut b = tls::CredentialsBuilder::default();
-        b.set_x509_trust_file(&cf("catest.pem"), X509CrtFormat::PEM)
-            .get()?;
+        b.set_x509_trust_file(&cf("catest.pem"), X509CrtFormat::PEM).get()?;
         b.set_x509_crl_file(&crl, X509CrtFormat::PEM).get()?;
-        let opts = TlsOptions {
-            server_name: NAME.into(),
-            ..Default::default()
-        };
+        let opts = TlsOptions { server_name: NAME.into(), ..Default::default() };
         let e = failed_handshake(
             &mut ss,
             tls::connect(b.build_certificate_credentials()?, addr, opts),
@@ -365,21 +305,12 @@ engine_test_case!(session_helpers_refuse_plain_and_empty_sockets, {
         let accepted = ss.accept();
         let mut plain = connect_from(addr, SocketAddress::default(), Transport::TCP).get()?;
         let _s = accepted.get()?;
-        let e = tls::get_dn_information(&mut plain)
-            .get()
-            .err()
-            .expect("plain");
+        let e = tls::get_dn_information(&mut plain).get().expect_err("plain");
         assert!(e.downcast_ref::<InvalidArgument>().is_some(), "{e}");
         assert!(e.to_string().contains("Not a TLS socket"), "{e}");
         let mut empty = ConnectedSocket::default();
-        let e = tls::get_dn_information(&mut empty)
-            .get()
-            .err()
-            .expect("empty");
-        assert!(
-            e.to_string().contains("107") || e.to_string().contains("connected"),
-            "{e}"
-        );
+        let e = tls::get_dn_information(&mut empty).get().expect_err("empty");
+        assert!(e.to_string().contains("107") || e.to_string().contains("connected"), "{e}");
         ss.abort_accept();
         Ok(())
     })

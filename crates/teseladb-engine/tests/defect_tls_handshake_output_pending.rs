@@ -23,12 +23,16 @@ use teseladb::engine::core::sharded::make_foreign;
 use teseladb::engine::core::shared_ptr::{LwSharedPtr, make_lw_shared};
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::thread::async_;
-use teseladb::engine::net::api::{ConnectedSocket, ConnectedSocketInputStreamConfig, KeepaliveParams};
+use teseladb::engine::net::api::{
+    ConnectedSocket, ConnectedSocketInputStreamConfig, KeepaliveParams,
+};
 use teseladb::engine::net::packet::Packet;
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine::net::stack::ConnectedSocketImpl;
 use teseladb::engine::net::tls::{
-    self, AbstractCredentials, ClientAuth, SessionType, TlsOptions, VerificationError, X509CrtFormat};
+    self, AbstractCredentials, ClientAuth, SessionType, TlsOptions, VerificationError,
+    X509CrtFormat,
+};
 use tls_certs::certfile;
 
 fn cf(file: &str) -> Sstring {
@@ -156,12 +160,16 @@ teseladb::engine_test_case!(test_output_pending_exception_on_destroy, {
         let aborted = b1.clone();
         // SAFETY: the test runs on one shard and holds no other reference to the credentials.
         unsafe { server_creds.get_mut_unchecked() }.set_dn_verification_callback(Some(
-            tls::DnCallback::new(move |_: SessionType, _: Sstring, _: Sstring| -> Result<(), ExceptionPtr> {
-                // Abort the server's sending buffer while the callback runs, so that the
-                // deferred write already in flight resolves with an error afterwards.
-                aborted.abort();
-                Err(ExceptionPtr::new(VerificationError("aborting handshake from DN callback".to_string())))
-            }),
+            tls::DnCallback::new(
+                move |_: SessionType, _: Sstring, _: Sstring| -> Result<(), ExceptionPtr> {
+                    // Abort the server's sending buffer while the callback runs, so that the
+                    // deferred write already in flight resolves with an error afterwards.
+                    aborted.abort();
+                    Err(ExceptionPtr::new(VerificationError(
+                        "aborting handshake from DN callback".to_string(),
+                    )))
+                },
+            ),
         ));
 
         let mut ss = tls::wrap_server(server_creds, ConnectedSocket::from_impl(ssi)).get()?;

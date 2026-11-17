@@ -52,6 +52,6 @@ fn sampler_with_sampling_off() {
     assert_eq!(s.sampling_interval(), 4096);
     // The default guard pauses nothing.
     drop(DisableSamplingTemporarily::default());
-    let mut rd = RandomDevice::default();
+    let mut rd = RandomDevice;
     let _ = rd.call();
 }

@@ -212,6 +212,7 @@ fn register_engine_loggers() {
     LazyLock::force(&crate::engine::util::alloc_failure_injector::memory::LOG);
     LazyLock::force(&crate::engine::http::httpd::HLOGGER);
     LazyLock::force(&crate::engine::http::client::HTTP_LOG);
+    // The WebSocket server exists only with TLS (its handshake key needs gnutls).
     #[cfg(feature = "tls")]
     LazyLock::force(&crate::engine::websocket::common::websocket::WEBSOCKET_LOGGER);
     #[cfg(feature = "dns")]

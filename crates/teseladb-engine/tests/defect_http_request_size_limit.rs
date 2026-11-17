@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use teseladb::engine::core::future::ExceptionPtr;
 use teseladb::engine::core::reactor::connect;
+use teseladb::engine::core::sharded::this_shard_id;
 use teseladb::engine::core::sleep::sleep_steady as sleep;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::thread::async_ as thread_async;
@@ -24,7 +25,6 @@ use teseladb::engine::http::common::httpd::OperationType;
 use teseladb::engine::http::function_handlers::FunctionHandler;
 use teseladb::engine::http::httpd::httpd::{HttpServer, HttpServerTester};
 use teseladb::engine::http::request::Request;
-use teseladb::engine::core::sharded::this_shard_id;
 use teseladb::engine::net::api::{ConnectedSocket, ListenOptions, make_ipv4_address_ip_port};
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine_test_case;

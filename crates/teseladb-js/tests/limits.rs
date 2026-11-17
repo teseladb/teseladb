@@ -66,6 +66,39 @@ fn huge_allocations_run_out_of_memory() {
     );
 }
 
+/// The bytes of this process a call has on a shard with little free memory: an eighth of the
+/// 1.6 GB of a shard of the compatibility battery.
+const SHARD_CALL_MEMORY: usize = 200 << 20;
+
+/// A string that keeps doubling under a process limit smaller than the longest string still
+/// gives the reference's catchable «allocation size overflow», at the same place, and not the
+/// end of the call: SpiderMonkey joins strings without copying them, so on the reference router
+/// the join never runs out of memory before the length overflows (`js-function` step 14).
+#[test]
+fn a_joined_string_past_the_process_memory_is_allocation_size_overflow() {
+    let small = || JsCtx {
+        limits: Limits { memory: SHARD_CALL_MEMORY, ..Limits::default() },
+        ..JsCtx::default()
+    };
+    for src in [
+        "function(){ var s = 'x'; while(true) s = s + s }",
+        "function(){ var s='x'; while(true){ s += s } }",
+        "function(){ var s = 'x'; for(;;) { s = s.concat(s) } }",
+        "function(){ var s = 'x'; for(;;) { s = `${s}${s}` } }",
+    ] {
+        let bounded = run_with(src, &mut small()).unwrap_err();
+        let unbounded = run(src).unwrap_err();
+        assert!(matches!(bounded, JsError::Thrown { .. }), "{src}: {bounded:?}");
+        assert_eq!(bounded.message(), "allocation size overflow", "{src}");
+        assert_eq!(bounded, unbounded, "{src}");
+    }
+    let caught = run_with(
+        "function(){ var s = 'x'; try { while(true) s = s + s } catch (e) { return e.name + ': ' + e.message } }",
+        &mut small(),
+    );
+    assert_eq!(caught, Ok(Value::String("InternalError: allocation size overflow".into())));
+}
+
 #[test]
 fn garbage_is_freed_so_a_long_loop_of_small_objects_fits() {
     let r = run(

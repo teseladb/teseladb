@@ -20,8 +20,11 @@ engine_test_case!(test_content_length_body_overflow_when_full, {
         // SAFETY: `vec` outlives the streams, which are closed below, and is not touched
         // until then.
         let sink = unsafe { VectorDataSink::new(&mut vec) };
-        let mut out =
-            OutputStream::<u8>::with_options(DataSink::new(Box::new(sink)), 64, OutputStreamOptions::default());
+        let mut out = OutputStream::<u8>::with_options(
+            DataSink::new(Box::new(sink)),
+            64,
+            OutputStreamOptions::default(),
+        );
         let mut written = 0usize;
         // SAFETY: `out` and `written` outlive the body stream, closed below.
         let mut body = unsafe { make_http_content_length_output_stream(&mut out, 4, &mut written) };

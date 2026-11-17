@@ -169,13 +169,13 @@ fn stream_close_shutdown_errors() -> Result<(), ExceptionPtr> {
     let mut input = c.input(ConnectedSocketInputStreamConfig::default());
     let mut output = c.output(8192);
     let rule = arm(nr::SHUTDOWN, Some(shut_rd), EBADF, 0, 1);
-    let e = input.close().get().err().expect("the close whose shutdown fails");
+    let e = input.close().get().expect_err("the close whose shutdown fails");
     assert_eq!(code_of(&e), Some(EBADF), "{e}");
     assert_eq!(rule.disarm(), 1);
     output.write_str("x").get()?;
     output.flush().get()?;
     let rule = arm(nr::SHUTDOWN, Some(shut_wr), EBADF, 0, 1);
-    let e = output.close().get().err().expect("the close whose shutdown fails");
+    let e = output.close().get().expect_err("the close whose shutdown fails");
     assert_eq!(code_of(&e), Some(EBADF), "{e}");
     assert_eq!(rule.disarm(), 1);
     Ok(())
@@ -207,12 +207,12 @@ fn datagram_io_errors() -> Result<(), ExceptionPtr> {
     let to = rx.local_address();
     let mut tx = make_udp_channel()?;
     let rule = arm(nr::SENDTO, None, EPERM, 0, 1);
-    let e = tx.send_str(&to, "lost").get().err().expect("the refused send");
+    let e = tx.send_str(&to, "lost").get().expect_err("the refused send");
     assert_eq!(code_of(&e), Some(EPERM), "{e}");
     assert_eq!(rule.disarm(), 1);
     let rule = arm(nr::SENDMSG, None, EPERM, 0, 1);
     let p = teseladb::engine::net::packet::Packet::from_static_data(b"lost too");
-    let e = tx.send(&to, p).get().err().expect("the refused send");
+    let e = tx.send(&to, p).get().expect_err("the refused send");
     assert_eq!(code_of(&e), Some(EPERM), "{e}");
     assert_eq!(rule.disarm(), 1);
     let rule = arm(nr::RECVMSG, None, EIO, 0, 1);
@@ -242,7 +242,7 @@ fn link_local_without_routes() -> Result<(), ExceptionPtr> {
     };
     let dst = SocketAddress::from_ipv6_addr(&Ipv6Addr::from_string_port("fe80::1", 9)?);
     let rule = arm(nr::OPENAT, Some(opens_ipv6_routes), ENOENT, 0, 1);
-    let e = tx.send_str(&dst, "x").get().err().expect("the send without routes");
+    let e = tx.send_str(&dst, "x").get().expect_err("the send without routes");
     let se = e.downcast_ref::<SystemError>().map(|s| (s.code(), s.to_string()));
     assert_eq!(se, Some((ENOENT, "resolve_address: No such file or directory".to_string())), "{e}");
     assert_eq!(rule.disarm(), 1);
@@ -276,7 +276,7 @@ fn large_writes_complete_in_parts() -> Result<(), ExceptionPtr> {
     let mut out = c.output(CHUNK);
     let mut input = s.input(ConnectedSocketInputStreamConfig::default());
     // The writer runs in a thread of its own; this one reads.
-    let mut writer = teseladb::engine::core::thread::async_(move || {
+    let writer = teseladb::engine::core::thread::async_(move || {
         let chunk = vec![b'z'; CHUNK];
         for _ in 0..CHUNKS {
             out.write(&chunk).get()?;

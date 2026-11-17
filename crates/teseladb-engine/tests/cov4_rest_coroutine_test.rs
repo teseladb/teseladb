@@ -329,5 +329,5 @@ engine_test_case!(await_outside_engine_coroutine_panics, {
 #[test]
 fn is_future_v_of_a_future() {
     const IS: bool = teseladb::engine::coroutine::all::is_future_v::<Future<i32>>();
-    assert!(IS);
+    const { assert!(IS) };
 }

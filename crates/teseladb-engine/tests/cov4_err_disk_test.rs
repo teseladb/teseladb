@@ -108,10 +108,10 @@ fn scratch(tag: &str) -> String {
 fn fd_of(path: &str) -> i32 {
     let want = std::fs::canonicalize(path).expect("the file");
     for e in std::fs::read_dir("/proc/self/fd").expect("the descriptor table").flatten() {
-        if std::fs::read_link(e.path()).ok().as_ref() == Some(&want) {
-            if let Ok(fd) = e.file_name().to_string_lossy().parse::<i32>() {
-                return fd;
-            }
+        if std::fs::read_link(e.path()).ok().as_ref() == Some(&want)
+            && let Ok(fd) = e.file_name().to_string_lossy().parse::<i32>()
+        {
+            return fd;
         }
     }
     panic!("no descriptor on {path}");
@@ -489,7 +489,7 @@ fn block_device_ioctl_errors() -> Result<(), ExceptionPtr> {
     assert_eq!(se, Some((EIO, "ioctl(BLKBSZGET) failed: Input/output error".to_string())), "{e}");
     let mut f = open_file_dma(&device, OpenFlags::RO).get()?;
     let rule = arm(nr::IOCTL, Some(asks_device_size), EIO, 0, 1);
-    let e = f.size().get().err().expect("the size without BLKGETSIZE64");
+    let e = f.size().get().expect_err("the size without BLKGETSIZE64");
     assert_eq!(code_of(&e), Some(EIO), "{e}");
     assert_eq!(rule.disarm(), 1);
     f.close().get()

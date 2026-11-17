@@ -68,7 +68,8 @@ fn armed(fd: i32) -> bool {
     let mut its = Itimerspec::default();
     // SAFETY: as above.
     let r = unsafe { timerfd_gettime(fd, &mut its) };
-    r == 0 && (its.it_interval.tv_nsec != 0 || its.it_value.tv_sec != 0 || its.it_value.tv_nsec != 0)
+    r == 0
+        && (its.it_interval.tv_nsec != 0 || its.it_value.tv_sec != 0 || its.it_value.tv_nsec != 0)
 }
 
 struct RefusingPollfn {

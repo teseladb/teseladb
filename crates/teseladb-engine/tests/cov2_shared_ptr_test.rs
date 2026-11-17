@@ -32,17 +32,11 @@ fn lw_counts_seen_from_the_object_and_owned() {
     let a = make_lw_shared(Node { v: 7 });
     assert!(a.owned());
     // SAFETY: the pointer comes from the LwSharedPtr that owns the object.
-    assert_eq!(
-        unsafe { <Node as EnableLwSharedFromThis>::use_count(a.get()) },
-        1
-    );
+    assert_eq!(unsafe { <Node as EnableLwSharedFromThis>::use_count(a.get()) }, 1);
     let b = a.clone();
     assert!(!a.owned() && !b.owned());
     // SAFETY: as above.
-    assert_eq!(
-        unsafe { <Node as EnableLwSharedFromThis>::use_count(a.get()) },
-        2
-    );
+    assert_eq!(unsafe { <Node as EnableLwSharedFromThis>::use_count(a.get()) }, 2);
     drop(b);
     assert!(a.owned());
     assert_eq!(a.v, 7);
@@ -117,11 +111,7 @@ fn release_hands_over_the_last_owner_and_a_custom_deleter_disposes() {
     // The unique owner reads and writes the object.
     assert_eq!(**unique, 5);
     *unique = Rc::new(6);
-    assert_eq!(
-        Rc::strong_count(&witness),
-        1,
-        "the old value was dropped by the write"
-    );
+    assert_eq!(Rc::strong_count(&witness), 1, "the old value was dropped by the write");
     let raw = unique.into_raw();
     LwSharedPtr::<Rc<i32>>::dispose_with::<CountingDeleter>(raw);
     assert_eq!(DISPOSED.with(Cell::get), 1);
@@ -146,10 +136,7 @@ teseladb::shared_from_this_impl!(Esft { _esft });
 
 #[test]
 fn shared_from_this_counts_through_the_embedded_counter() {
-    let p = make_shared_esft(Esft {
-        _esft: EnableSharedFromThis::default(),
-        v: 3,
-    });
+    let p = make_shared_esft(Esft { _esft: EnableSharedFromThis::default(), v: 3 });
     assert_eq!(p.esft().use_count(), 1);
     // SAFETY: the pointer comes from a SharedPtr of an object made by make_shared_esft.
     let q = unsafe { SharedPtr::shared_from_this(p.get().unwrap().as_ptr()) };
@@ -208,11 +195,7 @@ fn casts_share_the_count_and_failed_downcasts_are_null() {
     };
     let none = dynamic_pointer_cast(&cshape, |s| s.as_square());
     assert!(!none.is_some());
-    assert_eq!(
-        none.use_count(),
-        0,
-        "a failed cast does not share the count"
-    );
+    assert_eq!(none.use_count(), 0, "a failed cast does not share the count");
     assert_eq!(circle.use_count(), 2);
     // A null source gives a null result through every cast.
     let null = SharedPtr::<Square>::null();

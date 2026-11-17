@@ -71,8 +71,8 @@ teseladb::engine_test_case!(test_request_size_limit, {
     let big_header = format!("GET /test HTTP/1.1\r\nX-Big: {}\r\n\r\n", "a".repeat(1024));
     let tests: Vec<(String, usize, bool, bool)> = vec![
         ("GET /test HTTP/1.1\r\nHost: test\r\n\r\n".to_string(), 64, false, false),
-        (big_uri.clone(), 64, true, true),      // the URI itself overflows: 414
-        (big_header, 64, true, false),          // the header fields overflow: 431
+        (big_uri.clone(), 64, true, true), // the URI itself overflows: 414
+        (big_header, 64, true, false),     // the header fields overflow: 431
         (big_uri, 4096, false, false),
     ];
     let mut parser = HttpRequestParser::default();
@@ -80,7 +80,9 @@ teseladb::engine_test_case!(test_request_size_limit, {
         parser.init();
         parser.set_size_limit(*limit);
         // The parse stops (an unconsumed remainder) whether it succeeds or overflows.
-        assert!(parser.call(TemporaryBuffer::copy_from(msg.as_bytes())).get().expect("parse").is_some());
+        assert!(
+            parser.call(TemporaryBuffer::copy_from(msg.as_bytes())).get().expect("parse").is_some()
+        );
         assert_eq!(parser.size_limit_exceeded(), *too_large);
         // An oversized request also reports as failed.
         assert_eq!(parser.failed(), *too_large);
@@ -96,9 +98,13 @@ teseladb::engine_test_case!(test_request_size_limit_scattered, {
     let mut parser = HttpRequestParser::default();
     parser.init();
     parser.set_size_limit(512);
-    assert!(parser.call(TemporaryBuffer::copy_from(part1.as_bytes())).get().expect("parse").is_none());
+    assert!(
+        parser.call(TemporaryBuffer::copy_from(part1.as_bytes())).get().expect("parse").is_none()
+    );
     assert!(!parser.size_limit_exceeded());
-    assert!(parser.call(TemporaryBuffer::copy_from(part2.as_bytes())).get().expect("parse").is_some());
+    assert!(
+        parser.call(TemporaryBuffer::copy_from(part2.as_bytes())).get().expect("parse").is_some()
+    );
     assert!(parser.size_limit_exceeded());
     assert!(parser.failed());
     make_ready_future(())
@@ -112,8 +118,12 @@ teseladb::engine_test_case!(test_request_size_limit_unfinished, {
     let mut parser = HttpRequestParser::default();
     parser.init();
     parser.set_size_limit(512);
-    assert!(parser.call(TemporaryBuffer::copy_from(part1.as_bytes())).get().expect("parse").is_none());
-    assert!(parser.call(TemporaryBuffer::copy_from(part2.as_bytes())).get().expect("parse").is_some());
+    assert!(
+        parser.call(TemporaryBuffer::copy_from(part1.as_bytes())).get().expect("parse").is_none()
+    );
+    assert!(
+        parser.call(TemporaryBuffer::copy_from(part2.as_bytes())).get().expect("parse").is_some()
+    );
     assert!(parser.size_limit_exceeded());
     assert!(parser.failed());
     assert!(!parser.uri_too_large());

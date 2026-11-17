@@ -37,38 +37,20 @@ fn what(e: &ExceptionPtr) -> String {
 }
 
 engine_thread_test_case!(group_operations_that_must_fail, {
-    let e = destroy_scheduling_group(default_scheduling_group())
-        .get()
-        .unwrap_err();
-    assert!(
-        what(&e).contains("Attempt to destroy the default scheduling group"),
-        "{e:?}"
-    );
-    let e = rename_scheduling_group(default_scheduling_group(), "x".into())
-        .get()
-        .unwrap_err();
-    assert!(
-        what(&e).contains("Attempt to rename the default scheduling group"),
-        "{e:?}"
-    );
+    let e = destroy_scheduling_group(default_scheduling_group()).get().unwrap_err();
+    assert!(what(&e).contains("Attempt to destroy the default scheduling group"), "{e:?}");
+    let e = rename_scheduling_group(default_scheduling_group(), "x".into()).get().unwrap_err();
+    assert!(what(&e).contains("Attempt to rename the default scheduling group"), "{e:?}");
 
-    let sg = create_scheduling_group("cov3-cur".into(), "c3c".into(), 100.0)
-        .get()
-        .unwrap();
+    let sg = create_scheduling_group("cov3-cur".into(), "c3c".into(), 100.0).get().unwrap();
     // From inside the group, destroying it is refused.
     let r = with_scheduling_group(sg, move || destroy_scheduling_group(sg)).get();
     let e = r.unwrap_err();
-    assert!(
-        what(&e).contains("Attempt to destroy the current scheduling group"),
-        "{e:?}"
-    );
+    assert!(what(&e).contains("Attempt to destroy the current scheduling group"), "{e:?}");
     destroy_scheduling_group(sg).get().unwrap();
 
     let e = no_such_scheduling_group(sg);
-    assert!(
-        what(&e).contains("The scheduling group does not exist"),
-        "{e:?}"
-    );
+    assert!(what(&e).contains("The scheduling group does not exist"), "{e:?}");
 });
 
 /// The `class` labels of the I/O queue's total-bytes series on this shard.
@@ -81,18 +63,12 @@ fn io_classes() -> Vec<String> {
         .iter()
         .filter(|f| f.mf.name == "io_queue_total_bytes")
         .flat_map(|f| f.metrics.iter())
-        .filter_map(|m| {
-            m.labels()
-                .get(&Sstring::from("class"))
-                .map(|c| c.to_string())
-        })
+        .filter_map(|m| m.labels().get(&Sstring::from("class")).map(|c| c.to_string()))
         .collect()
 }
 
 engine_thread_test_case!(renaming_a_group_renames_its_io_class, {
-    let sg = create_scheduling_group("cov3-io-a".into(), "c3a".into(), 100.0)
-        .get()
-        .unwrap();
+    let sg = create_scheduling_group("cov3-io-a".into(), "c3a".into(), 100.0).get().unwrap();
     let path = std::env::temp_dir().join(format!("cov3_rename_{}", std::process::id()));
     let name = path.display().to_string();
     let n2 = name.clone();
@@ -112,14 +88,8 @@ engine_thread_test_case!(renaming_a_group_renames_its_io_class, {
     })
     .get()
     .unwrap();
-    assert!(
-        io_classes().iter().any(|c| c == "cov3-io-a"),
-        "{:?}",
-        io_classes()
-    );
-    rename_scheduling_group(sg, "cov3-io-b".into())
-        .get()
-        .unwrap();
+    assert!(io_classes().iter().any(|c| c == "cov3-io-a"), "{:?}", io_classes());
+    rename_scheduling_group(sg, "cov3-io-b".into()).get().unwrap();
     let classes = io_classes();
     assert!(classes.iter().any(|c| c == "cov3-io-b"), "{classes:?}");
     assert!(!classes.iter().any(|c| c == "cov3-io-a"), "{classes:?}");
@@ -149,10 +119,8 @@ engine_thread_test_case!(processes_from_the_reactor_wrappers, {
         WaitStatus::Exited(e) => assert_eq!(e.exit_code, 0),
         WaitStatus::Signaled(_) => panic!("signaled"),
     }
-    let params = SpawnParameters {
-        argv: vec!["sh".into(), "-c".into(), "exit 3".into()],
-        env: vec![],
-    };
+    let params =
+        SpawnParameters { argv: vec!["sh".into(), "-c".into(), "exit 3".into()], env: vec![] };
     let mut p = spawn_process(Path::new("/bin/sh"), params).get().unwrap();
     match p.wait().get().unwrap() {
         WaitStatus::Exited(e) => assert_eq!(e.exit_code, 3),
@@ -188,9 +156,6 @@ fn the_stall_sampler_never_has_work_and_ends_a_run_on_entering_interrupt_mode() 
         std::hint::black_box(0u64);
     }
     let r = s.report();
-    assert!(
-        r.run_wall_time >= std::time::Duration::from_millis(4),
-        "{r}"
-    );
+    assert!(r.run_wall_time >= std::time::Duration::from_millis(4), "{r}");
     assert!(r.to_string().contains("stalls"), "{r}");
 }

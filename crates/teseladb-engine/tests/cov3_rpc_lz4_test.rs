@@ -5,12 +5,12 @@
 //! object read as another type (rpc.hh, `client_info::retrieve_auxiliary`).
 #![cfg(target_os = "linux")]
 
+use std::collections::HashMap;
 use teseladb::engine::core::sstring::Sstring;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::rpc::lz4_fragmented_compressor::{
     Lz4FragmentedCompressor, Lz4FragmentedCompressorFactory,
 };
-use std::collections::HashMap;
 
 use teseladb::engine::net::socket_defs::SocketAddress;
 use teseladb::engine::rpc::rpc_types::{
@@ -42,7 +42,7 @@ fn an_auxiliary_object_of_another_type_is_a_bad_cast() {
     // `attach` keeps the first object of a key.
     ci.attach_auxiliary(&key, 6u32);
     assert_eq!(*ci.retrieve_auxiliary::<u32>(&key).expect("a u32"), 5);
-    let e = ci.retrieve_auxiliary::<String>(&key).err().expect("not a String");
+    let e = ci.retrieve_auxiliary::<String>(&key).expect_err("not a String");
     assert!(e.to_string().contains("bad_any_cast"), "{e}");
 }
 

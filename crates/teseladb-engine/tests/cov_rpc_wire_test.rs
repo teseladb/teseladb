@@ -391,11 +391,11 @@ fn cm(c: &mut Pin<Box<Client>>) -> &mut Client {
     unsafe { c.as_mut().get_unchecked_mut() }
 }
 
+/// A started client and its protocol.
+type ClientAndProto = (Pin<Box<Client>>, Pin<Box<Proto>>);
+
 /// A protocol and a started client of the raw server on `port`.
-fn raw_server_client(
-    port: u16,
-    co: ClientOptions,
-) -> Result<(Pin<Box<Client>>, Pin<Box<Proto>>), ExceptionPtr> {
+fn raw_server_client(port: u16, co: ClientOptions) -> Result<ClientAndProto, ExceptionPtr> {
     let mut proto = Box::pin(Proto::new(Serializer));
     proto.as_mut().set_logger(Some(&**RPC_LOG));
     let addr = make_ipv4_address_ip_port(LOCALHOST, port);
