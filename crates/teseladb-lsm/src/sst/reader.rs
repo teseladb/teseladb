@@ -108,10 +108,49 @@ impl Table {
         key: Option<Arc<FileKey>>,
         dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
     ) -> Result<Table, Bad> {
-        if !size.is_multiple_of(ALIGN as u64) || meta_start + meta.len() as u64 != size {
+        if meta_start + meta.len() as u64 != size {
             return Err(Bad);
         }
         let footer = Table::footer(meta)?;
+        let stored = |offset: u64, end: u64| {
+            Some(meta.slice((offset - meta_start) as usize..(end - meta_start) as usize))
+        };
+        Table::with_blocks(number, (size, meta_start), footer, key, dict_of, &stored)
+    }
+
+    /// [`Table::with_key`] of a file just written, from the writes of its meta blocks and its
+    /// footer page (`pieces`, in order, each at its offset), read where they are.
+    pub(crate) fn from_written(
+        number: u64,
+        size: u64,
+        meta_start: u64,
+        pieces: &[(u64, Bytes)],
+        key: Option<Arc<FileKey>>,
+        dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
+    ) -> Result<Table, Bad> {
+        let (_, last) = pieces.last().ok_or(Bad)?;
+        let footer = Table::footer(last)?;
+        let stored = |offset: u64, end: u64| {
+            let (at, piece) =
+                pieces.iter().find(|(at, b)| *at <= offset && end <= at + b.len() as u64)?;
+            Some(piece.slice((offset - at) as usize..(end - at) as usize))
+        };
+        Table::with_blocks(number, (size, meta_start), footer, key, dict_of, &stored)
+    }
+
+    /// The table of a file of `size` bytes whose meta blocks start at `meta_start`, with `footer`,
+    /// whose stored bytes `[offset, end)` within its meta blocks `stored` gives.
+    fn with_blocks(
+        number: u64,
+        (size, meta_start): (u64, u64),
+        footer: Footer,
+        key: Option<Arc<FileKey>>,
+        dict_of: &dyn Fn(u64) -> Option<Arc<[u8]>>,
+        stored: &dyn Fn(u64, u64) -> Option<Bytes>,
+    ) -> Result<Table, Bad> {
+        if !size.is_multiple_of(ALIGN as u64) || size < meta_start + ALIGN as u64 {
+            return Err(Bad);
+        }
         if footer.wrapped.is_some() != key.is_some() {
             return Err(Bad);
         }
@@ -124,7 +163,7 @@ impl Table {
             if end > footer_page {
                 return Err(Bad);
             }
-            let stored = meta.slice((h.offset - meta_start) as usize..(end - meta_start) as usize);
+            let stored = stored(h.offset, end).ok_or(Bad)?;
             unframe_with(&stored, key.as_deref().map(|k| (k, h.offset)), None)
         };
         if footer.filter.offset != meta_start {
@@ -374,8 +413,11 @@ mod tests {
             end: b"zz".to_vec(),
             ts: Hlc { physical: 7, logical: 0 },
         };
-        let (_, c, table) = w.finish(3, vec![t]).unwrap();
-        bytes.extend_from_slice(&c);
+        let (chunks, table) = w.finish(3, vec![t]).unwrap();
+        for (at, c) in chunks {
+            assert_eq!(at, bytes.len() as u64, "the writes follow one another");
+            bytes.extend_from_slice(&c);
+        }
         (bytes, table)
     }
 
@@ -405,8 +447,10 @@ mod tests {
                 bytes.extend_from_slice(&c);
             }
         }
-        let (_, c, _) = w.finish(3, Vec::new()).unwrap();
-        bytes.extend_from_slice(&c);
+        let (chunks, _) = w.finish(3, Vec::new()).unwrap();
+        for (_, c) in chunks {
+            bytes.extend_from_slice(&c);
+        }
         bytes
     }
 

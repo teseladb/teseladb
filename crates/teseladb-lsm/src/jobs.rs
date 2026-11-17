@@ -147,9 +147,8 @@ impl ValueSink {
     /// Ends its value file, if it started one, queueing its last write and its sync.
     pub(crate) fn finish(&mut self, queued: &mut VecDeque<IoOp>) -> Option<Arc<Table>> {
         let (number, w) = self.file.take()?;
-        let (at, chunk, table) = w.finish(number, Vec::new()).expect("a value file has values");
-        queued.push_back(write_at(number, at, chunk));
-        queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
+        let (chunks, table) = w.finish(number, Vec::new()).expect("a value file has values");
+        write_end(number, chunks, queued);
         Some(Arc::new(table))
     }
 }
@@ -163,6 +162,14 @@ pub(crate) fn attach_values(table: &mut Table, numbers: &[u64], find: impl Fn(u6
 /// The write of `chunk` at `offset` of file `number`.
 pub(crate) fn write_at(number: u64, offset: u64, chunk: Vec<u8>) -> IoOp {
     IoOp::WriteAt { file: file_id(number), offset, data: Bytes::from_vec(chunk), batch: 0 }
+}
+
+/// Queues the last writes of file `number` ([`TableWriter::finish`]) and its sync.
+pub(crate) fn write_end(number: u64, chunks: Vec<(u64, Bytes)>, queued: &mut VecDeque<IoOp>) {
+    for (offset, data) in chunks {
+        queued.push_back(IoOp::WriteAt { file: file_id(number), offset, data, batch: 0 });
+    }
+    queued.push_back(IoOp::Sync { file: file_id(number), batch: 0 });
 }
 
 /// What a finished job leaves to install.
@@ -378,19 +385,17 @@ impl FlushJob {
         let find = |_| values.clone().expect("the flush's value file");
         let w = self.writer.take().expect("a flush with data has a writer");
         let numbers = w.value_numbers();
-        let (at, chunk, mut table) = w
+        let (chunks, mut table) = w
             .finish(self.number, mem.tombstones().cloned().collect())
             .expect("a memtable with data writes a file");
-        self.queued.push_back(write_at(self.number, at, chunk));
-        self.queued.push_back(IoOp::Sync { file: file_id(self.number), batch: 0 });
+        write_end(self.number, chunks, &mut self.queued);
         attach_values(&mut table, &numbers, find);
         if let Some(h) = self.history.take() {
             let numbers = h.value_numbers();
-            let (at, chunk, mut history) =
+            let (chunks, mut history) =
                 h.finish(self.history_number, Vec::new()).expect("a history file has versions");
             attach_values(&mut history, &numbers, find);
-            self.queued.push_back(write_at(self.history_number, at, chunk));
-            self.queued.push_back(IoOp::Sync { file: file_id(self.history_number), batch: 0 });
+            write_end(self.history_number, chunks, &mut self.queued);
             table.history = Some(Arc::new(history));
         }
         self.queued.push_back(IoOp::SyncDir { path: self.dir.clone() });

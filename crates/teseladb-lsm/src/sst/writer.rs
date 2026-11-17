@@ -8,7 +8,7 @@ use teseladb_crypto::at_rest::{FileKey, KeyRing, WRAPPED_KEY_LEN};
 use teseladb_keys::Hlc;
 use teseladb_types::Bytes;
 
-use super::block::{BlockBuilder, Method, TRAILER, frame, frame_sealed};
+use super::block::{BlockBuilder, Method, TRAILER, frame, frame_plain_into, frame_sealed};
 use super::columns::{ColumnWriter, encode_directory};
 use super::meta::{FOOTER, Footer, Handle, Props};
 use super::reader::{BlockStats, Table};
@@ -390,22 +390,40 @@ impl TableWriter {
         Some(sizes)
     }
 
-    fn meta_block(&mut self, payload: &[u8]) -> Handle {
-        let offset = self.taken + self.out.len() as u64;
-        let framed = self.framed(payload, Method::None, offset);
+    /// Writes `payload` as a meta block in a chunk of its own, padded to the page, at the end of
+    /// what was taken (the meta blocks come after every data block was taken).
+    fn meta_block(&mut self, payload: &[u8], chunks: &mut Vec<(u64, Bytes)>) -> Handle {
+        debug_assert!(self.out.is_empty(), "the data blocks were taken");
+        let offset = self.taken;
+        let mut framed = match &self.key {
+            None => {
+                // Framed straight into a buffer of whole pages: no copy past the chunk itself.
+                let pages = (payload.len() + TRAILER).next_multiple_of(ALIGN);
+                let mut v = Vec::with_capacity(pages);
+                frame_plain_into(&mut v, payload);
+                v
+            }
+            Some(_) => self.framed(payload, Method::None, offset),
+        };
         let handle = Handle { offset, len: framed.len() as u64 };
-        self.out.extend_from_slice(&framed);
-        pad(&mut self.out);
+        pad(&mut framed);
+        self.taken += framed.len() as u64;
+        chunks.push((offset, Bytes::from_vec(framed)));
         handle
     }
 
-    /// Ends the file with `tombstones`: the last chunk with its offset, and the file ready to
-    /// read with number `number`. `None` when there is nothing to write.
+    /// Ends the file with `tombstones`: the writes that remain, each a whole number of pages at
+    /// its offset, and the file ready to read with number `number`. `None` when there is nothing
+    /// to write.
+    ///
+    /// Each meta block is a write of its own and the file reads them where they are: what the end
+    /// of a file takes at once is its largest block, not the sum of its meta blocks, nor a copy
+    /// of them (an index of keys of MiB takes tens of MiB, and a shard's memory is its own pool).
     pub(crate) fn finish(
         mut self,
         number: u64,
         mut tombstones: Vec<RangeTombstone>,
-    ) -> Option<(u64, Vec<u8>, Table)> {
+    ) -> Option<(Vec<(u64, Bytes)>, Table)> {
         if self.versions == 0 && tombstones.is_empty() {
             return None;
         }
@@ -414,14 +432,19 @@ impl TableWriter {
         }
         let column_sizes = self.write_columns();
         pad(&mut self.out);
-        let meta_start = self.taken + self.out.len() as u64;
-        let filter = self.meta_block(&filter::build(&self.hashes));
+        let mut chunks = Vec::new();
+        if let Some((at, chunk)) = self.take() {
+            chunks.push((at, Bytes::from_vec(chunk)));
+        }
+        let meta_start = self.taken;
+        let meta_first = chunks.len();
+        let filter = self.meta_block(&filter::build(&self.hashes), &mut chunks);
         let zones = self.zones.take().and_then(ZoneBuilder::finish).map(|z| {
-            let h = self.meta_block(&z);
+            let h = self.meta_block(&z, &mut chunks);
             (h.offset, h.len)
         });
         let columns = column_sizes.map(|sizes| {
-            let h = self.meta_block(&encode_directory(&sizes));
+            let h = self.meta_block(&encode_directory(&sizes), &mut chunks);
             (h.offset, h.len)
         });
         tombstones.sort_by(|a, b| (&a.start, &a.end, a.ts).cmp(&(&b.start, &b.end, b.ts)));
@@ -447,22 +470,28 @@ impl TableWriter {
             shapes: self.packer.take().map(Packer::finish).unwrap_or_default(),
             columns,
         };
-        let props_handle = self.meta_block(&props.encode());
+        let props_handle = self.meta_block(&props.encode(), &mut chunks);
+        drop(props);
         let index_payload = self.index.finish();
-        let index = self.meta_block(&index_payload);
+        let index = self.meta_block(&index_payload, &mut chunks);
+        drop(index_payload);
         let wrapped = self.key.as_ref().map(|(_, w)| *w);
         let footer = Footer { filter, props: props_handle, index, wrapped };
-        self.out.resize(self.out.len() + ALIGN - FOOTER, PAD);
-        self.out.extend_from_slice(&footer.encode());
-        let size = self.taken + self.out.len() as u64;
-        let meta = Bytes::from_vec(self.out[(meta_start - self.taken) as usize..].to_vec());
+        let mut last = Vec::with_capacity(ALIGN);
+        last.resize(ALIGN - FOOTER, PAD);
+        last.extend_from_slice(&footer.encode());
+        chunks.push((self.taken, Bytes::from_vec(last)));
+        self.taken += ALIGN as u64;
+        let size = self.taken;
         let key = self.key.as_ref().map(|(k, _)| k.clone());
         let dict = self.file_dict.as_ref().map(|(_, c)| c.clone());
-        let mut table = Table::with_key(number, size, meta_start, &meta, key, &|_| dict.clone())
+        let mut table =
+            Table::from_written(number, size, meta_start, &chunks[meta_first..], key, &|_| {
+                dict.clone()
+            })
             .expect("a file just written reads back");
         table.written = self.stats;
-        let (at, chunk) = self.take().expect("the end of the file");
-        Some((at, chunk, table))
+        Some((chunks, table))
     }
 }
 
@@ -471,6 +500,44 @@ impl TableWriter {
 mod tests {
     use super::super::block::BlockCursor;
     use super::*;
+
+    /// The end of a file whose index holds long keys (five of 2 MiB, as the entries of five
+    /// indexes on one long string) writes each meta block apart: no write holds more than the
+    /// largest block, the writes follow one another, and the file reads back from them.
+    #[test]
+    fn the_meta_blocks_of_a_file_of_long_keys_are_written_apart() {
+        let mut w = TableWriter::new(4096, Codec::None);
+        let mut file = Vec::new();
+        for i in 0..5u8 {
+            let mut key = vec![i];
+            key.extend(std::iter::repeat_n(b'x', 2 << 20));
+            let ik = entry::internal_key(&key, Hlc { physical: 1, logical: 0 });
+            w.add(&ik, Kind::Put, b"v");
+            if let Some((_, c)) = w.take() {
+                file.extend_from_slice(&c);
+            }
+        }
+        let data_end = w.size();
+        let (chunks, table) = w.finish(9, Vec::new()).unwrap();
+        let index = (5 * (2 << 20) + 5 * (TRAILER + 64)).next_multiple_of(ALIGN);
+        let meta: usize =
+            chunks.iter().filter(|(at, _)| *at >= data_end).map(|(_, c)| c.len()).sum();
+        for (at, c) in &chunks {
+            assert_eq!(*at, file.len() as u64);
+            assert!(c.len() <= index, "a write of {} bytes", c.len());
+            file.extend_from_slice(c);
+        }
+        // The properties hold the lowest and highest keys, the index each block's last key.
+        assert!(meta > 7 * (2 << 20), "{meta}");
+        assert_eq!(table.size, file.len() as u64);
+        assert_eq!(table.blocks(), 5);
+        let footer = Table::footer(&file).unwrap();
+        let start = footer.filter.offset;
+        let meta_bytes = Bytes::from_vec(file[start as usize..].to_vec());
+        let read = Table::with_key(9, table.size, start, &meta_bytes, None, &|_| None).unwrap();
+        assert_eq!(read.blocks(), 5);
+        assert_eq!(read.props.versions, 5);
+    }
 
     /// FR-031: the versions under a value or a deletion go to the history file; those under an
     /// intent or a `Retract` stay with it.
@@ -521,9 +588,12 @@ mod tests {
             }
         }
         assert!(w.size() > file.len() as u64);
-        let (at, chunk, table) = w.finish(9, Vec::new()).unwrap();
-        assert_eq!(at, file.len() as u64);
-        file.extend_from_slice(&chunk);
+        let (chunks, table) = w.finish(9, Vec::new()).unwrap();
+        for (at, chunk) in chunks {
+            assert_eq!(at, file.len() as u64);
+            assert_eq!(chunk.len() % ALIGN, 0);
+            file.extend_from_slice(&chunk);
+        }
         assert_eq!(table.size, file.len() as u64);
         assert_eq!(file.len() % ALIGN, 0);
         assert_eq!(table.props.versions, 2000);
@@ -556,8 +626,8 @@ mod tests {
                 file.extend_from_slice(&chunk);
             }
         }
-        let (_, chunk, table) = w.finish(9, Vec::new()).unwrap();
-        file.extend_from_slice(&chunk);
+        let (chunks, table) = w.finish(9, Vec::new()).unwrap();
+        chunks.iter().for_each(|(_, c)| file.extend_from_slice(c));
         assert_eq!(table.props.dictionary, 4);
         let codes = table.written.codes;
         assert!(codes[3] > 0 && codes[2] > 0, "{codes:?}");
@@ -615,8 +685,8 @@ mod tests {
                     file.extend_from_slice(&c);
                 }
             }
-            let (_, c, table) = w.finish(3, Vec::new()).unwrap();
-            file.extend_from_slice(&c);
+            let (chunks, table) = w.finish(3, Vec::new()).unwrap();
+            chunks.iter().for_each(|(_, c)| file.extend_from_slice(c));
             (file, table)
         };
         let read_all = |file: &[u8], t: &Table| {
