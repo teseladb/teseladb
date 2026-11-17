@@ -680,8 +680,13 @@ impl ServerBackend {
                     let req = intent_wait::pin(build(&entry, deadline), pinned.as_ref());
                     let writes = matches!(req, RemoteReq::Write { .. } | RemoteReq::Txn { .. });
                     plain_write = matches!(req, RemoteReq::Write { .. });
+                    let asked = Instant::now();
                     let answer =
                         self.ask(core, |tx| NodeMsg::Data(DataReq::Remote(g, req), tx), until);
+                    if plain_write {
+                        let took = u64::try_from(asked.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        teseladb_stages::record(teseladb_stages::Stage::WriteAsk, took);
+                    }
                     match answer {
                         Some(Ok(DataReply::Remote(r))) => return Ok((entry, r)),
                         Some(Ok(other)) => {

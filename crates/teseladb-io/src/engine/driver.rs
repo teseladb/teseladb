@@ -295,7 +295,9 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
 
     fn on_input(&mut self, queued: Instant, input: CoreInput<L::Msg>) {
         let started = Instant::now();
-        let overloaded = self.admission.observe(started.saturating_duration_since(queued), started);
+        let waited = started.saturating_duration_since(queued);
+        teseladb_stages::record(teseladb_stages::Stage::MailboxWait, nanos(waited));
+        let overloaded = self.admission.observe(waited, started);
         let now = self.now();
         match input {
             CoreInput::App(m) if overloaded => {
