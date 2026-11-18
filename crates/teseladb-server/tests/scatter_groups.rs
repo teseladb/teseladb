@@ -7,11 +7,11 @@
 
 mod common;
 
-use common::{Client, READY, batch, docs, ok, until};
+use common::{Client, DataDir, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::backend::{scattered_groups, scattered_parts_outside};
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::node::{Node, NodeConfig, lock_dir};
 
 const DOCS: i32 = 3000;
 
@@ -95,9 +95,7 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         vec![matches, group(Value::Null)],
         vec![fractions],
     ];
-    // The ranges are all led here: each part is read from its range's view and folded on the
-    // client's thread, not on the cores (005 FR-028).
-    let outside = scattered_parts_outside();
+    // The ranges are on four cores: the parts go to their cores all at once (010 FR-034).
     for pipeline in &pipelines {
         let one_place = aggregate(&mut c, pipeline, true);
         // Ranges that just split may still be moving: the answer is the same in any case, and
@@ -110,7 +108,6 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         });
         assert_eq!(split, one_place, "{pipeline:?}");
     }
-    assert!(scattered_parts_outside() > outside);
     // The sum is the one of the values the `$match` keeps.
     let scattered = teseladb_stages::count(teseladb_stages::Stage::AggScattered);
     let whole = aggregate(&mut c, &pipelines[2], false);
@@ -130,5 +127,46 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
     let again = aggregate(&mut c, &pipelines[2], false);
     assert_eq!(again, whole);
     assert!(teseladb_stages::count(teseladb_stages::Stage::AggByIndex) > by_index);
+    node.stop();
+}
+
+/// The ranges of a collection on one core, all led here: each part is read from its range's
+/// view and folded on the client's thread, not on the core (005 FR-028), and the answer is the
+/// one read in one place. The node keeps its data on disk: a view reads the blocks its memtables
+/// flushed from their files, which a node in memory has none of.
+#[test]
+fn an_aggregation_over_ranges_led_here_on_one_core_folds_them_from_their_views() {
+    let dir = DataDir::new("scatter-views");
+    let config =
+        NodeConfig { cores: Some(1), data_dir: Some(dir.0.clone()), ..common::config(Vec::new()) };
+    let lock = lock_dir(&dir.0).expect("locks the directory");
+    let node = Node::start(config, DiskPlace::Files(dir.0.clone()), Some(lock)).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    for at in (0..DOCS).step_by(500) {
+        let insert = Document::new().with("insert", "c").with("documents", docs(at..at + 500));
+        assert!(ok(&c.run("app", insert)));
+    }
+    let shard = Document::new()
+        .with("shardCollection", "app.c")
+        .with("key", Document::new().with("_id", 1));
+    assert!(ok(&c.run("admin", shard)));
+    for at in [1000, 2000] {
+        let split =
+            Document::new().with("split", "app.c").with("middle", Document::new().with("_id", at));
+        until("the split", || ok(&c.run("admin", split.clone())).then_some(()));
+    }
+    let matches = Document::new().with("$match", Document::new().with("v", op("$gte", 9_000)));
+    let pipeline = vec![matches, group(Value::Null)];
+    let one_place = aggregate(&mut c, &pipeline, true);
+    let outside = scattered_parts_outside();
+    let split = until("a run from the views", || {
+        let out = aggregate(&mut c, &pipeline, false);
+        assert_eq!(out, one_place);
+        (scattered_parts_outside() > outside).then_some(out)
+    });
+    let Some(Value::Document(d)) = split.first() else { panic!("{split:?}") };
+    let want: i32 = (900..DOCS).map(|i| i * 10).sum();
+    assert_eq!(d.get("s"), Some(&Value::Int32(want)));
     node.stop();
 }

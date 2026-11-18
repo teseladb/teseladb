@@ -122,3 +122,20 @@ pub fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A node's data directory under the system's temporary one, removed when the test ends.
+pub struct DataDir(pub std::path::PathBuf);
+
+impl DataDir {
+    pub fn new(name: &str) -> DataDir {
+        let p = std::env::temp_dir().join(format!("teseladb-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        DataDir(p)
+    }
+}
+
+impl Drop for DataDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
