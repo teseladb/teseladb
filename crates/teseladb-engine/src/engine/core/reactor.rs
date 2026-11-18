@@ -7022,9 +7022,9 @@ impl SmpMessageQueue {
                         if let Ok(mut units) = units_fut.get() {
                             units.release();
                         }
-                        if Self::tx_a(this).pending_fifo.len() >= SmpMessageQueue::BATCH_SIZE {
-                            Self::move_pending(this);
-                        }
+                        // Published at once, not at the sender's next poll or sixteenth item: a
+                        // busy sender would hold it for the rest of its task (002 run p51).
+                        Self::move_pending(this);
                     }
                 },
             );
@@ -7036,16 +7036,11 @@ impl SmpMessageQueue {
     /// `this` is a live queue whose receiving side is the current shard, and `item` an item
     /// it received.
     pub(crate) unsafe fn respond(this: *mut Self, item: WorkItemPtr) {
+        // Published at once, as the requests are (see `submit_item`).
         // SAFETY: by the caller; `_completed_fifo` belongs to the receiving side.
-        let len = unsafe {
-            let fifo = &mut (*this)._completed_fifo;
-            fifo.push(item);
-            fifo.len()
-        };
-        // SAFETY: on this shard's reactor thread; the reactor is reached for this call only (see `engine()`).
-        if len >= SmpMessageQueue::BATCH_SIZE || unsafe { (*engine()).stopped() } {
-            // SAFETY: as above.
-            unsafe { Self::flush_response_batch(this) };
+        unsafe {
+            (*this)._completed_fifo.push(item);
+            Self::flush_response_batch(this);
         }
     }
 

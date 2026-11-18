@@ -704,8 +704,6 @@ pub struct SmpMessageQueue {
 impl SmpMessageQueue {
     /// Capacity of each ring.
     pub const QUEUE_LENGTH: usize = 128;
-    /// Number of items gathered before a batch is pushed to the ring.
-    pub const BATCH_SIZE: usize = 16;
     /// How many items ahead are prefetched while processing a batch.
     pub const PREFETCH_CNT: usize = 2;
 
