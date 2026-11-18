@@ -140,8 +140,7 @@ pub(crate) fn pick(
     let l0 = &v.levels[0];
     let level_bytes = |l: usize| -> u64 { v.levels[l].iter().map(|t| t.bytes()).sum() };
     // A burst of flushes against a heavier level 1 joins in tiers of level 0 (FR-036).
-    let down =
-        level_bytes(0) >= level_bytes(1) || l0.len() >= (cfg.l0_slow / 2).max(cfg.l0_trigger);
+    let down = level_bytes(0) >= level_bytes(1) || l0.len() >= cfg.l0_down_files();
     let tier = similar_newest(l0);
     if l0.len() >= cfg.l0_trigger && !down && tier >= cfg.l0_trigger {
         let inputs = l0[..tier].iter().map(|t| (0, t.clone())).collect();

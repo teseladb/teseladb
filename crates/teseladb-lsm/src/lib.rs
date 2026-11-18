@@ -77,7 +77,7 @@ pub use concurrent::{
     BlockNeed, SharedBackScan, SharedColumnStep, SharedLsm, SharedRead, SharedScan, SharedStep,
     SharedView, ViewCache, outside_probes,
 };
-pub use config::{Codec, Encryption, L0_TRIGGER_ENV, LsmConfig};
+pub use config::{Codec, Encryption, L0_DOWN_ENV, L0_TRIGGER_ENV, LsmConfig};
 pub use shared::Published;
 
 /// The LZ4 block of `input` (FR-037), as the LSM writes it after the decompressed length: for the

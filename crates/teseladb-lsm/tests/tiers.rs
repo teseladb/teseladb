@@ -75,6 +75,28 @@ fn flushes_join_in_level_0_until_it_weighs_as_much_as_level_1() {
     assert_eq!(get(&mut lsm, &mut disk, &view, &key(3999), ts(1, 0)).map(|r| r.1), Some(ts(1, 0)));
 }
 
+#[test]
+fn with_a_level_0_limit_level_0_goes_down_once_it_holds_that_many_files() {
+    // Tiers kept level 0 at five to seven files against a heavier level 1, each one more source
+    // for every scan (002 runs p42-p43: 3.9 entries for each item). With `l0_down` level 0 goes
+    // down to level 1 once it holds that many files, whatever level 1 weighs.
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { l0_trigger: 2, l0_down: Some(2), ..cfg() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut index = 0;
+    for round in 0..4 {
+        flush(&mut lsm, &mut disk, &mut index, round * 1000..(round + 1) * 1000, 1);
+    }
+    for round in 0..16 {
+        flush(&mut lsm, &mut disk, &mut index, round * 50..round * 50 + 50, 2);
+        let m = lsm.metrics();
+        assert!(m.level_files[0] < 2, "round {round}: {m:?}");
+    }
+    let view = lsm.view();
+    let row = get(&mut lsm, &mut disk, &view, &key(10), ts(10, 0)).expect("a version");
+    assert_eq!(row.1, ts(2, 0));
+}
+
 /// A tier is never joined above a newer file: a version written later always wins, also after
 /// a restart, whatever the tiers did in between.
 #[test]

@@ -46,6 +46,10 @@ pub struct LsmConfig {
     pub dict_renew_bytes: u64,
     /// Files in level 0 that start a compaction.
     pub l0_trigger: usize,
+    /// Files in level 0 that send it down to level 1 whatever level 1 weighs; below them, level
+    /// 0 lighter than level 1 joins its flushes in tiers of level 0 (FR-036). `None`: half of
+    /// `l0_slow`, and at least `l0_trigger`.
+    pub l0_down: Option<usize>,
     /// Files in level 0 that ask writers to slow down.
     pub l0_slow: usize,
     /// Files in level 0 that ask the leader to reject proposals.
@@ -96,6 +100,7 @@ impl Default for LsmConfig {
             dict_bytes: DICT_BYTES,
             dict_renew_bytes: DICT_RENEW_BYTES,
             l0_trigger: 4,
+            l0_down: None,
             l0_slow: 20,
             l0_reject: 36,
             l1_bytes: 64 << 20,
@@ -117,7 +122,27 @@ impl Default for LsmConfig {
 /// p42: 3.92 entries for each item a scan gave). Not an option of the node.
 pub const L0_TRIGGER_ENV: &str = "TESELADB_L0_TRIGGER";
 
+/// The environment variable that sets [`LsmConfig::l0_down`] for a diagnosis run: tiers of level
+/// 0 are each one more source for every scan (002 runs p42-p43). Not an option of the node.
+pub const L0_DOWN_ENV: &str = "TESELADB_L0_DOWN";
+
 impl LsmConfig {
+    /// The files in level 0 that send it down to level 1 ([`LsmConfig::l0_down`]).
+    pub fn l0_down_files(&self) -> usize {
+        self.l0_down.unwrap_or(self.l0_slow / 2).max(self.l0_trigger)
+    }
+
+    /// This configuration with [`LsmConfig::l0_down`] of [`L0_DOWN_ENV`]'s value `env`, when it is
+    /// a whole number from 1 to below `l0_slow`; otherwise as it is.
+    #[must_use]
+    pub fn with_l0_down_from(mut self, env: Option<&str>) -> LsmConfig {
+        let wanted = env.and_then(|v| v.trim().parse::<usize>().ok());
+        if let Some(n) = wanted.filter(|n| (1..self.l0_slow).contains(n)) {
+            self.l0_down = Some(n);
+        }
+        self
+    }
+
     /// This configuration with the level 0 trigger of [`L0_TRIGGER_ENV`]'s value `env`, when it
     /// is a whole number from 1 to below `l0_slow`; otherwise as it is.
     #[must_use]
