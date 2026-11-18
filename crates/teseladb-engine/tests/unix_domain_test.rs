@@ -209,6 +209,20 @@ impl UdServerClient {
     }
 }
 
+/// Makes a directory of this process the current one, once: the sockets the tests name by a
+/// relative path are made there. The tests run from their crate's directory, which on a
+/// development machine is a folder shared by the host, where the kernel loses the socket files a
+/// test left: nothing could remove or even stat them again (`rm: cannot remove '3': Operation
+/// not supported`, 18-11-2026), and the tests that bind those names failed from then on.
+fn in_own_dir() {
+    static MOVED: std::sync::Once = std::sync::Once::new();
+    MOVED.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("unix_domain_test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the directory of the test's sockets");
+        std::env::set_current_dir(&dir).expect("the test's directory as the current one");
+    });
+}
+
 fn rm(what: &str) {
     let res = std::process::Command::new("sh")
         .arg("-c")
@@ -261,12 +275,14 @@ teseladb::engine_test_case!(unixdomain_text, {
 });
 
 teseladb::engine_test_case!(unixdomain_bind, {
+    in_own_dir();
     rm("111 112");
     let uds = UdServerClient::new(b"111", Some(b"112"), 1);
     do_with(uds, |uds: &mut UdServerClient| uds.run())
 });
 
 teseladb::engine_test_case!(unixdomain_short, {
+    in_own_dir();
     rm("3");
     let uds = UdServerClient::new(b"3", None, 10);
     do_with(uds, |uds: &mut UdServerClient| uds.run())
