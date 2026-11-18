@@ -307,25 +307,34 @@ impl Writer {
 
     /// Runs mutations `parts`, which do not depend on each other (the parts of an unordered
     /// insert in the partitions of a collection, D-186): all sent before any answer is awaited.
-    /// A part that needs more than one plain send (a retryable write whose indexes may be in
-    /// another range, an index with `prepareUnique`, a part refused for reaching another range
-    /// or for the write concern) goes as [`Writer::write`] sends it.
+    /// A retryable part whose indexes may be in another range first looks for the result an
+    /// earlier send left across ranges, all such parts in one read: when a retry finds one, the
+    /// parts go one by one as [`Writer::write`] sends them, the answered ones from what they
+    /// left. A part that needs more than one plain send (an index with `prepareUnique`, a part
+    /// refused for reaching another range or for the write concern) goes as `write` sends it.
     pub fn write_all<B: Backend + ?Sized>(
         &mut self,
         backend: &mut B,
         parts: &[(Bound, u32)],
     ) -> Vec<Result<MutationResult, CommandError>> {
-        let simple =
-            |b: &Bound| b.probes().is_empty() && !(self.retry.is_some() && b.keeps_indexes());
+        let one_by_one =
+            |w: &mut Self, backend: &mut B| -> Vec<Result<MutationResult, CommandError>> {
+                parts.iter().map(|(b, stmt)| w.write(backend, b, *stmt)).collect()
+            };
         if parts.len() < 2
             || self.barrier
             || self.wc.w == W::Zero
-            || !parts.iter().all(|(b, _)| simple(b))
+            || !parts.iter().all(|(b, _)| b.probes().is_empty())
         {
-            return parts.iter().map(|(b, stmt)| self.write(backend, b, *stmt)).collect();
+            return one_by_one(self, backend);
         }
         if let Err(e) = super::write_block::data(backend, &parts[0].0) {
             return parts.iter().map(|_| Err(e.clone())).collect();
+        }
+        match self.answered_before(backend, parts) {
+            Ok(false) => {}
+            Ok(true) => return one_by_one(self, backend),
+            Err(e) => return parts.iter().map(|_| Err(e.clone())).collect(),
         }
         let mut ops = Vec::with_capacity(parts.len());
         let mut attempts = Vec::with_capacity(parts.len());
@@ -382,6 +391,23 @@ impl Writer {
                 }
             })
             .collect()
+    }
+
+    /// Whether an earlier send of a retryable part whose indexes may be in another range left its
+    /// result across ranges (009 FR-003): one read for all of them.
+    fn answered_before<B: Backend + ?Sized>(
+        &self,
+        backend: &mut B,
+        parts: &[(Bound, u32)],
+    ) -> Result<bool, CommandError> {
+        let Some((lsid, txn_number)) = self.retry else { return Ok(false) };
+        let statements: Vec<StatementKey> = parts
+            .iter()
+            .filter(|(b, _)| b.keeps_indexes())
+            .map(|(_, stmt)| StatementKey { lsid, txn_number, stmt_id: *stmt })
+            .collect();
+        let found = super::cross_range::earlier_results(backend, &statements)?;
+        Ok(found.iter().any(Option::is_some))
     }
 
     /// Records that statements `stmts` were answered from an earlier send.

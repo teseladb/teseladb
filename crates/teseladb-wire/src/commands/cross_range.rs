@@ -79,10 +79,24 @@ pub fn earlier_result<B: Backend + ?Sized>(
     backend: &mut B,
     s: &StatementKey,
 ) -> Result<Option<Vec<u8>>, CommandError> {
-    let key = result_key(statement_txn(s));
-    let (_, found) = backend.read_versions(std::slice::from_ref(&key))?;
-    let stored = found.into_iter().next().flatten();
-    Ok(stored.and_then(|(_, v)| read_result(&v).map(|(_, r)| r.to_vec())))
+    Ok(earlier_results(backend, std::slice::from_ref(s))?.into_iter().next().flatten())
+}
+
+/// [`earlier_result`] of each of `statements`, in one read of their result keys: the parts of an
+/// unordered insert look theirs up together before they go at once.
+pub fn earlier_results<B: Backend + ?Sized>(
+    backend: &mut B,
+    statements: &[StatementKey],
+) -> Result<Vec<Option<Vec<u8>>>, CommandError> {
+    if statements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys: Vec<Vec<u8>> = statements.iter().map(|s| result_key(statement_txn(s))).collect();
+    let (_, found) = backend.read_versions(&keys)?;
+    Ok(found
+        .into_iter()
+        .map(|stored| stored.and_then(|(_, v)| read_result(&v).map(|(_, r)| r.to_vec())))
+        .collect())
 }
 
 /// Runs `bound` as a transaction across ranges; the mutation's encoded result.

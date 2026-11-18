@@ -221,6 +221,32 @@ fn a_dropped_collection_over_four_partitions_leaves_no_key_in_any() {
 }
 
 #[test]
+fn a_retryable_unordered_insert_with_indexes_goes_to_its_partitions_at_once_and_once() {
+    // A driver's insert_many is a retryable write, and the load's collections have indexes: such
+    // an insert went part after part, each awaited before the next (002 run p36: insert_many p50
+    // 11.9 ms against 3.4 for the reference). Its parts now go at once, after one read of the
+    // results earlier sends left across ranges; sent again, it answers the same and adds nothing.
+    let mut m = Mem::new();
+    fill(&mut m, "spread", 4);
+    let lsid = Document::new().with("id", Value::Binary { subtype: 4, bytes: vec![9; 16] });
+    let docs: Vec<Value> =
+        (5000..5008).map(|i: i32| d(&[("_id", i.into()), ("v", (i % 17).into())])).collect();
+    let cmd = doc(&[("insert", s("spread")), ("documents", Value::Array(docs))])
+        .with("ordered", false)
+        .with("lsid", lsid)
+        .with("txnNumber", Value::Int64(1));
+    let before = m.batches_at_once;
+    let r = guarded(&mut m, cmd.clone());
+    assert_eq!(field(&r, "n"), &Value::Int32(8), "{r:?}");
+    assert!(m.batches_at_once > before, "the parts went one after another");
+    let again = guarded(&mut m, cmd);
+    assert_eq!(field(&again, "n"), &Value::Int32(8), "{again:?}");
+    assert!(again.get("writeErrors").is_none(), "the retry wrote again: {again:?}");
+    let count = guarded(&mut m, doc(&[("count", s("spread"))]));
+    assert_eq!(field(&count, "n"), &Value::Int32(3008), "{count:?}");
+}
+
+#[test]
 fn an_index_built_over_four_partitions_writes_them_at_once_and_answers_as_over_one() {
     // The build of an index on a filled collection writes each chunk's entries a part per
     // partition, all at once (D-186), and the index answers as on a collection of one.
