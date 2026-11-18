@@ -187,6 +187,29 @@ impl Cursor {
         }
     }
 
+    /// Whether the cursor may still give a key of `[lo, hi]`, for a scan that stands before `lo`
+    /// (010 FR-033): a cursor at an entry gives keys from it on, so one past `hi` gives none,
+    /// and one about to load a block gives keys from that block's first on. A history file left
+    /// closed (FR-031) counts when its file, another than `block_file`, sent it a deletion above
+    /// the lowest mark of `block_file`: that deletion may hide a version of the block. Those of
+    /// `block_file` itself are of keys its versions do not have.
+    pub(crate) fn may_give(&self, lo: &[u8], hi: &[u8], block_file: &Table) -> bool {
+        match self {
+            Cursor::Mem(_) => self.may_hold(lo, hi),
+            Cursor::Table { pos: Pos::Ready(_, c), .. } => entry::logical(c.key()) <= hi,
+            Cursor::Table { table, pos: Pos::Block(i), .. } => {
+                *i < table.blocks() && table.block_span(*i).0 <= hi
+            }
+            Cursor::Table { table, pos: Pos::Done, data: Some(file), .. } => {
+                !std::ptr::eq(file.as_ref(), block_file)
+                    && file.props.apart.is_some_and(|a| a > block_file.props.min_ts)
+                    && table.may_hold(lo, hi)
+            }
+            Cursor::Table { pos: Pos::Done, .. } => false,
+            Cursor::Table { table, .. } => table.may_hold(lo, hi),
+        }
+    }
+
     /// The column block the cursor stands at, which it leaves for the next data block.
     pub(crate) fn take_columns(&mut self) -> Option<(Arc<Table>, usize, Bytes, usize)> {
         let Cursor::Table { table, pos, .. } = self else { return None };

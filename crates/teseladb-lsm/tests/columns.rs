@@ -191,6 +191,29 @@ fn a_scan_takes_the_blocks_a_flush_and_a_compaction_wrote_as_columns() {
     assert!(compacted > KEYS as usize / 2, "{compacted} after the compaction");
 }
 
+#[test]
+fn a_newer_file_that_holds_no_key_of_a_block_keeps_it_in_columns() {
+    // A newer file with the first and the last key only: its one block spans every block of the
+    // older file, and holds a key of none but the first and the last (002 run p50: 3,729 column
+    // batches in 300 s, with level 0 files of writes spread over every collection).
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 8 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut rng = Rng::new(7);
+    for i in 0..KEYS {
+        lsm.put(G, i + 1, &key(i), ts(10 + i, 0), &doc(&mut rng)).unwrap();
+    }
+    flush(&mut lsm, &mut disk);
+    compact(&mut lsm, &mut disk);
+    let alone = check(&mut lsm, &mut disk, ts(3000, 0));
+    for (n, i) in [0, KEYS - 1].into_iter().enumerate() {
+        lsm.put(G, KEYS + 1 + n as u64, &key(i), ts(2000, 0), &doc(&mut rng)).unwrap();
+    }
+    flush(&mut lsm, &mut disk);
+    let batched = check(&mut lsm, &mut disk, ts(3000, 0));
+    assert!(batched * 10 > alone * 7, "{batched} documents in batches, {alone} without the file");
+}
+
 /// The documents a scan from another thread over the published view gives as column batches,
 /// reading from `disk` each block it names; the rows it gives one by one are checked against
 /// the core's scan.

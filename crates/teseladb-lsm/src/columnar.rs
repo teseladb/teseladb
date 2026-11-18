@@ -85,5 +85,5 @@ pub(crate) fn takes<'c>(
     from_start
         && hi < ask.end
         && !ask.tombstones.iter().any(|t| t.start.as_slice() <= hi && t.end.as_slice() > lo)
-        && !others.any(|c| c.may_hold(lo, hi))
+        && !others.any(|c| c.may_give(lo, hi, table))
 }
