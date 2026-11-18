@@ -1257,7 +1257,7 @@ impl DataCore {
                 Client::Partial(to, fold, limit, folding) if matches!(r, Ok(Reply::Pieces(_))) => {
                     let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
                     let part = Ok(folded_pieces(&pieces, &fold, limit));
-                    self.go_on_folding(core, (to, fold, limit, folding), part, now);
+                    self.go_on_folding((to, fold, limit, folding), part);
                 }
                 Client::Worked(client, work, limit) if matches!(r, Ok(Reply::Pieces(_))) => {
                     let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
@@ -1308,13 +1308,12 @@ impl DataCore {
     /// The answer `part` of a part of an aggregation's scan: to its sender for a
     /// [`DataReq::Partial`], or for the last part of a [`DataReq::Folds`], with the groups of the
     /// parts before it; a part of a [`DataReq::Folds`] that stopped before the end of its span
-    /// keeps its groups and the core reads the next part, in the host's next step.
+    /// keeps its groups, and its next part waits in the core's background class
+    /// ([`DataReq::FoldsNext`]).
     fn go_on_folding(
         &mut self,
-        core: &mut MultiRaftCore<CoreSm>,
         (to, fold, limit, folding): (DataSender, Fold, usize, Option<Box<Folding>>),
         part: Result<DataReply, RangeError>,
-        now: Nanos,
     ) {
         let Some(mut folding) = folding else {
             let _ = to.send(part);
@@ -1403,7 +1402,7 @@ impl DataCore {
             Client::Local(to, None) => drop(to.send(r.map(DataReply::Remote))),
             Client::Partial(to, fold, limit, folding) => {
                 let part = folded(r, &fold, limit);
-                self.go_on_folding(core, (to, fold, limit, folding), part, now);
+                self.go_on_folding((to, fold, limit, folding), part);
             }
             Client::Worked(client, work, limit) => {
                 // A refusal goes back as it is: the node's handle sends it on to the leader.
