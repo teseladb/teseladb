@@ -127,9 +127,31 @@ pub fn check_quorum<B: Backend + ?Sized>(
     concern(asked, backend.voters(&start, &end)?).map(drop)
 }
 
+/// Records what a step of an index build took since `began` (the backend's clock, in
+/// microseconds: a logic crate reads no clock of its own) as `stage` (012 FR-015).
+pub(super) fn step_since<B: Backend + ?Sized>(
+    backend: &mut B,
+    stage: teseladb_stages::Stage,
+    began: u64,
+) {
+    let took = backend.now_micros().saturating_sub(began).saturating_mul(1_000);
+    teseladb_stages::record(stage, took);
+}
+
 /// Creates the index `cmd` (a [`IndexCommand::Create`]) and makes it write-only: each change
 /// answers once the barrier passed it. The index as it is then.
 pub fn start<B: Backend + ?Sized>(
+    backend: &mut B,
+    collection: u32,
+    cmd: IndexCommand,
+) -> Result<IndexEntry, CommandError> {
+    let began = backend.now_micros();
+    let made = create_write_only(backend, collection, cmd);
+    step_since(backend, teseladb_stages::Stage::IndexBuildStart, began);
+    made
+}
+
+fn create_write_only<B: Backend + ?Sized>(
     backend: &mut B,
     collection: u32,
     cmd: IndexCommand,
@@ -375,13 +397,14 @@ fn smallest_duplicate<B: Backend + ?Sized>(
 }
 
 impl Backfill<'_> {
-    /// Writes the entries of the indexes of `rules` for every document of `coll`.
+    /// Writes the entries of the indexes of `rules` for every document of `coll`, and says how
+    /// many documents that was.
     pub fn run<B: Backend + ?Sized>(
         &self,
         backend: &mut B,
         coll: &CollectionEntry,
         rules: &Rules,
-    ) -> Result<(), Stopped> {
+    ) -> Result<u64, Stopped> {
         // How long the scan ran, in cluster time (the logic reads no clock of its own).
         let started = backend.now_ms();
         let took = |b: &B| b.now_ms().saturating_sub(started);
@@ -395,8 +418,10 @@ impl Backfill<'_> {
                 let done = progress.done;
                 return Err(Stopped::Build(scan_stopped(cause, done, done, took(backend))));
             }
+            let began = backend.now_micros();
             let rows = backend.scan(&from, &end, MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
-            let Some((last, _)) = rows.last() else { return Ok(()) };
+            step_since(backend, teseladb_stages::Stage::IndexBuildScan, began);
+            let Some((last, _)) = rows.last() else { return Ok(progress.done) };
             let next = [last.as_slice(), &[0]].concat();
             if let Some(asked) = self.asked {
                 w.wc.w = concern(asked, backend.voters(&from, &next)?)?;
@@ -407,10 +432,13 @@ impl Backfill<'_> {
             // Over a collection's partitions a part per partition, all written at once (D-186):
             // the chunk's entries are built on every core instead of one range after another.
             let parts = super::crud::by_partition(coll, &mutation, &keys, 0);
+            let began = backend.now_micros();
             let r = match parts.is_empty() {
-                true => w.write(backend, &Bound { mutation, keys }, 0)?,
-                false => merged(w.write_all(backend, &parts))?,
+                true => w.write(backend, &Bound { mutation, keys }, 0),
+                false => merged(w.write_all(backend, &parts)),
             };
+            step_since(backend, teseladb_stages::Stage::IndexBuildWrite, began);
+            let r = r?;
             if let Some(e) = r.errors.into_iter().next() {
                 // A unique index finds its duplicates once the scan is over (measured).
                 if e.error.code == DUPLICATE_KEY {

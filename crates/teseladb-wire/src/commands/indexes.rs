@@ -660,7 +660,8 @@ fn build<B: Backend + ?Sized>(
         let now = backend.now_ms();
         let op = BuildOp::begin(ctx.shared, full(ns), ctx.cmd, specs, now);
         let run = index_build::Backfill { asked: Some(asked), op: Some(op) };
-        run.run(backend, coll, &rules_of(ns, coll, &made)?).map_err(|stopped| match stopped {
+        let rules = rules_of(ns, coll, &made)?;
+        run.run(backend, coll, &rules).map_err(|stopped| match stopped {
             Stopped::Node(e) => e,
             Stopped::Build(e) => {
                 let (errmsg, _) = build_failed(backend, ns, coll, &e.errmsg);
@@ -668,7 +669,11 @@ fn build<B: Backend + ?Sized>(
             }
         })?;
         for e in &made {
-            backend.index_write(IndexCommand::SetState { id: e.id, state: IndexState::Ready })?;
+            let began = backend.now_micros();
+            let ready =
+                backend.index_write(IndexCommand::SetState { id: e.id, state: IndexState::Ready });
+            index_build::step_since(backend, teseladb_stages::Stage::IndexBuildReady, began);
+            ready?;
         }
         Ok(())
     })();
@@ -710,7 +715,7 @@ pub(super) fn backfill<B: Backend + ?Sized>(
     indexes: &[IndexEntry],
 ) -> Result<(), CommandError> {
     let rules = rules_of(ns, coll, indexes)?;
-    index_build::Backfill::default().run(backend, coll, &rules).map_err(Stopped::error)
+    index_build::Backfill::default().run(backend, coll, &rules).map(|_| ()).map_err(Stopped::error)
 }
 
 /// Removes index `e`: state `dropping` (writes stop keeping it), its entries, then its entry in

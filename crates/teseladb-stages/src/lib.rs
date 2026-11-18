@@ -132,11 +132,20 @@ pub enum Stage {
     /// Entries of a core's Raft log from the first one appended to its batch until the batch's
     /// sync is handed to the disk or to the device log.
     LogAppendToSyncOut,
+    /// An index build's creation of one index in the catalog and its change to write-only,
+    /// each with the wait for its barrier (009 FR-006).
+    IndexBuildStart,
+    /// The read of one chunk of documents of an index build's backfill.
+    IndexBuildScan,
+    /// The write of the entries of one chunk of an index build's backfill.
+    IndexBuildWrite,
+    /// An index build's change of one index to ready.
+    IndexBuildReady,
 }
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 46] = [
+    pub const ALL: [Stage; 50] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -183,6 +192,10 @@ impl Stage {
         Stage::StatsBuild,
         Stage::WriteAsk,
         Stage::LogAppendToSyncOut,
+        Stage::IndexBuildStart,
+        Stage::IndexBuildScan,
+        Stage::IndexBuildWrite,
+        Stage::IndexBuildReady,
     ];
 
     /// Its label in the metrics.
@@ -234,6 +247,10 @@ impl Stage {
             Stage::StatsBuild => "stats_build",
             Stage::WriteAsk => "write_ask",
             Stage::LogAppendToSyncOut => "log_append_to_sync_out",
+            Stage::IndexBuildStart => "index_build_start",
+            Stage::IndexBuildScan => "index_build_scan",
+            Stage::IndexBuildWrite => "index_build_write",
+            Stage::IndexBuildReady => "index_build_ready",
         }
     }
 }
