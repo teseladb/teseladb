@@ -10,7 +10,7 @@
 //! its entries are the documents themselves and reading them all is the cost the statistics
 //! exist to avoid. A field two indexes share is read from the first one.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use teseladb_bson::Value;
 use teseladb_keys::space::KeyBuilder;
@@ -64,16 +64,18 @@ pub fn pass_pausing<B: Backend + ?Sized>(
     backend: &mut B,
     pause: &mut dyn FnMut(),
 ) -> Result<usize, CommandError> {
-    let started = Instant::now();
+    let started = backend.now_micros();
     let out = ranges(backend, pause);
     if matches!(out, Ok(n) if n > 0) {
-        stages::record(Stage::StatsPass, nanos_since(started));
+        stages::record(Stage::StatsPass, nanos_since(backend, started));
     }
     out
 }
 
-fn nanos_since(t: Instant) -> u64 {
-    u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX)
+/// The nanoseconds since `started`, a reading of the backend's clock in microseconds: a logic
+/// crate reads no clock of its own.
+fn nanos_since<B: Backend + ?Sized>(backend: &B, started: u64) -> u64 {
+    backend.now_micros().saturating_sub(started).saturating_mul(1_000)
 }
 
 fn ranges<B: Backend + ?Sized>(
@@ -141,7 +143,7 @@ fn refresh<B: Backend + ?Sized>(
     if !plan_exec::plannable_kind(coll)? {
         return Ok(());
     }
-    let started = Instant::now();
+    let started = backend.now_micros();
     let (first, past) = documents_of(coll);
     let docs = cut((&first, &past), (&span.0, &span.1));
     let documents = match backend.doc_tally((coll.tenant, coll.id), (&docs.0, &docs.1))? {
@@ -178,11 +180,11 @@ fn refresh<B: Backend + ?Sized>(
         let names = taken.iter().map(|(_, p)| (*p).to_owned());
         fields.extend(names.zip(columns));
     }
-    stages::record(Stage::StatsRead, nanos_since(started));
-    let started = Instant::now();
+    stages::record(Stage::StatsRead, nanos_since(backend, started));
+    let started = backend.now_micros();
     let prefix = KeyBuilder::collection_start(coll.tenant, coll.id).as_bytes().to_vec();
     stats::recompute_range_pausing(&prefix, (range, span.clone()), documents, fields, pause);
-    stages::record(Stage::StatsBuild, nanos_since(started));
+    stages::record(Stage::StatsBuild, nanos_since(backend, started));
     Ok(())
 }
 

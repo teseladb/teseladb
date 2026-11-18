@@ -48,6 +48,8 @@ UNSAFE_MODULES=(crates/teseladb-lsm/src/skiplist.rs crates/teseladb-lsm/src/shar
   crates/teseladb-search/src/byte_simd.rs
   crates/teseladb-hash/src/arch/mod.rs crates/teseladb-crypto/src/arch/mod.rs crates/teseladb-bson/src/arch/mod.rs
   crates/teseladb-keys/src/prefetch.rs
+  # The translation of liblz4 (004 FR-037): its copies through raw pointers.
+  crates/teseladb-lz4/src/block.rs
   # 023 FR-016, FR-029: plaintext handed to the engine's streams in the vectors TLS made (no copy),
   # and glibc's asynchronous resolver.
   crates/teseladb-io/src/engine/tls_stream.rs crates/teseladb-io/src/engine/blocking.rs)
@@ -286,11 +288,18 @@ check_unsafe_forbidden() {
     | grep -vE "^crates/($(IFS='|'; echo "${UNSAFE_CRATES[*]}"))/" | sort)
 }
 
+# Files of the hot-path crates whose locks no operation takes: the process's turn to start and stop
+# an engine (node_engine.rs), and the hand-off to the threads that are not shards, which glibc's
+# resolver and the blocking calls run on (blocking.rs, 023 FR-029).
+LOCK_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-io/src/engine/blocking.rs)
+
 check_hot_path_locks() {
-  local crate files=()
+  local crate f files=()
   for crate in "${HOT_CRATES[@]}"; do
     [[ -d crates/$crate/src ]] || continue
-    while IFS= read -r f; do files+=("$f"); done < <(find "crates/$crate/src" -name '*.rs' | sort)
+    while IFS= read -r f; do
+      contains "$f" "${LOCK_FILES[@]}" || files+=("$f")
+    done < <(find "crates/$crate/src" -name '*.rs' | sort)
   done
   [[ ${#files[@]} -gt 0 ]] || return 0
   # The code of each line without its comment.
@@ -309,7 +318,10 @@ ENGINE_CRATES=(teseladb-io teseladb-sys teseladb-server)
 # command-line process), the process harness that reads a child's standard input and output (one
 # process per node, D4), and the network namespaces of the AF_XDP tests (a namespace belongs to a
 # thread).
-THREAD_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-server/src/shard_client.rs
+# The offload threads of blocking.rs are the process's threads that are not shards: a blocking call
+# (a file system call, a file written and synced) waits there instead of on a shard (023 FR-029).
+THREAD_FILES=(crates/teseladb-io/src/engine/node_engine.rs crates/teseladb-io/src/engine/blocking.rs
+  crates/teseladb-server/src/shard_client.rs
   crates/teseladb-server/src/procs.rs crates/teseladb-server/src/procs/parent.rs
   crates/teseladb-sys/src/linux/netns.rs)
 
