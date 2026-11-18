@@ -719,16 +719,29 @@ fn poll<B: Backend + ?Sized>(
         pushed.reads_documents() && w.names().any(|ns| pushed.reads(&ns.db, &ns.coll))
     };
     for w in colls.iter().filter(read) {
+        // A collection spread over partitions (003 FR-012, D-186) keeps its documents under
+        // each partition's number: the stream reads every one of them, or it misses the changes
+        // of all but the first (the REST streams of a two-core node lost three of five inserts).
         let (start, end) = documents_of(&w.entry);
-        let (more, mark) = backend.changes(&start, &end, from)?;
-        resolved = resolved.min(mark);
-        rows.extend(more);
+        let spans = super::partition_spans(backend, &start, &end).unwrap_or(vec![(start, end)]);
+        for (start, end) in spans {
+            let (more, mark) = backend.changes(&start, &end, from)?;
+            resolved = resolved.min(mark);
+            rows.extend(more);
+        }
     }
     if resolved <= from {
         return Ok(());
     }
-    let by_id: BTreeMap<(u32, u32), &Watched> =
-        colls.iter().map(|w| ((w.entry.tenant, w.entry.id), w)).collect();
+    // Each partition's number names its collection too.
+    let mut by_id: BTreeMap<(u32, u32), &Watched> = BTreeMap::new();
+    for w in &colls {
+        let (tenant, id) = (w.entry.tenant, w.entry.id);
+        by_id.insert((tenant, id), w);
+        for n in backend.partitions_at(tenant, id).into_iter().flat_map(|p| p.numbers()) {
+            by_id.insert((tenant, n), w);
+        }
+    }
     let versions = rows.into_iter().filter(|r| r.ts <= resolved).map(|r| Versioned {
         key: r.key,
         ts: r.ts,
