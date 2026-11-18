@@ -161,7 +161,9 @@ pub(crate) fn least_loaded_core(
             *l += shared;
         }
     }
-    let best = load.iter().enumerate().min_by_key(|(c, l)| (**l, *c)).map_or(0, |(c, _)| c);
+    let first = usize::from(crate::bootstrap::first_data_core(cores));
+    let best =
+        load.iter().enumerate().skip(first).min_by_key(|(c, l)| (**l, *c)).map_or(0, |(c, _)| c);
     best as u16
 }
 

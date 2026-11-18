@@ -44,6 +44,17 @@ pub fn data_range(sm: &Group0Sm) -> Option<&RangeDesc> {
     sm.ranges.get(&DATA_RANGE)
 }
 
+/// From this many cores a node keeps core 0 for Group 0 and the device log's writer, a task of
+/// core 0 (023 FR-013): no data range goes there, so the writer and the messages of every write
+/// never wait behind a scan's tasks (002 runs p33 to p35: more than 1.3 ms of a 2.6 ms write were
+/// such waits). Smaller nodes use every core for data.
+pub const LOG_CORE_FROM_CORES: u16 = 8;
+
+/// The first core that takes data ranges on a node of `cores` (FR-004).
+pub fn first_data_core(cores: u16) -> u16 {
+    u16::from(cores >= LOG_CORE_FROM_CORES)
+}
+
 /// The core of every node that holds the data range (Group 0's rule: group modulo cores).
 pub fn data_range_core(cores: u16) -> u16 {
     (DATA_RANGE.0 % u64::from(cores.max(1))) as u16

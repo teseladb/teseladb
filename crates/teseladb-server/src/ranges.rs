@@ -816,7 +816,14 @@ impl Replicas {
                 *l += 1;
             }
         }
-        let best = load.iter().enumerate().min_by_key(|(c, l)| (**l, *c)).map_or(0, |(c, _)| c);
+        // From eight cores, core 0 keeps Group 0 and the device log's writer only.
+        let first = usize::from(teseladb_meta::bootstrap::first_data_core(self.cores));
+        let best = load
+            .iter()
+            .enumerate()
+            .skip(first)
+            .min_by_key(|(c, l)| (**l, *c))
+            .map_or(0, |(c, _)| c);
         u16::try_from(best).unwrap_or(0)
     }
 
@@ -1385,6 +1392,21 @@ mod tests {
         r.note_asked_move(GroupId(3), 3);
         // Core 0: ranges 1 and 4 and Group 0; core 2: range 2 on its way; core 3: range 3 asked;
         // core 1: nothing.
+        assert_eq!(r.least_loaded_core(), 1);
+    }
+
+    #[test]
+    fn the_halves_of_a_split_do_not_go_to_core_0_of_an_eight_core_node() {
+        // Core 0 runs the device log's writer: from eight cores it takes no data range.
+        let mut r = Replicas::new(ME, 1, 1 << 30);
+        r.set_cores(8);
+        let descs = (1..=7u64).map(|c| {
+            let mut d = desc(c, &[c as u8], &[c as u8 + 1]);
+            d.core = c as u16;
+            d
+        });
+        r.set(&Ranges { descs: descs.collect(), ..Ranges::default() });
+        // Every core from 1 to 7 holds one range and core 0 only Group 0: core 1 wins.
         assert_eq!(r.least_loaded_core(), 1);
     }
 

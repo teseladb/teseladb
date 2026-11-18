@@ -2,7 +2,7 @@
 //! (FR-004). Group 0 counts as load on core 0 of every node, so the first data range lands on core
 //! `1 mod cores` (D-045).
 
-use teseladb_meta::bootstrap::data_range_core;
+use teseladb_meta::bootstrap::{LOG_CORE_FROM_CORES, data_range_core, first_data_core};
 use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{Group0Result, Group0Sm};
 use teseladb_types::{GroupId, NodeId};
@@ -80,6 +80,18 @@ fn new_ranges_fill_the_least_loaded_core_of_their_replicas() {
         panic!("split")
     };
     assert_eq!(sm.ranges[&right].core, sm.ranges[&g].core);
+}
+
+#[test]
+fn a_node_of_eight_cores_or_more_keeps_core_0_for_group_0_and_its_log() {
+    // The device log's writer is a task of core 0: a scan there made every write of the node wait
+    // behind it (002 runs p33 to p35). From LOG_CORE_FROM_CORES cores no data range goes there.
+    let mut sm = cluster(&[8]);
+    let cores: Vec<u16> = (1..=14).map(|s| create(&mut sm, s, &[1])).collect();
+    assert!(!cores.contains(&0), "{cores:?}");
+    assert_eq!(cores, [1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(first_data_core(8), 1);
+    assert_eq!(first_data_core(LOG_CORE_FROM_CORES - 1), 0);
 }
 
 #[test]
