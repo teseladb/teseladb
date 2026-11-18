@@ -8,7 +8,9 @@
 # `anotherproduct-rs-bench:1.98.0`) has the pinned Rust toolchain, glibc and the libraries the engine's
 # battery links; the build goes to the volume `TESELADB_LINUX_VOLUME` (default
 # `teseladb-linux-target`) under `TESELADB_LINUX_TARGET_DIR`, and the crates come from the host's
-# Cargo registry (offline). `TESELADB_LINUX_CPUS` pins the container to a cpuset. Every other
+# Cargo registry (offline). `TESELADB_LINUX_CPUS` pins the container to a cpuset, and
+# `TESELADB_LINUX_FREE_GIB` (50) is the room a build of tests wants on the volume's disk and
+# `TESELADB_LINUX_DEBUG` the debug information of the tests' build (none). Every other
 # `TESELADB_*` variable of the caller (`TESELADB_KILL_ROUNDS`…) reaches the tests.
 # The container is privileged (io_uring, the engine's huge pages and NUMA binding, and the tests of
 # the port on AF_XDP, 012 FR-033, which make `veth` pairs and namespaces inside it, load the XDP
@@ -58,6 +60,14 @@ esac
 IMAGE=${TESELADB_LINUX_IMAGE:-anotherproduct-rs-bench:1.98.0}
 VOLUME=${TESELADB_LINUX_VOLUME:-teseladb-linux-target}
 TARGET_DIR=${TESELADB_LINUX_TARGET_DIR:-/target/test-linux}
+# The room a build of tests wants on the volume's disk, in GiB: with less, the executables of
+# earlier builds are removed before it (scripts/free-test-builds.sh).
+FREE_GIB=${TESELADB_LINUX_FREE_GIB:-50}
+# The debug information of the tests' build (Cargo's `debug`): none. Every test executable links
+# the whole server; with line tables only each one weighed 280 MiB, 196 of them debug sections,
+# and the 635 of the workspace did not fit in the Docker disk (18-11-2026). A backtrace with
+# lines wants `TESELADB_LINUX_DEBUG=line-tables-only`, which builds everything again.
+TEST_DEBUG=${TESELADB_LINUX_DEBUG:-0}
 REGISTRY=${CARGO_HOME:-$HOME/.cargo}/registry
 crates=("$@")
 [[ ${#crates[@]} -gt 0 ]] || crates=("${LINUX_CRATES[@]}")
@@ -91,9 +101,9 @@ fi
 # lookup (023 T033) runs a DNS server that never answers; nothing else resolves names off the host.
 docker run --rm -i --privileged --dns 127.0.0.1 ${cpuset[@]+"${cpuset[@]}"} \
   --tmpfs /full:rw,size=1m --ulimit memlock=-1 -e TESELADB_FULL_DIR=/full \
-  ${passed_env[@]+"${passed_env[@]}"} -e MODE="$mode" \
+  ${passed_env[@]+"${passed_env[@]}"} -e MODE="$mode" -e FREE_GIB="$FREE_GIB" \
   -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR="$TARGET_DIR" -e TARGET="$TARGET" \
-  -e CARGO_PROFILE_DEV_DEBUG=line-tables-only \
+  -e CARGO_PROFILE_DEV_DEBUG="$TEST_DEBUG" \
   -v "$REGISTRY:/cargo-home/registry" -v "$VOLUME:/target" -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
   bash -s -- "${args[@]}" <<'SH'
 set -uo pipefail
@@ -104,13 +114,22 @@ case $MODE in
     cargo build --offline --target "$TARGET" --release -p teseladb-server || exit 1
     exec scripts/check-deps.sh --needed "$CARGO_TARGET_DIR/$TARGET/release/teseladb" ;;
 esac
-# The tests build with line tables only (`CARGO_PROFILE_DEV_DEBUG`): a panic still names its file
-# and line, and each test binary is a fraction of its size with the full debug information.
+# The tests build without debug information (`CARGO_PROFILE_DEV_DEBUG`, see `TEST_DEBUG`): a
+# panic still names its file and line, which the compiler writes in the code.
 # Every test binary, as `crate-dir:binary`: those built with the test profile, and the test targets
 # with their own `main` (`harness = false`, built without it). The plain programs that integration
 # tests run through `CARGO_BIN_EXE_*`, and examples, are not tests.
 # A test that does not build fails the run and shows cargo's errors: before, they went to /dev/null and
 # the binaries that did build ran alone, or the run ended with "nothing was built".
+# One run of tests at a time in a volume; a second one waits here for the first. Each run makes
+# room and prunes: it removes test executables, and one started while another still ran its
+# tests took away those it had built and not run yet (18-11-2026: 87 "No such file").
+mkdir -p "$CARGO_TARGET_DIR"
+exec 9>"$CARGO_TARGET_DIR/.test-linux.lock"
+flock 9
+# Room first: the executables of the crates of earlier runs stay in the volume, and a build of
+# many crates ended with "No space left on device" (scripts/free-test-builds.sh).
+scripts/free-test-builds.sh "$CARGO_TARGET_DIR/$TARGET/debug" "$FREE_GIB"
 if ! cargo test --offline --target "$TARGET" "$@" --no-run --message-format=json \
   >/tmp/test-build.json 2>/dev/null; then
   # The JSON carries the diagnostics: the same build, cached, says them as text.
@@ -144,9 +163,16 @@ for run in "${runs[@]}"; do
     *) cmd=("$bin") ;;
   esac
   if out=$(cd "$dir" && "${cmd[@]}" 2>&1); then
-    echo "$out" | grep -E "^test result|^[a-z_]+: ok" | sed "s|^|$name: |"
+    # A program with its own `main` may print neither kind of line: its name alone says it ran.
+    shown=$(echo "$out" | grep -E "^test result|^[a-z_]+: ok" | sed "s|^|$name: |")
+    echo "${shown:-$name: ok}"
     [[ ${cmd[0]} == python3 ]] && echo "$name: ok (through ${cmd[1]##*/})"
   else
+    # What failed first: a test that starts node processes prints their logs after its panic,
+    # and the last lines alone showed the logs without it. The whole message of the panic: a
+    # test that reports what each node held when it gave up says it in a dozen lines, and six
+    # showed the first node's alone.
+    echo "$out" | grep -E -A40 "panicked at|^error|^failures:" | head -160
     echo "$out" | tail -40
     echo "FAILED: $name"
     fail=1
