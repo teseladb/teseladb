@@ -40,7 +40,7 @@ thread_local! {
 
 /// An asynchronous sharded service: it keeps itself alive while its `run` is in flight.
 struct AsyncService {
-    asvc: AsyncShardedService,
+    asvc: AsyncShardedService<AsyncService>,
 }
 
 impl Drop for AsyncService {
@@ -51,9 +51,9 @@ impl Drop for AsyncService {
 
 impl AsyncService {
     fn run(&mut self) {
-        // SAFETY: `run` is only called through `invoke_on_all` of the container
-        // that started this instance, on its shard.
-        let r = unsafe { self.asvc.shared_from_this(self) };
+        // SAFETY: the tracker is inside the instance, and `run` is only called through
+        // `invoke_on_all` of the container that started it, on its shard.
+        let r = unsafe { self.asvc.shared_from_this() };
         let this: *const Self = self;
         // Wait a while and check.
         let _ =
@@ -74,8 +74,8 @@ impl ShardedService for AsyncService {
         make_ready_future(())
     }
 
-    fn freed(&mut self) -> Option<Future<()>> {
-        Some(self.asvc.freed())
+    fn async_service(&mut self) -> Option<&mut AsyncShardedService<Self>> {
+        Some(&mut self.asvc)
     }
 }
 

@@ -710,6 +710,13 @@ impl<T: ?Sized> SharedPtr<T> {
     fn addr(&self) -> *const u8 {
         self.p.map_or(ptr::null(), |p| p.as_ptr() as *const u8)
     }
+
+    /// The object's counter (null for a null pointer), with which [`from_parts`](Self::from_parts)
+    /// makes another owner.
+    #[inline]
+    pub(crate) fn counter(&self) -> *mut SharedPtrCountBase {
+        self.b
+    }
 }
 
 impl<T> SharedPtr<T> {
@@ -778,24 +785,6 @@ pub fn make_shared<T>(a: T) -> SharedPtr<T> {
     }));
     // SAFETY: b is a freshly allocated object; data lives inside it.
     unsafe { SharedPtr::from_parts(b as *mut SharedPtrCountBase, &raw mut (*b).data) }
-}
-
-/// A new `shared_ptr` sharing ownership of an object that [`make_shared`] placed: the counter
-/// sits right before the object in the same block.
-///
-/// # Safety
-///
-/// `p` points to the `data` of a live block made by [`make_shared::<T>`] (with the provenance
-/// of the whole block, as the pointers the `SharedPtr` hands out have), on its shard.
-#[inline]
-pub(crate) unsafe fn shared_from_make_shared<T>(p: *const T) -> SharedPtr<T> {
-    let offset = std::mem::offset_of!(SharedPtrCountFor<T>, data);
-    // SAFETY: by the caller `p` is the `data` field of a repr(C) `SharedPtrCountFor<T>`, whose
-    // `base` is its first field, `offset` bytes before `data`.
-    unsafe {
-        let b = p.cast_mut().byte_sub(offset).cast::<SharedPtrCountBase>();
-        SharedPtr::from_parts(b, p.cast_mut())
-    }
 }
 
 /// Allocates `value` and returns the first [`SharedPtr`] to it, counting with the

@@ -21,6 +21,7 @@
 
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::ptr::{self, NonNull};
 
 use crate::engine::core::future::{
     ExceptionPtr, Future, Futurize, InvalidArgument, Promise, make_exception_future,
@@ -29,7 +30,7 @@ use crate::engine::core::future::{
 use crate::engine::core::loop_::parallel_for_each;
 use crate::engine::core::map_reduce::{ReduceResult, Reducer, map_reduce, map_reduce_initial};
 pub use crate::engine::core::shard_id::this_shard_id;
-use crate::engine::core::shared_ptr::{SharedPtr, make_shared};
+use crate::engine::core::shared_ptr::{SharedPtr, SharedPtrCountBase, make_shared};
 use crate::engine::core::smp::{Smp, SmpSubmitToOptions};
 use crate::engine::core::sstring::Sstring;
 
@@ -115,12 +116,11 @@ pub trait ShardedService: Sized + 'static {
         make_ready_future(())
     }
 
-    /// Returns a future that resolves when the instance is destroyed, so that
-    /// [`Sharded::stop`] waits until every reference to it is released. A service embedding an
-    /// [`AsyncShardedService`] returns its [`freed`](AsyncShardedService::freed); the default,
-    /// `None`, does not wait.
+    /// Returns the [`AsyncShardedService`] the service embeds: [`Sharded::stop`] then waits until
+    /// every reference to the instance is released, and the instance can take pointers to
+    /// itself. The default, `None`, does not wait.
     #[inline]
-    fn freed(&mut self) -> Option<Future<()>> {
+    fn async_service(&mut self) -> Option<&mut AsyncShardedService<Self>> {
         None
     }
 
@@ -133,53 +133,68 @@ pub trait ShardedService: Sized + 'static {
 
 /// Makes [`Sharded::stop`] wait until every reference to a service instance is released.
 ///
-/// Embed it in the service and return `Some(self.async_service.freed())` from
-/// [`ShardedService::freed`]. The service must still track its own references in asynchronous
-/// code, by taking [`shared_from_this`](Self::shared_from_this) and keeping the pointer while it
-/// uses the instance.
-pub struct AsyncShardedService {
+/// Embed it in the service and return it from [`ShardedService::async_service`]. The service
+/// must still track its own references in asynchronous code, by taking
+/// [`shared_from_this`](Self::shared_from_this) and keeping the pointer while it uses the
+/// instance.
+pub struct AsyncShardedService<Service> {
     _freed: Promise<()>,
+    // The counter and the object of the block `Sharded` placed the service in, null until then.
+    // Not an owner: the service holds this value, not the other way round.
+    _counter: *mut SharedPtrCountBase,
+    _service: *mut Service,
 }
 
-impl AsyncShardedService {
-    /// Returns a tracker whose release nobody waits for yet.
+impl<Service> AsyncShardedService<Service> {
+    /// Returns a tracker whose release nobody waits for yet, of a service no `Sharded` holds yet.
     #[inline]
     pub fn new() -> Self {
-        Self { _freed: Promise::new() }
+        Self { _freed: Promise::new(), _counter: ptr::null_mut(), _service: ptr::null_mut() }
     }
 
     /// Returns a future that resolves once the service is destroyed.
     #[inline]
-    pub fn freed(&mut self) -> Future<()> {
+    fn freed(&mut self) -> Future<()> {
         self._freed.get_future()
     }
 
-    /// Returns a shared pointer to the service `this` that embeds `self`. Keeping it delays the
+    /// Records the block that `holder` owns as the one of the service that embeds `self`.
+    #[inline]
+    fn placed(&mut self, holder: &SharedPtr<Service>) {
+        self._counter = holder.counter();
+        self._service = holder.get().map_or(ptr::null_mut(), NonNull::as_ptr);
+    }
+
+    /// Returns a shared pointer to the service that embeds `self`. Keeping it delays the
     /// service's destruction, and with it the end of [`Sharded::stop`].
     ///
-    /// `Sharded` allocates every instance with `make_shared`, so the reference count sits next to
-    /// the service and can be found from it.
+    /// The pointer shares the counter of the block `Sharded` placed the service in, which
+    /// `Sharded` recorded here: it is not found from a reference to the service, through which
+    /// nothing outside the service may be written.
+    ///
+    /// # Panics
+    /// If no `Sharded` holds the service.
     ///
     /// # Safety
-    /// `this` is the service that embeds `self`, and it is a live instance created by
-    /// [`Sharded::start`] or [`Sharded::start_single`] (reached through the calls of that
-    /// `Sharded`), used on its own shard.
+    /// `self` is still inside the service instance that returned it from
+    /// [`ShardedService::async_service`] (it was not moved out of it), and the call is on that
+    /// instance's shard.
     #[inline]
-    pub unsafe fn shared_from_this<S: ShardedService>(&self, this: &S) -> SharedPtr<S> {
-        // SAFETY: by the caller, `this` is the value of the `make_shared` block that
-        // `set_local_service` built; the reference reaching it was handed out from that block's
-        // `SharedPtr`.
-        unsafe { crate::engine::core::shared_ptr::shared_from_make_shared(this) }
+    pub unsafe fn shared_from_this(&self) -> SharedPtr<Service> {
+        assert!(!self._counter.is_null(), "no Sharded holds this service");
+        // SAFETY: by the caller `self` is inside the block `placed` recorded, which is therefore
+        // alive, on its shard.
+        unsafe { SharedPtr::from_parts(self._counter, self._service) }
     }
 }
 
-impl Default for AsyncShardedService {
+impl<Service> Default for AsyncShardedService<Service> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for AsyncShardedService {
+impl<Service> Drop for AsyncShardedService<Service> {
     fn drop(&mut self) {
         self._freed.set_value(());
     }
@@ -278,8 +293,8 @@ impl<Service: ShardedService> Entry<Service> {
         if let Some(service) = &self.service {
             // SAFETY: the instance is this shard's and stop() has finished with it; no other
             // reference to it is live during the call.
-            if let Some(f) = unsafe { service.get_mut_unchecked() }.freed() {
-                return f;
+            if let Some(tracker) = unsafe { service.get_mut_unchecked() }.async_service() {
+                return tracker.freed();
             }
         }
         make_ready_future(())
@@ -385,7 +400,11 @@ impl<Service: ShardedService> This<Service> {
     unsafe fn set_local_service(self, service: Service) {
         let s = make_shared(service);
         // SAFETY: `s` was just created and is not shared yet.
-        unsafe { s.get_mut_unchecked() }.set_container(self.0);
+        let instance = unsafe { s.get_mut_unchecked() };
+        instance.set_container(self.0);
+        if let Some(tracker) = instance.async_service() {
+            tracker.placed(&s);
+        }
         // SAFETY: the caller guarantees the slot is this shard's and the vector is sized.
         unsafe { *self.slot() = Some(s) };
     }
@@ -546,7 +565,7 @@ impl<Service: ShardedService> Sharded<Service> {
     ///
     /// For every started instance, [`ShardedService::stop`] is called on its shard; then every
     /// instance is released, and the returned future resolves once all are destroyed (services
-    /// that report their destruction with [`ShardedService::freed`] are waited for). The future
+    /// that embed an [`AsyncShardedService`] are waited for). The future
     /// fails with the first error of a `stop`, after all instances have been released.
     pub fn stop(mut self: Pin<&mut Self>) -> Future<()> {
         let this = self.as_mut().this();

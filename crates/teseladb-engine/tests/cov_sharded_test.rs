@@ -32,13 +32,13 @@ use teseladb::engine_thread_test_case;
 /// A service that knows its container and reports its destruction.
 struct Peer {
     peer: PeeringShardedService<Peer>,
-    tracker: AsyncShardedService,
+    tracker: AsyncShardedService<Peer>,
     shard: u32,
 }
 
 impl ShardedService for Peer {
-    fn freed(&mut self) -> Option<Future<()>> {
-        Some(self.tracker.freed())
+    fn async_service(&mut self) -> Option<&mut AsyncShardedService<Self>> {
+        Some(&mut self.tracker)
     }
 
     fn set_container(&mut self, container: *mut Sharded<Self>) {
@@ -71,8 +71,8 @@ engine_thread_test_case!(services_see_their_container_and_delay_the_stop, {
     assert_eq!(containers, vec![addr; Smp::count() as usize]);
     s.as_mut()
         .invoke_on(0, |p: &mut Peer| {
-            // SAFETY: the instance was created by `Sharded::start` and is used on its shard.
-            let me = unsafe { p.tracker.shared_from_this(p) };
+            // SAFETY: the tracker is inside the instance `Sharded::start` created, on its shard.
+            let me = unsafe { p.tracker.shared_from_this() };
             assert_eq!(me.shard, 0);
             HELD.with(|h| *h.borrow_mut() = Some(me));
         })
