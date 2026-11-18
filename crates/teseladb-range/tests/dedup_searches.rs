@@ -14,7 +14,11 @@ impl Mutation for Inc {
     fn eval(&self, current: &[Option<(u8, &[u8])>], _: Hlc) -> Result<Outcome, MutationError> {
         let found = current[0].map_or(0, |(_, v)| v[0]);
         Ok(Outcome {
-            puts: vec![Put { key: KEY.to_vec(), value_type: 1, value: vec![found.wrapping_add(1)] }],
+            puts: vec![Put {
+                key: KEY.to_vec(),
+                value_type: 1,
+                value: vec![found.wrapping_add(1)],
+            }],
             deletes: vec![],
             change: vec![b'+'],
             result: vec![found],
