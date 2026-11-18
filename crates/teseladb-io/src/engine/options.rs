@@ -11,7 +11,7 @@
 //! | huge pages reserved | `--hugepages <hugetlbfs mount>` |
 //! | `--direct-io auto` / `on` / `off` | `--relaxed-dma` / nothing / `--kernel-page-cache 1` |
 //! | `--idle-poll-us <µs>` | `--idle-poll-time-us` (by default [`DEFAULT_IDLE_POLL_US`]) |
-//! | always | `--network-stack posix`, `--blocked-reactor-notify-ms 25`, `--task-quota-ms 0.5` |
+//! | always | `--network-stack posix`, `--blocked-reactor-notify-ms 25`, `--task-quota-ms 0.5` (a diagnosis run sets it with `TESELADB_TASK_QUOTA_MS`) |
 //!
 //! The engine's allocator is the global one (D-181) and its reactor backend is the one it picks
 //! (io_uring if the kernel allows it, else linux-aio): neither is an option.
@@ -47,6 +47,26 @@ pub const DEFAULT_IDLE_POLL_US: u32 = 0;
 
 /// The engine's task quota, its default: the longest a task runs before the reactor polls.
 pub const TASK_QUOTA_MS: &str = "0.5";
+
+/// The environment variable that sets the task quota, in milliseconds, for a diagnosis run: how
+/// long a message from another shard or a finished write waits behind a busy shard's tasks
+/// depends on it. Not an option of the node.
+pub const TASK_QUOTA_ENV: &str = "TESELADB_TASK_QUOTA_MS";
+
+/// The quota the engine runs with the most, and the least: below, polling would take most of a
+/// shard; above, a message would wait longer than a write takes.
+const TASK_QUOTA_BOUNDS_MS: (f64, f64) = (0.05, 10.0);
+
+/// The task quota from the value of [`TASK_QUOTA_ENV`], if it is a number of milliseconds within
+/// [`TASK_QUOTA_BOUNDS_MS`]; otherwise [`TASK_QUOTA_MS`].
+#[must_use]
+pub fn task_quota_ms(env: Option<&str>) -> String {
+    let (lo, hi) = TASK_QUOTA_BOUNDS_MS;
+    env.map(str::trim)
+        .filter(|v| v.parse::<f64>().is_ok_and(|ms| (lo..=hi).contains(&ms)))
+        .unwrap_or(TASK_QUOTA_MS)
+        .to_owned()
+}
 
 /// The node's memory without `--memory-limit`: this share, in percent, of what the host has
 /// (012 FR-013).
@@ -158,7 +178,7 @@ impl EngineConfig {
             "--blocked-reactor-notify-ms".to_owned(),
             stall_notify_ms(std::env::var(STALL_NOTIFY_ENV).ok().as_deref()).to_string(),
             "--task-quota-ms".to_owned(),
-            TASK_QUOTA_MS.to_owned(),
+            task_quota_ms(std::env::var(TASK_QUOTA_ENV).ok().as_deref()),
             // The node writes its own log; the engine says only what goes wrong.
             "--default-log-level".to_owned(),
             "error".to_owned(),
@@ -421,6 +441,20 @@ mod tests {
         // Nothing below 1 ms, and a value that is no number leaves the default.
         assert_eq!(stall_notify_ms(Some("0")), STALL_NOTIFY_MS);
         assert_eq!(stall_notify_ms(Some("x")), STALL_NOTIFY_MS);
+    }
+
+    #[test]
+    fn the_task_quota_changes_only_for_a_diagnosis_and_within_bounds() {
+        assert_eq!(task_quota_ms(None), TASK_QUOTA_MS);
+        assert_eq!(task_quota_ms(Some("0.1")), "0.1");
+        assert_eq!(task_quota_ms(Some(" 0.25 ")), "0.25");
+        // Out of [0.05, 10] ms, or no number, leaves the default.
+        assert_eq!(task_quota_ms(Some("0.01")), TASK_QUOTA_MS);
+        assert_eq!(task_quota_ms(Some("11")), TASK_QUOTA_MS);
+        assert_eq!(task_quota_ms(Some("x")), TASK_QUOTA_MS);
+        let a = EngineConfig::default().args();
+        let at = a.iter().position(|s| s == "--task-quota-ms").expect("given");
+        assert_eq!(a[at + 1], task_quota_ms(std::env::var(TASK_QUOTA_ENV).ok().as_deref()));
     }
 
     #[test]
