@@ -1257,6 +1257,52 @@ fn a_view_from_before_an_answered_write_was_applied_does_not_serve_a_scan_that_b
 }
 
 #[test]
+fn a_long_scan_in_the_core_stops_after_its_entries_and_goes_on_in_the_next_turns() {
+    // A scan the core serves ran to its limit in one turn: parts of aggregations and range scans
+    // held their shard 2-11 ms (stall reports of the one-node load p25, 66 % of the quota
+    // violations left). It stops after SCAN_STEP_ENTRIES entries, says it can go on at once
+    // (`runnable`), and the next turns finish it with every document.
+    let mut n = Node::new();
+    let docs = 3 * teseladb_range::push::SCAN_STEP_ENTRIES + 7;
+    let key = |i: usize| [b"\x01b".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
+    for i in 0..docs {
+        n.mutate(&key(i), Box::new(SetKey(key(i), Some(1))), MAJORITY);
+    }
+    n.settle();
+    let (now, wall) = (n.now, n.wall());
+    let req = ScanReq {
+        g: G,
+        start: b"\x01a".to_vec(),
+        end: b"\x01z".to_vec(),
+        concern: ReadConcern::Local,
+        limit: 10_000,
+        backward: false,
+    };
+    let id = n.host.scan(&mut n.core, req, now, wall);
+    n.turn(now, wall);
+    assert!(n.reply(id).is_none(), "one turn does not read the whole span");
+    assert!(n.host.runnable(), "a scan that stopped at its entries goes on without waiting");
+    // Resuming moves only the scans that stopped at their entries, a step each, without a
+    // whole poll of the host, until the scan read the rest.
+    let mut resumed = 0;
+    while n.reply(id).is_none() {
+        assert!(resumed < 3, "a step reads SCAN_STEP_ENTRIES entries");
+        n.host.resume_scans(&mut n.core, now);
+        n.replies.extend(n.host.take_replies());
+        resumed += 1;
+    }
+    assert!(resumed >= 1);
+    assert!(!n.host.runnable());
+    match n.reply(id) {
+        Some(Ok(Reply::Batch(rows))) => {
+            let keys: Vec<_> = rows.iter().map(|(k, _)| k.clone()).collect();
+            assert_eq!(keys, (0..docs).map(key).collect::<Vec<_>>(), "every document, in order");
+        }
+        other => panic!("not a batch: {other:?}"),
+    }
+}
+
+#[test]
 fn a_long_scan_outside_the_core_pauses_between_batches_so_its_shard_can_run_other_work() {
     // The read of a span outside the core ran its whole part without letting its shard go: one
     // part of an aggregation by index held the reactor 25-33 ms (stall reports of the one-node

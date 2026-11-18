@@ -90,6 +90,14 @@ pub trait CoreLogic {
     /// none of its work waits for a tick. A core whose logic rests and that had no work for
     /// [`REST_AFTER`] ticks every [`REST_TICK`] instead of every tick (H-037).
     fn resting(&self) -> bool;
+    /// Whether the logic has work it can go on with at once, without anything arriving: a scan
+    /// that stopped at its share of a turn. The core lets its shard run its other tasks and then
+    /// calls [`resume`](CoreLogic::resume) in its next turn.
+    fn runnable(&self) -> bool {
+        false
+    }
+    /// Goes on with the work [`runnable`](CoreLogic::runnable) announced.
+    fn resume(&mut self, _now: Nanos, _wall_ms: u64) {}
 }
 
 /// What reaches a core from other threads.

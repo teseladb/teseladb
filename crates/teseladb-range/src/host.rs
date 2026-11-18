@@ -1562,6 +1562,28 @@ impl RangeHost {
         self.reqs.is_empty()
     }
 
+    /// Whether a scan stopped at its entries ([`crate::push::SCAN_STEP_ENTRIES`]) and goes on
+    /// at the next [`poll`](RangeHost::poll), without waiting for anything to arrive: the
+    /// embedder lets its shard run its other work and polls again at once.
+    pub fn runnable(&self) -> bool {
+        self.reqs.values().any(paused_scan)
+    }
+
+    /// Moves each scan that stopped at its entries one step on, and nothing else: going on with
+    /// them costs their steps, not a whole [`poll`](RangeHost::poll) of every range.
+    pub fn resume_scans<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        now: Nanos,
+    ) {
+        self.now = now;
+        let ids: Vec<ReqId> =
+            self.reqs.iter().filter(|(_, r)| paused_scan(r)).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.step(core, id, now);
+        }
+    }
+
     fn publish_views<S: StateMachine + RangeState>(&mut self, core: &MultiRaftCore<S>, now: Nanos) {
         self.lsm.borrow().publish();
         let shared = self.lsm.borrow().shared();
@@ -1858,8 +1880,10 @@ impl RangeHost {
                 true
             }
             None => {
+                // A scan that stopped at its entries moved; it goes on at the next poll.
+                let paused = matches!(&q.state, GetState::Scanning(s) if s.paused());
                 self.reqs.insert(id, Req::Get(q));
-                moved
+                moved || paused
             }
         }
     }
@@ -1883,6 +1907,11 @@ fn crossing(
         }
         _ => Err(RangeError::OutOfRange),
     }
+}
+
+/// Whether `r` is a scan that stopped at its entries ([`crate::push::SCAN_STEP_ENTRIES`]).
+fn paused_scan(r: &Req) -> bool {
+    matches!(r, Req::Get(GetReq { state: GetState::Scanning(s), .. }) if s.paused())
 }
 
 /// Records how long a read waited in a state it entered at `since` (012 FR-015).

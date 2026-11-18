@@ -1961,6 +1961,18 @@ impl CoreLogic for NodeLogic {
         self.core.on_clock(now, wall_ms);
     }
 
+    fn runnable(&self) -> bool {
+        self.data.as_ref().is_some_and(DataCore::runnable)
+    }
+
+    fn resume(&mut self, now: Nanos, wall_ms: u64) {
+        self.now = now;
+        self.wall_ms = wall_ms;
+        if let Some(data) = &mut self.data {
+            data.resume(&mut self.core, now);
+        }
+    }
+
     fn resting(&self) -> bool {
         // Every group at rest, nothing in the host and nothing on its way to the disk: the
         // node's own periodic duties are timed in `Nanos` and tolerate the longer tick (H-037).

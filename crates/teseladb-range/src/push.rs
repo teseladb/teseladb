@@ -277,12 +277,25 @@ pub struct ScanState {
     /// The pieces taken so far by [`ScanState::step_pieces`], and their documents.
     pieces: Vec<Piece>,
     piece_docs: usize,
+    /// Whether the last step stopped at its [`SCAN_STEP_ENTRIES`] and not for a block.
+    paused: bool,
 }
+
+/// The most entries one step of a scan in the core looks at: a part of thousands of documents
+/// held its shard for milliseconds in one turn (stall reports of the one-node load p25). A step
+/// that reaches it stops with what it has, [`ScanState::paused`], and the next turn goes on.
+pub const SCAN_STEP_ENTRIES: usize = 128;
 
 impl ScanState {
     /// The scan's mark.
     pub fn read_ts(&self) -> Hlc {
         self.read_ts
+    }
+
+    /// Whether the last step stopped at [`SCAN_STEP_ENTRIES`]: the scan can go on at once,
+    /// without waiting for a block.
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     /// A scan of `[start, end)` at `read_ts`, with its uncertainty window up to `uncertain_to`,
@@ -320,6 +333,7 @@ impl ScanState {
             main_batch: None,
             pieces: Vec::new(),
             piece_docs: 0,
+            paused: false,
         }
     }
 
@@ -414,7 +428,14 @@ impl ScanState {
         view: &TxnView,
         limit: usize,
     ) -> Option<Result<Vec<Piece>, ReadFault>> {
+        self.paused = false;
+        let mut entries = 0;
         while self.piece_docs < limit {
+            if entries == SCAN_STEP_ENTRIES {
+                self.paused = true;
+                return None;
+            }
+            entries += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
                 return Some(Err(e));
             }
@@ -442,7 +463,14 @@ impl ScanState {
         view: &TxnView,
         limit: usize,
     ) -> Option<Result<Vec<Row>, ReadFault>> {
+        self.paused = false;
+        let mut entries = 0;
         while self.rows.len() < limit {
+            if entries == SCAN_STEP_ENTRIES {
+                self.paused = true;
+                return None;
+            }
+            entries += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
                 return Some(Err(e));
             }

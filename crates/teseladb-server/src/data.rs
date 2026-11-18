@@ -1437,6 +1437,18 @@ impl DataCore {
         self.host.idle()
     }
 
+    /// Whether a scan of the host stopped at its share of a turn and goes on at the next poll.
+    pub fn runnable(&self) -> bool {
+        self.host.runnable()
+    }
+
+    /// Moves the scans that stopped at their share of a turn one step on and sends what they
+    /// answered: a step each, without a whole [`poll`](DataCore::poll).
+    pub fn resume(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
+        self.host.resume_scans(core, now);
+        self.answer(core, now);
+    }
+
     /// Moves the host's requests, the replicas, the leaders' duties and the transfers.
     pub fn poll(&mut self, core: &mut MultiRaftCore<CoreSm>, (now, wall_ms): (Nanos, u64)) {
         self.wall_ms = wall_ms;

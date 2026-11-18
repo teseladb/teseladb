@@ -193,7 +193,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
     async fn sleep(&mut self) {
         let now = self.now();
         let deadline = self.deadline(now);
-        let left = !self.inputs.is_empty() || !self.background.is_empty();
+        let left = !self.inputs.is_empty() || !self.background.is_empty() || self.logic.runnable();
         if left || self.disk.ready() || deadline <= now {
             yield_now().await;
             return;
@@ -252,6 +252,11 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         self.net.inputs(&mut self.logic, now);
         self.take_inputs();
         self.run_background();
+        // Work the last turn left for this one (a scan that stopped at its share of a turn) goes
+        // on once the shard ran its other tasks.
+        if self.logic.runnable() {
+            self.logic.resume(self.now(), wall_ms());
+        }
         let now = self.now();
         if now >= self.next_tick {
             // How late it runs (012 FR-015): its groups' beats go out with it.
