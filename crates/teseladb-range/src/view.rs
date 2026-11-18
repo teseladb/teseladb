@@ -542,11 +542,28 @@ impl RangeView {
     pub fn scan_begun(
         &self,
         cache: &mut ViewCache,
+        span: (&[u8], &[u8]),
+        part: (Part, &Begun),
+        now: impl FnOnce() -> Nanos,
+        concern: ReadConcern,
+        supply: impl FnMut(&BlockNeed) -> bool,
+    ) -> Option<Scanned> {
+        self.scan_begun_pausing(cache, span, part, now, concern, supply, || {})
+    }
+
+    /// As [`RangeView::scan_begun`], calling `pause` once every [`MATCH_BATCH`] documents read:
+    /// a caller on a shard lets it run its other work there, as the filtered scans do between
+    /// their batches, instead of holding it for the whole part.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_begun_pausing(
+        &self,
+        cache: &mut ViewCache,
         (start, end): (&[u8], &[u8]),
         (part, begun): (Part, &Begun),
         now: impl FnOnce() -> Nanos,
         concern: ReadConcern,
         mut supply: impl FnMut(&BlockNeed) -> bool,
+        mut pause: impl FnMut(),
     ) -> Option<Scanned> {
         let ts = self.applied_for((start, end), (part.docs, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
@@ -557,6 +574,8 @@ impl RangeView {
         let mut rows: Vec<crate::push::Row> = Vec::new();
         let mut blocks = Blocks::new(part.blocks);
         let mut next = None;
+        // The entries the scan gave, for the pauses.
+        let mut stepped = 0usize;
         while rows.len() < part.docs {
             match scan.next(&self.lsm) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
@@ -564,6 +583,10 @@ impl RangeView {
                     return None;
                 }
                 SharedStep::Item(i) => {
+                    stepped += 1;
+                    if stepped.is_multiple_of(MATCH_BATCH) {
+                        pause();
+                    }
                     if let Some((t, v)) = split_value(&i.value)
                         && t != crate::HISTORY_VALUE
                     {

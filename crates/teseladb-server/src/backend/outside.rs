@@ -445,11 +445,16 @@ impl ServerBackend {
         let Outside { caches, files, .. } = &mut self.outside;
         let supply = |need: &BlockNeed| {
             let Some(dir) = dir.as_deref() else { return false };
+            wait::yield_if_asked();
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
         let span = (lo.as_slice(), hi.as_slice());
         let part = (Part { docs: limit, backward, blocks: MAX_SCAN_BLOCKS }, &begun);
-        let Some(read) = view.scan_begun(&mut caches[core], span, part, now, concern, supply)
+        // The shard's other work runs between two batches once the task quota is used up: a
+        // long part held the reactor 25-33 ms (stall reports of the one-node load p23).
+        let pause = wait::yield_if_asked;
+        let cache = &mut caches[core];
+        let Some(read) = view.scan_begun_pausing(cache, span, part, now, concern, supply, pause)
         else {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;

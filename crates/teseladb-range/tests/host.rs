@@ -1257,6 +1257,38 @@ fn a_view_from_before_an_answered_write_was_applied_does_not_serve_a_scan_that_b
 }
 
 #[test]
+fn a_long_scan_outside_the_core_pauses_between_batches_so_its_shard_can_run_other_work() {
+    // The read of a span outside the core ran its whole part without letting its shard go: one
+    // part of an aggregation by index held the reactor 25-33 ms (stall reports of the one-node
+    // load p23). It pauses once every MATCH_BATCH documents, as the filtered scans do.
+    let mut n = Node::new();
+    let docs = 3 * MATCH_BATCH + 5;
+    let key = |i: usize| [b"\x01b".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
+    for i in 0..docs {
+        n.mutate(&key(i), Box::new(SetKey(key(i), Some(1))), MAJORITY);
+    }
+    n.settle();
+    let view = n.host.views().get(G).expect("the view");
+    let part = Part { docs: 10_000, backward: false, blocks: 64 };
+    let span: (&[u8], &[u8]) = (b"\x01a", b"\x01y");
+    let mut cache = ViewCache::default();
+    let mut pauses = 0;
+    let read = view
+        .scan_begun_pausing(
+            &mut cache,
+            span,
+            (part, &view.begin()),
+            || n.now,
+            ReadConcern::Local,
+            |_| false,
+            || pauses += 1,
+        )
+        .expect("served outside");
+    assert_eq!(read.rows.len(), docs);
+    assert_eq!(pauses, docs / MATCH_BATCH, "one pause per batch of {MATCH_BATCH}");
+}
+
+#[test]
 fn a_scan_outside_the_core_reads_the_view_that_holds_what_was_answered_when_it_began() {
     // 005 FR-031: the writes answered after a scan began do not hold it back. Under a steady
     // flow of `w: 1` writes every view lacks the newest of them.

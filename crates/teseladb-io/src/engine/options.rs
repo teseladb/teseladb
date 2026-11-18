@@ -25,6 +25,18 @@ use std::path::{Path, PathBuf};
 /// The stall detector's threshold (SC-013): a shard that does not yield for this long is reported.
 pub const STALL_NOTIFY_MS: u32 = 25;
 
+/// The environment variable that brings the stall detector's threshold down, in milliseconds, for
+/// a diagnosis run: each report names the stack that held its shard (the diagnosis binary of
+/// `linux-build.sh --diag` symbolizes it). Not an option of the node.
+pub const STALL_NOTIFY_ENV: &str = "TESELADB_STALL_NOTIFY_MS";
+
+/// The stall detector's threshold from the value of [`STALL_NOTIFY_ENV`], if it is a whole
+/// number of milliseconds of at least 1; otherwise [`STALL_NOTIFY_MS`].
+#[must_use]
+pub fn stall_notify_ms(env: Option<&str>) -> u32 {
+    env.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&ms| ms >= 1).unwrap_or(STALL_NOTIFY_MS)
+}
+
 /// How long an idle shard polls before it sleeps, without `--idle-poll-us`: not at all. The
 /// engine's own default, 2 ms on a virtual machine, kept every idle shard of a loaded node on its
 /// CPU: on a host shared with other work (one-node load, 17-11-2026, three pairs) a node without
@@ -144,7 +156,7 @@ impl EngineConfig {
             "--network-stack".to_owned(),
             "posix".to_owned(),
             "--blocked-reactor-notify-ms".to_owned(),
-            STALL_NOTIFY_MS.to_string(),
+            stall_notify_ms(std::env::var(STALL_NOTIFY_ENV).ok().as_deref()).to_string(),
             "--task-quota-ms".to_owned(),
             TASK_QUOTA_MS.to_owned(),
             // The node writes its own log; the engine says only what goes wrong.
@@ -399,6 +411,16 @@ mod tests {
         assert_eq!(pair(&zero.args(), "--idle-poll-time-us").as_deref(), Some("0"));
         let some = EngineConfig { idle_poll_us: Some(200), ..EngineConfig::default() };
         assert_eq!(pair(&some.args(), "--idle-poll-time-us").as_deref(), Some("200"));
+    }
+
+    #[test]
+    fn the_stall_threshold_comes_down_only_for_a_diagnosis() {
+        assert_eq!(stall_notify_ms(None), STALL_NOTIFY_MS);
+        assert_eq!(stall_notify_ms(Some("2")), 2);
+        assert_eq!(stall_notify_ms(Some(" 3 ")), 3);
+        // Nothing below 1 ms, and a value that is no number leaves the default.
+        assert_eq!(stall_notify_ms(Some("0")), STALL_NOTIFY_MS);
+        assert_eq!(stall_notify_ms(Some("x")), STALL_NOTIFY_MS);
     }
 
     #[test]
