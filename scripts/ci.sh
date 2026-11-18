@@ -147,6 +147,7 @@ gate "2. tests of the check of the release images" scripts/tests/check_image_tes
 gate "2. tests of the GitHub release" scripts/tests/github_release_test.sh
 gate "2. tests of the platform check of the install script" scripts/tests/install_platform_test.sh
 gate "2. tests of final-phase" scripts/tests/final_phase_test.sh
+gate "2. tests of the cleanup of earlier test builds" scripts/tests/prune_test_builds_test.sh
 gate "3. simulated crashes of teseladb-raftlog (2,000 seeds × 3 lives)" env TESELADB_RAFTLOG_CRASH_SEEDS=2000 \
   cargo test -q --offline --release -p teseladb-raftlog --test crash_sim
 gate "3. LSM crashes (10,000 seeds × 3 lives, 004 SC-001)" env TESELADB_LSM_CRASH_SEEDS=10000 \

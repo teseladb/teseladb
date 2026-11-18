@@ -126,14 +126,10 @@ while IFS= read -r run; do runs+=("$run"); done < <(
 [[ ${#runs[@]} -gt 0 ]] || { echo "test-linux: nothing was built" >&2; exit 1; }
 # Cargo keeps every earlier build of a test executable next to the new one, each up to 1 GiB with
 # its debug information: they filled the Docker disk (91 GiB of test binaries, 18-11-2026). Only
-# this build's executable of each test stays; the libraries, and so the incremental build, stay.
-for run in "${runs[@]}"; do
-  exe=${run#*:}
-  for old in "${exe%-*}"-*; do
-    [[ $old == "$exe" || $old == "$exe".* ]] && continue
-    if [[ -f $old && ( -x $old || $old == *.d ) ]]; then rm -f "$old"; fi
-  done
-done
+# this build's executables stay (scripts/prune-test-builds.sh).
+exes=()
+for run in "${runs[@]}"; do exes+=("${run#*:}"); done
+scripts/prune-test-builds.sh "${exes[@]}"
 fail=0
 for run in "${runs[@]}"; do
   dir=${run%%:*}
