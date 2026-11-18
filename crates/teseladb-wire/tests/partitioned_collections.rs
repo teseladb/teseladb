@@ -219,3 +219,35 @@ fn a_dropped_collection_over_four_partitions_leaves_no_key_in_any() {
     assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
     assert_eq!(left(&m), 0, "keys of the dropped collection left");
 }
+
+#[test]
+fn an_index_built_over_four_partitions_writes_them_at_once_and_answers_as_over_one() {
+    // The build of an index on a filled collection writes each chunk's entries a part per
+    // partition, all at once (D-186), and the index answers as on a collection of one.
+    let mut m = Mem::new();
+    fill(&mut m, "spread", 4);
+    fill(&mut m, "plain", 1);
+    let before = m.batches_at_once;
+    for coll in ["spread", "plain"] {
+        let index = d(&[("key", d(&[("g", 1.into())])), ("name", s("g_1"))]);
+        let cmd = doc(&[("createIndexes", s(coll)), ("indexes", Value::Array(vec![index]))]);
+        let r = guarded(&mut m, cmd);
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    assert!(m.batches_at_once > before, "the build wrote no chunk over its partitions at once");
+    let by_g = |m: &mut Mem, coll: &str| {
+        let cmd = doc(&[
+            ("find", s(coll)),
+            ("filter", d(&[("g", 3.into())])),
+            ("hint", s("g_1")),
+            ("batchSize", 5000.into()),
+        ]);
+        let mut ids: Vec<String> =
+            batch(&guarded(m, cmd)).iter().map(|v| format!("{:?}", field_of(v, "_id"))).collect();
+        ids.sort();
+        ids
+    };
+    let (spread, plain) = (by_g(&mut m, "spread"), by_g(&mut m, "plain"));
+    assert_eq!(spread.len(), 600);
+    assert_eq!(spread, plain);
+}

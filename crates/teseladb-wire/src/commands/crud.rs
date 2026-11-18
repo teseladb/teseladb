@@ -1081,6 +1081,33 @@ fn partitioned(coll: &CollectionEntry) -> bool {
     coll.partitions().is_ok_and(|p| p.count() > 1)
 }
 
+/// The writes of `mutation` over `keys` a part per partition of `coll` (D-186), for
+/// [`Writer::write_all`]: none when the collection is not spread over partitions or the keys are
+/// all in one, which go as one write.
+pub(crate) fn by_partition(
+    coll: &CollectionEntry,
+    mutation: &DocMutation,
+    keys: &[Vec<u8>],
+    stmt: u32,
+) -> Vec<(Bound, u32)> {
+    if !partitioned(coll) {
+        return Vec::new();
+    }
+    // The collection number of a key of the data space: `01 · tenant · number`.
+    let number = |k: &Vec<u8>| k.get(5..9).map(<[u8]>::to_vec);
+    let numbers: std::collections::BTreeSet<Vec<u8>> = keys.iter().filter_map(number).collect();
+    if numbers.len() < 2 {
+        return Vec::new();
+    }
+    numbers
+        .iter()
+        .map(|n| {
+            let keys = keys.iter().filter(|k| number(k).as_ref() == Some(n)).cloned().collect();
+            (Bound { mutation: mutation.clone(), keys }, stmt)
+        })
+        .collect()
+}
+
 /// The `_id` an equality filter names (`{_id: v}` or `{_id: {$eq: v}}`), if it is that simple.
 pub(crate) fn id_equality(filter: &Document) -> Option<Value> {
     let v = filter.get("_id")?;
@@ -1397,16 +1424,8 @@ fn modify_once<B: Backend + ?Sized>(
         };
         // A multi write in a collection spread over partitions: a part per partition, all
         // written at once, each in its range alone (D-186); a multi write is no atomic unit.
-        let numbers: std::collections::BTreeSet<&[u8]> =
-            chunk.iter().filter_map(|k| k.get(5..9)).collect();
-        if m.multi && !upserts && numbers.len() > 1 && partitioned(&coll) {
-            let parts: Vec<(Bound, u32)> = numbers
-                .iter()
-                .map(|n| {
-                    let keys = chunk.iter().filter(|k| k.get(5..9) == Some(*n)).cloned().collect();
-                    (Bound { mutation: mutation.clone(), keys }, stmt)
-                })
-                .collect();
+        let parts = by_partition(&coll, &mutation, &chunk, stmt);
+        if m.multi && !upserts && parts.len() > 1 {
             for r in w.write_all(ctx.backend, &parts) {
                 let r = r?;
                 if let Some(e) = r.errors.first() {

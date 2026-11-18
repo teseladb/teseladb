@@ -404,7 +404,13 @@ impl Backfill<'_> {
             let keys: Vec<Vec<u8>> = rows.into_iter().map(|(k, _)| k).collect();
             let n = keys.len() as u64;
             let mutation = DocMutation::Backfill { rules: rules.clone() };
-            let r = w.write(backend, &Bound { mutation, keys }, 0)?;
+            // Over a collection's partitions a part per partition, all written at once (D-186):
+            // the chunk's entries are built on every core instead of one range after another.
+            let parts = super::crud::by_partition(coll, &mutation, &keys, 0);
+            let r = match parts.is_empty() {
+                true => w.write(backend, &Bound { mutation, keys }, 0)?,
+                false => merged(w.write_all(backend, &parts))?,
+            };
             if let Some(e) = r.errors.into_iter().next() {
                 // A unique index finds its duplicates once the scan is over (measured).
                 if e.error.code == DUPLICATE_KEY {
@@ -427,4 +433,18 @@ impl Backfill<'_> {
             from = next;
         }
     }
+}
+
+/// The results of the parts of a chunk written at once as one result: the first error of any
+/// part, or the counts added up; an error of a part that was not written is the chunk's error.
+fn merged(
+    parts: Vec<Result<super::mutation::MutationResult, CommandError>>,
+) -> Result<super::mutation::MutationResult, CommandError> {
+    let mut all = super::mutation::MutationResult::default();
+    for part in parts {
+        let part = part?;
+        all.n += part.n;
+        all.errors.extend(part.errors);
+    }
+    Ok(all)
 }

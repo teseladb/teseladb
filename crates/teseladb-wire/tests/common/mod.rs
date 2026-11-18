@@ -242,6 +242,8 @@ pub struct Mem {
     pub ordered_ids: bool,
     /// How many partitions a new collection is spread over (D-186); 0 or 1: none.
     pub partitions: u8,
+    /// Calls of `write_all` with writes for several ranges at once (D-186).
+    pub batches_at_once: usize,
     /// Answers of the other nodes that do not apply the write gates yet (007 FR-029).
     pub gate_lagging: usize,
     /// The tenants Group 0 knows, by number and name (007 FR-025).
@@ -1174,6 +1176,13 @@ impl Backend for Mem {
     /// Every write goes through [`Backend::write`], where the test backend applies it.
     fn write_unchanged(&mut self, _op: &WriteOp) -> Option<Vec<u8>> {
         None
+    }
+
+    fn write_all(&mut self, ops: Vec<WriteOp>) -> Vec<Result<Vec<u8>, CommandError>> {
+        if ops.len() > 1 {
+            self.batches_at_once += 1;
+        }
+        ops.into_iter().map(|op| self.write(op)).collect()
     }
 
     fn write(&mut self, op: WriteOp) -> Result<Vec<u8>, CommandError> {
