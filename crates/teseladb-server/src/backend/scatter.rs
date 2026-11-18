@@ -246,7 +246,7 @@ impl ServerBackend {
         let send = |p: &Part| self.send_part(p, (program, &sent), concern);
         let answer = |i: usize, p: Part, r: Result<DataReply, RangeError>| {
             let (found, n, more) = groups_of(r.ok()?)?;
-            groups[i].push(found);
+            groups[i].extend(found);
             examined += n;
             Some(more.filter(|from| *from < p.stop).map(|from| Part { from, ..p }))
         };
@@ -283,8 +283,9 @@ impl ServerBackend {
         let (start, end) = (p.from.clone(), p.stop.clone());
         let (tx, rx) = mpsc::channel();
         let msg = if leads_here(&self.h.views, p) {
+            // The core goes on with the range's parts itself and answers once (010 FR-034).
             let scan = RemoteReq::Scan { start, end, limit, concern, backward: false };
-            NodeMsg::Data(DataReq::Partial(p.group, scan, Fold(program.clone())), tx)
+            NodeMsg::Data(DataReq::Folds(p.group, scan, Fold(program.clone())), tx)
         } else {
             let work = Work::Fold(sent.get_or_init(|| program.encode()).clone()?);
             SENT_AWAY.fetch_add(1, Ordering::Relaxed);
@@ -357,17 +358,21 @@ fn leads_here(views: &[RangeViews], p: &Part) -> bool {
     views.get(usize::from(p.core)).is_some_and(|v| v.get(p.group).is_some())
 }
 
-/// The partial groups of a part, the documents it read and where its range goes on, from the
-/// answer of this node's core or of the leader on another node; `None` when either declined or
-/// the groups do not read.
-fn groups_of(reply: DataReply) -> Option<(PartialGroups, usize, Option<Vec<u8>>)> {
+/// The partial groups of a part in key order (several when this node's core went on with the
+/// range's parts itself), the documents it read and where its range goes on, from the answer of
+/// this node's core or of the leader on another node; `None` when either declined or the groups
+/// do not read.
+fn groups_of(reply: DataReply) -> Option<(Vec<PartialGroups>, usize, Option<Vec<u8>>)> {
+    let owned = |a: Arc<PartialGroups>| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
     match reply {
-        DataReply::Partial(Folded { groups, examined, next }) => {
-            Some((Arc::try_unwrap(groups?).unwrap_or_else(|a| (*a).clone()), examined, next))
+        DataReply::Partial(Folded { before, groups, examined, next }) => {
+            let mut all: Vec<PartialGroups> = before.into_iter().map(owned).collect();
+            all.push(owned(groups?));
+            Some((all, examined, next))
         }
         DataReply::Remote(RemoteReply::Pushed(Worked::Folded { groups, examined, next })) => {
             let examined = usize::try_from(examined).ok()?;
-            Some((PartialGroups::decode(&groups)?, examined, next))
+            Some((vec![PartialGroups::decode(&groups)?], examined, next))
         }
         _ => None,
     }

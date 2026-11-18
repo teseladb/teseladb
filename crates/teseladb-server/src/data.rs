@@ -115,6 +115,11 @@ pub enum DataReq {
     /// through `.2`, the `$match`es and partial `$group` of an aggregation, on this core (010
     /// FR-034): the answer is the partial groups, not the documents.
     Partial(GroupId, RemoteReq, Fold),
+    /// As [`DataReq::Partial`], over the whole span of its scan: the core goes on with the next
+    /// part of `limit` documents itself, a part per step of the host, and answers once with the
+    /// partial groups of every part in key order (010 FR-034). The coordinator then waits for one
+    /// answer per range instead of one per part.
+    Folds(GroupId, RemoteReq, Fold),
 }
 
 /// The program of an aggregation that a core runs over the documents of its range (010 FR-034).
@@ -133,6 +138,8 @@ impl Eq for Fold {}
 /// The answer to a [`DataReq::Partial`].
 #[derive(Clone, Debug)]
 pub struct Folded {
+    /// The partial groups of the parts of a [`DataReq::Folds`] before the last, in key order.
+    pub before: Vec<Arc<teseladb_exec::pipeline::PartialGroups>>,
     /// The partial groups of the documents read; `None` when the core declined them.
     pub groups: Option<Arc<teseladb_exec::pipeline::PartialGroups>>,
     /// Documents read.
@@ -147,7 +154,9 @@ impl PartialEq for Folded {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (a, b) => a.is_none() && b.is_none(),
         };
-        same && self.examined == other.examined && self.next == other.next
+        let before = self.before.len() == other.before.len()
+            && self.before.iter().zip(&other.before).all(|(a, b)| Arc::ptr_eq(a, b));
+        same && before && self.examined == other.examined && self.next == other.next
     }
 }
 
@@ -273,13 +282,33 @@ enum Client {
     Local(DataSender, Option<(GroupId, RemoteReq)>),
     /// Another node's forwarded request.
     Remote(NodeId, u64),
-    /// The handle's scan for an aggregation's program (010 FR-034), of at most `.2` documents.
-    Partial(DataSender, Fold, usize),
+    /// The handle's scan for an aggregation's program (010 FR-034), of at most `.2` documents;
+    /// with `.3`, a [`DataReq::Folds`] the core goes on with to the end of its span.
+    Partial(DataSender, Fold, usize, Option<Box<Folding>>),
     /// A scan whose rows go through work for whoever asked (`.0`), of at most `.2` documents
     /// (010 FR-034): run here when this replica leads the range.
     Worked(Box<Client>, crate::pushed::Work, usize),
     /// The read of key `.1` of lookup `.0` (010 FR-027).
     Looked(u64, usize),
+}
+
+/// Parts of a [`DataReq::Folds`] a core went on with itself, since the process started.
+static FOLDS_GONE_ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Parts of the aggregations' scans the cores went on with themselves, without an answer to
+/// the coordinator in between (010 FR-034), since the process started.
+pub fn folds_gone_on() -> u64 {
+    FOLDS_GONE_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A [`DataReq::Folds`] the core goes on with: its range, where its span ends, its read concern,
+/// and the partial groups and documents of its parts so far.
+struct Folding {
+    g: GroupId,
+    end: Vec<u8>,
+    concern: ReadConcern,
+    before: Vec<Arc<teseladb_exec::pipeline::PartialGroups>>,
+    examined: usize,
 }
 
 /// A lookup whose point reads the host runs: who waits, its keys and filter, and the reads
@@ -307,7 +336,12 @@ fn folded(
                 _ => None,
             };
             let groups = fold.0.run(&rows).map(Arc::new);
-            Ok(DataReply::Partial(Folded { groups, examined: rows.len(), next }))
+            Ok(DataReply::Partial(Folded {
+                before: Vec::new(),
+                groups,
+                examined: rows.len(),
+                next,
+            }))
         }
         _ => Err(RangeError::Unavailable),
     }
@@ -318,7 +352,7 @@ fn folded(
 fn folded_pieces(pieces: &[Piece], fold: &Fold, limit: usize) -> DataReply {
     let (inputs, examined, next) = inputs_of(pieces, limit);
     let groups = fold.0.run_inputs(&inputs).map(Arc::new);
-    DataReply::Partial(Folded { groups, examined, next })
+    DataReply::Partial(Folded { before: Vec::new(), groups, examined, next })
 }
 
 /// The inputs of a program from the pieces of a scan of at most `limit` documents, the documents
@@ -439,6 +473,9 @@ pub struct DataCore {
     pressure: Option<(CorePressure, Nanos)>,
     /// The LSM left background work that waits for no disk operation (004 FR-030).
     lsm_more: bool,
+    /// A part of a [`DataReq::Folds`] went on and has not stepped yet: the core takes its next
+    /// turn at once instead of at its tick.
+    folds_waiting: bool,
 }
 
 impl DataCore {
@@ -482,6 +519,7 @@ impl DataCore {
             compactions: BTreeMap::new(),
             pressure: None,
             lsm_more: false,
+            folds_waiting: false,
         }
     }
 
@@ -489,7 +527,7 @@ impl DataCore {
     /// core's loop comes back to [`DataCore::poll_io`] without sleeping, and serves what
     /// arrived meanwhile between two steps of that work.
     pub fn has_more(&self) -> bool {
-        self.lsm_more
+        self.lsm_more || self.folds_waiting
     }
 
     /// The core counts its memtables and its log with the node's other cores, and flushes for
@@ -747,17 +785,11 @@ impl DataCore {
                 return;
             }
             DataReq::Partial(g, r, fold) => {
-                // Only where this replica holds the range: the program does not go to another
-                // node, and the caller reads the range itself instead.
-                let limit = match &r {
-                    RemoteReq::Scan { limit, .. } => usize::try_from(*limit).unwrap_or(usize::MAX),
-                    _ => 0,
-                };
-                if !self.host_has(g) || limit == 0 {
-                    let _ = reply.send(Err(RangeError::NotLeader { hint: NodeId(0) }));
-                    return;
-                }
-                self.run(core, (g, r), Client::Partial(reply, fold, limit), (now, wall_ms));
+                self.fold(core, (g, r, fold, false), reply, (now, wall_ms));
+                return;
+            }
+            DataReq::Folds(g, r, fold) => {
+                self.fold(core, (g, r, fold, true), reply, (now, wall_ms));
                 return;
             }
             DataReq::At(_, g, r) | DataReq::Remote(g, r) => {
@@ -896,7 +928,7 @@ impl DataCore {
                 // An aggregation's part takes the columns of the fields its program reads (010
                 // FR-033).
                 let want = match &client {
-                    Client::Partial(_, fold, _) => fold.0.columns(),
+                    Client::Partial(_, fold, ..) => fold.0.columns(),
                     _ => None,
                 };
                 match want {
@@ -1206,9 +1238,10 @@ impl DataCore {
                     });
                     let _ = to.send(r);
                 }
-                Client::Partial(to, fold, limit) if matches!(r, Ok(Reply::Pieces(_))) => {
+                Client::Partial(to, fold, limit, folding) if matches!(r, Ok(Reply::Pieces(_))) => {
                     let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
-                    let _ = to.send(Ok(folded_pieces(&pieces, &fold, limit)));
+                    let part = Ok(folded_pieces(&pieces, &fold, limit));
+                    self.go_on_folding(core, (to, fold, limit, folding), part, now);
                 }
                 Client::Worked(client, work, limit) if matches!(r, Ok(Reply::Pieces(_))) => {
                     let Ok(Reply::Pieces(pieces)) = r else { unreachable!("checked") };
@@ -1219,6 +1252,92 @@ impl DataCore {
                     self.send_answer(core, *client, Ok(RemoteReply::Pushed(worked)), now);
                 }
                 client => self.send_answer(core, client, r.and_then(remote_reply), now),
+            }
+        }
+    }
+
+    /// Runs a [`DataReq::Partial`], or a [`DataReq::Folds`] when `whole`, on range `g`.
+    fn fold(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        (g, r, fold, whole): (GroupId, RemoteReq, Fold, bool),
+        reply: DataSender,
+        (now, wall_ms): (Nanos, u64),
+    ) {
+        // Only where this replica holds the range: the program does not go to another node, and
+        // the caller reads the range itself instead.
+        let (limit, folding) = match &r {
+            RemoteReq::Scan { limit, end, concern, .. } => (
+                usize::try_from(*limit).unwrap_or(usize::MAX),
+                whole.then(|| {
+                    Box::new(Folding {
+                        g,
+                        end: end.clone(),
+                        concern: *concern,
+                        before: Vec::new(),
+                        examined: 0,
+                    })
+                }),
+            ),
+            _ => (0, None),
+        };
+        if !self.host_has(g) || limit == 0 {
+            let _ = reply.send(Err(RangeError::NotLeader { hint: NodeId(0) }));
+            return;
+        }
+        self.run(core, (g, r), Client::Partial(reply, fold, limit, folding), (now, wall_ms));
+    }
+
+    /// The answer `part` of a part of an aggregation's scan: to its sender for a
+    /// [`DataReq::Partial`], or for the last part of a [`DataReq::Folds`], with the groups of the
+    /// parts before it; a part of a [`DataReq::Folds`] that stopped before the end of its span
+    /// keeps its groups and the core reads the next part, in the host's next step.
+    fn go_on_folding(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        (to, fold, limit, folding): (DataSender, Fold, usize, Option<Box<Folding>>),
+        part: Result<DataReply, RangeError>,
+        now: Nanos,
+    ) {
+        let Some(mut folding) = folding else {
+            let _ = to.send(part);
+            return;
+        };
+        let part = match part {
+            Ok(DataReply::Partial(f)) => f,
+            other => {
+                let _ = to.send(other);
+                return;
+            }
+        };
+        let go_on = part.next.clone().filter(|n| folding.end.is_empty() || *n < folding.end);
+        match (go_on, part.groups.clone()) {
+            (Some(next), Some(groups)) => {
+                folding.before.push(groups);
+                folding.examined += part.examined;
+                FOLDS_GONE_ON.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let scan = RemoteReq::Scan {
+                    start: next,
+                    end: folding.end.clone(),
+                    limit: u32::try_from(limit).unwrap_or(u32::MAX),
+                    concern: folding.concern,
+                    backward: false,
+                };
+                let g = folding.g;
+                let wall_ms = self.wall_ms;
+                self.folds_waiting = true;
+                self.run(
+                    core,
+                    (g, scan),
+                    Client::Partial(to, fold, limit, Some(folding)),
+                    (now, wall_ms),
+                );
+            }
+            _ => {
+                let mut before = std::mem::take(&mut folding.before);
+                before.extend(part.before);
+                let examined = folding.examined + part.examined;
+                let _ = to.send(Ok(DataReply::Partial(Folded { before, examined, ..part })));
             }
         }
     }
@@ -1247,7 +1366,10 @@ impl DataCore {
                 r => drop(to.send(r.map(DataReply::Remote))),
             },
             Client::Local(to, None) => drop(to.send(r.map(DataReply::Remote))),
-            Client::Partial(to, fold, limit) => drop(to.send(folded(r, &fold, limit))),
+            Client::Partial(to, fold, limit, folding) => {
+                let part = folded(r, &fold, limit);
+                self.go_on_folding(core, (to, fold, limit, folding), part, now);
+            }
             Client::Worked(client, work, limit) => {
                 // A refusal goes back as it is: the node's handle sends it on to the leader.
                 let r = r.and_then(|reply| match reply {
@@ -1289,6 +1411,8 @@ impl DataCore {
         // handed to the LSM.
         self.host.follow_state(core);
         self.host.poll(core, now, wall_ms);
+        // The host stepped every part that went on: the next turn comes when it is due.
+        self.folds_waiting = false;
         for (g, why) in core.take_stops() {
             crate::log::defer_at(
                 crate::log::Level::Error,

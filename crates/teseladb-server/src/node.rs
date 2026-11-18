@@ -1678,7 +1678,8 @@ impl Node {
             | DataReq::Cut(g)
             | DataReq::Remote(g, _)
             | DataReq::At(_, g, _)
-            | DataReq::Partial(g, ..) => Some(*g),
+            | DataReq::Partial(g, ..)
+            | DataReq::Folds(g, ..) => Some(*g),
             DataReq::Lsm => None,
         };
         let (tx, rx) = teseladb_io::engine::answer::channel();

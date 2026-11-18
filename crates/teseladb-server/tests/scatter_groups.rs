@@ -11,6 +11,7 @@ use common::{Client, DataDir, READY, batch, docs, ok, until};
 use teseladb_bson::{Document, Value};
 use teseladb_io::engine::disk::DiskPlace;
 use teseladb_server::backend::{scattered_groups, scattered_parts_outside};
+use teseladb_server::data::folds_gone_on;
 use teseladb_server::node::{Node, NodeConfig, lock_dir};
 
 const DOCS: i32 = 3000;
@@ -95,7 +96,9 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         vec![matches, group(Value::Null)],
         vec![fractions],
     ];
-    // The ranges are on four cores: the parts go to their cores all at once (010 FR-034).
+    // The ranges are on four cores: the parts go to their cores all at once (010 FR-034), and
+    // each core goes on with its range's parts itself, answering once.
+    let gone_on = folds_gone_on();
     for pipeline in &pipelines {
         let one_place = aggregate(&mut c, pipeline, true);
         // Ranges that just split may still be moving: the answer is the same in any case, and
@@ -108,6 +111,7 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         });
         assert_eq!(split, one_place, "{pipeline:?}");
     }
+    assert!(folds_gone_on() > gone_on, "no core went on with a range's parts itself");
     // The sum is the one of the values the `$match` keeps.
     let scattered = teseladb_stages::count(teseladb_stages::Stage::AggScattered);
     let whole = aggregate(&mut c, &pipelines[2], false);

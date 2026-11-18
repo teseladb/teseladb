@@ -1967,7 +1967,7 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _)
             | NodeMsg::Forwarded(_, _, req) => remote_class(req),
             // An aggregation's part reads a whole range's part: behind the document operations.
-            NodeMsg::Data(DataReq::Partial(..), _) => ServiceClass::Background,
+            NodeMsg::Data(DataReq::Partial(..) | DataReq::Folds(..), _) => ServiceClass::Background,
             _ => ServiceClass::Foreground,
         }
     }
@@ -1981,7 +1981,8 @@ impl CoreLogic for NodeLogic {
                 | DataReq::Get { .. }
                 | DataReq::Remote(..)
                 | DataReq::At(..)
-                | DataReq::Partial(..),
+                | DataReq::Partial(..)
+                | DataReq::Folds(..),
                 reply,
             ) => {
                 let _ = reply.send(Err(RangeError::Overloaded));
