@@ -178,7 +178,7 @@ engine_test_case!(a_durable_disk_opens_its_files_so_that_each_write_ends_durable
         let dir = Dir::new("durable");
         // A durable disk: what it creates and what it opens writes through (O_DSYNC), so a write
         // ends durable and its sync has nothing left to do.
-        let d = ShardDisk::open_durable(&dir.0, g.clone()).get().unwrap();
+        let d = ShardDisk::open_durable(&dir.0, g).get().unwrap();
         let mut d2 = d.clone();
         assert!(matches!(d2.execute(create(1, "made")), IoDone::Ok(_)));
         assert!(matches!(d2.execute(write(1, 0, &[7u8; 4096])), IoDone::Ok(_)));
