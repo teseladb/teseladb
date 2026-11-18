@@ -272,6 +272,37 @@ impl EngineProbe {
         out
     }
 
+    /// The engine's sampled heap profile (its allocator's sampling profiler): with `rate`, the
+    /// sampling turned on (a sample every `rate` bytes on average; 0 turns it off) and nothing
+    /// else. Without it, each shard's live sampled allocation sites, the largest first, as
+    /// `shard <n> <bytes> <count>` and the site's call stack (return addresses, which `addr2line`
+    /// names against the binary): what holds the resident memory.
+    pub fn heap_profile(&self, rate: Option<usize>) -> String {
+        if let Some(rate) = rate {
+            self.on_each(move |_| {
+                teseladb::engine::core::memory::set_heap_profiling_sampling_rate(rate)
+            });
+            return format!("sampling every {rate} bytes\n");
+        }
+        let sites = self.on_each(|shard| {
+            let mut sites: Vec<(usize, usize, String)> =
+                teseladb::engine::core::memory::sampled_memory_profile()
+                    .iter()
+                    .map(|s| (s.size.get(), s.count.get(), s.backtrace.to_string()))
+                    .collect();
+            sites.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            sites
+                .into_iter()
+                .map(move |(size, count, at)| (shard, size, count, at))
+                .collect::<Vec<_>>()
+        });
+        let mut out = String::new();
+        for (shard, size, count, at) in sites.into_iter().flatten() {
+            out.push_str(&format!("shard {shard} {size} {count}\n{at}\n"));
+        }
+        out
+    }
+
     /// Each shard's allocator counters, in shard order.
     pub fn memory(&self) -> Vec<ShardMemory> {
         self.on_each(|_| ShardMemory::here())

@@ -37,6 +37,8 @@ use crate::logic::NodeMsg;
 pub const HEALTHZ: &str = "/healthz";
 /// `GET`: the node's metrics.
 pub const METRICS: &str = "/metrics";
+/// `GET`: the engine's sampled heap profile; `?rate=<bytes>` turns the sampling on (0: off).
+pub const HEAP: &str = "/debug/heap";
 /// `GET`: the nodes of the cluster.
 pub const NODES: &str = "/admin/nodes";
 /// `GET`: the ranges (`?collection=db.c` for those of a collection).
@@ -105,6 +107,12 @@ pub trait AdminBackend: Send + Sync {
     fn healthy(&self) -> bool;
     /// The node's metrics in Prometheus' text format.
     fn metrics(&self) -> String;
+    /// The engine's sampled heap profile (`/debug/heap`): with `rate`, the sampling turned on
+    /// every `rate` bytes (0: off); without it, the live allocation sites of each shard. A
+    /// backend without an engine has none.
+    fn heap_profile(&self, _rate: Option<usize>) -> String {
+        String::new()
+    }
     /// `{nodes: [{_id, voter, learner, state}], group0Leader, self, featureCompatibilityVersion: {current, available}}`,
     /// `state` being `active`, `draining` or `removed`, `self` the node that answers (whoever runs the node ties its
     /// address to its number with it, to drain it, 021 FR-040) and `available` the feature compatibility version every
@@ -195,6 +203,11 @@ pub fn route(req: &HttpRequest, b: &dyn AdminBackend) -> HttpResponse {
         METRICS if get => {
             HttpResponse { status: 200, content_type: PROMETHEUS, body: b.metrics().into_bytes() }
         }
+        HEAP if get => match req.param("rate").map(str::parse::<usize>) {
+            None => HttpResponse::text(200, &b.heap_profile(None)),
+            Some(Ok(rate)) => HttpResponse::text(200, &b.heap_profile(Some(rate))),
+            Some(Err(_)) => HttpResponse::text(400, "rate: bytes"),
+        },
         NODES if get => json(b.nodes()),
         RANGES if get => json(b.ranges(req.param("collection"))),
         TOKENS if !get => match req.param("ttl").map(str::parse::<u64>) {
@@ -203,7 +216,7 @@ pub fn route(req: &HttpRequest, b: &dyn AdminBackend) -> HttpResponse {
             Some(Err(_)) => json(Err(AdminError::bad("ttl: seconds"))),
         },
         CERT_ROTATE if !get => json(b.rotate_certificates()),
-        HEALTHZ | METRICS | NODES | RANGES | TOKENS | CERT_ROTATE => wrong_method(),
+        HEALTHZ | METRICS | HEAP | NODES | RANGES | TOKENS | CERT_ROTATE => wrong_method(),
         _ => {
             if let Some(answer) = crate::backup::route(req, |op| b.backup(op)) {
                 return answer;
@@ -891,6 +904,10 @@ fn clock_metrics(out: &mut String, clock: &teseladb_multiraft::NodeClock) {
 impl AdminBackend for NodeAdmin {
     fn healthy(&self) -> bool {
         self.ask(0, NodeMsg::View).is_some_and(|v| v.ready())
+    }
+
+    fn heap_profile(&self, rate: Option<usize>) -> String {
+        self.engine.as_ref().map_or_else(String::new, |e| e.heap_profile(rate))
     }
 
     fn metrics(&self) -> String {
@@ -2029,6 +2046,18 @@ mod tests {
         let d = media::decode(&r.body, Format::Relaxed).unwrap();
         let Some(Value::String(s)) = d.get("did") else { panic!("{d:?}") };
         s.clone()
+    }
+
+    #[test]
+    fn the_heap_profile_route_reads_its_rate() {
+        // `/debug/heap` with no engine answers an empty profile; a rate that is no number is
+        // refused before it reaches the engine, and a POST is no method of the route.
+        let b = Fake::default();
+        let r = route(&req(Method::Get, HEAP, ""), &b);
+        assert_eq!((r.status, r.body.len()), (200, 0));
+        assert_eq!(route(&req(Method::Get, "/debug/heap?rate=4096", ""), &b).status, 200);
+        assert_eq!(route(&req(Method::Get, "/debug/heap?rate=many", ""), &b).status, 400);
+        assert_eq!(route(&req(Method::Post, HEAP, ""), &b).status, 405);
     }
 
     #[test]
