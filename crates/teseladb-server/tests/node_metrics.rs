@@ -78,6 +78,13 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         let line = format!("teseladb_writes_evaluated_total{{how=\"{how}\"}} ");
         assert!(text.contains(&line), "{line} in {text}");
     }
+    // The reads the cores took, by kind, and the documents they asked for at most (012 FR-015).
+    for kind in teseladb_server::data::CoreRead::ALL {
+        for name in ["teseladb_core_reads_total", "teseladb_core_read_documents_total"] {
+            let line = format!("{name}{{kind=\"{}\"}} ", kind.label());
+            assert!(text.contains(&line), "{line} in {text}");
+        }
+    }
     // The memory by component (012 FR-016).
     for name in ["teseladb_memory_frozen_memtables_bytes", "teseladb_memory_aggregations_bytes"] {
         assert!(sample(&text, name).is_some(), "{name} in {text}");

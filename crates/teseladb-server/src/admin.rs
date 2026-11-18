@@ -652,6 +652,24 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             reason.label()
         );
     }
+    let _ = writeln!(
+        out,
+        "# HELP teseladb_core_reads_total Reads the cores took, by kind: parts of scans, parts folded by an aggregation or filtered, batches of point reads, point reads and reads of transactions."
+    );
+    let _ = writeln!(out, "# TYPE teseladb_core_reads_total counter");
+    let reads = crate::data::core_reads();
+    for (kind, (n, _)) in crate::data::CoreRead::ALL.iter().zip(reads) {
+        let _ = writeln!(out, "teseladb_core_reads_total{{kind=\"{}\"}} {n}", kind.label());
+    }
+    let _ = writeln!(
+        out,
+        "# HELP teseladb_core_read_documents_total Documents the reads the cores took asked for at most, by kind: the limit of a scan's part, the keys of a batch."
+    );
+    let _ = writeln!(out, "# TYPE teseladb_core_read_documents_total counter");
+    for (kind, (_, docs)) in crate::data::CoreRead::ALL.iter().zip(reads) {
+        let _ =
+            writeln!(out, "teseladb_core_read_documents_total{{kind=\"{}\"}} {docs}", kind.label());
+    }
     let name = "teseladb_writes_evaluated_total";
     let _ = writeln!(
         out,

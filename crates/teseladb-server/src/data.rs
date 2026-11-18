@@ -296,6 +296,74 @@ enum Client {
     Looked(u64, usize),
 }
 
+/// A kind of read a core serves, for [`core_reads`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreRead {
+    /// A part of a scan whose documents go back as they are.
+    Scan,
+    /// A part of a scan folded by an aggregation's program (010 FR-034).
+    Fold,
+    /// A part of a scan whose documents go through a filter (010 FR-027).
+    Filter,
+    /// The keys of a batch of point reads (010 FR-027).
+    Lookup,
+    /// A part of a scan with a read preference (007 FR-013).
+    FollowerScan,
+    /// A point read.
+    Point,
+    /// A read that knows about transactions, a point or a scan (008 FR-003).
+    Txn,
+}
+
+impl CoreRead {
+    /// Every kind, in the order `/metrics` gives them.
+    pub const ALL: [CoreRead; 7] = [
+        CoreRead::Scan,
+        CoreRead::Fold,
+        CoreRead::Filter,
+        CoreRead::Lookup,
+        CoreRead::FollowerScan,
+        CoreRead::Point,
+        CoreRead::Txn,
+    ];
+
+    /// Its label in `/metrics`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            CoreRead::Scan => "scan",
+            CoreRead::Fold => "fold",
+            CoreRead::Filter => "filter",
+            CoreRead::Lookup => "lookup",
+            CoreRead::FollowerScan => "follower_scan",
+            CoreRead::Point => "point",
+            CoreRead::Txn => "txn",
+        }
+    }
+}
+
+/// The reads the cores took since the process started, by kind, and the documents they asked
+/// for at most (the limit of a scan's part, the keys of a batch).
+static CORE_READS: [std::sync::atomic::AtomicU64; CoreRead::ALL.len()] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; CoreRead::ALL.len()];
+static CORE_READ_DOCS: [std::sync::atomic::AtomicU64; CoreRead::ALL.len()] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; CoreRead::ALL.len()];
+
+fn note_core_read(kind: CoreRead, docs: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    CORE_READS[kind as usize].fetch_add(1, Relaxed);
+    CORE_READ_DOCS[kind as usize].fetch_add(u64::try_from(docs).unwrap_or(u64::MAX), Relaxed);
+}
+
+/// The reads the cores took since the process started and the documents they asked for at
+/// most, each by kind in the order of [`CoreRead::ALL`]: which requests make the cores scan
+/// (002 run p51: 1,270 million documents scanned in 300 s, most of them with no known owner).
+#[must_use]
+pub fn core_reads() -> [(u64, u64); CoreRead::ALL.len()] {
+    use std::sync::atomic::Ordering::Relaxed;
+    std::array::from_fn(|i| (CORE_READS[i].load(Relaxed), CORE_READ_DOCS[i].load(Relaxed)))
+}
+
 /// Parts of a [`DataReq::Folds`] a core went on with itself, since the process started.
 static FOLDS_GONE_ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -941,6 +1009,8 @@ impl DataCore {
             RemoteReq::Scan { start, end, limit, concern, backward } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
                 let req = ScanReq { g, start, end, concern, limit, backward };
+                let folds = matches!(client, Client::Partial(..));
+                note_core_read(if folds { CoreRead::Fold } else { CoreRead::Scan }, limit);
                 // An aggregation's part takes the columns of the fields its program reads (010
                 // FR-033).
                 let want = match &client {
@@ -958,9 +1028,13 @@ impl DataCore {
                 let req = ScanReq { g, start, end, concern, limit, backward: false };
                 let want = match &work {
                     crate::pushed::Work::Fold(p) => {
+                        note_core_read(CoreRead::Fold, limit);
                         teseladb_exec::pipeline::Program::decode(p).and_then(|p| p.columns())
                     }
-                    crate::pushed::Work::Filter(_) => None,
+                    crate::pushed::Work::Filter(_) => {
+                        note_core_read(CoreRead::Filter, limit);
+                        None
+                    }
                 };
                 let id = match want {
                     Some(w) => self.host.scan_columns(core, (req, w.into()), now, wall_ms),
@@ -972,6 +1046,7 @@ impl DataCore {
             }
             // A point read of each key, answered together once all of them are (010 FR-027).
             RemoteReq::Lookup { keys, concern, filter } => {
+                note_core_read(CoreRead::Lookup, keys.len());
                 self.lookup(core, g, (keys, concern, filter), client, (now, wall_ms));
                 return;
             }
@@ -981,6 +1056,7 @@ impl DataCore {
             // otherwise.
             RemoteReq::FollowerScan { start, end, limit, max_stale_ms, backward, .. } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+                note_core_read(CoreRead::FollowerScan, limit);
                 let leads = core.status(g).is_some_and(|st| st.role == Role::Leader);
                 if leads {
                     let concern = ReadConcern::Majority;
@@ -1004,16 +1080,19 @@ impl DataCore {
                 }
             }
             RemoteReq::Read { key, at: Some(at) } => {
+                note_core_read(CoreRead::Point, 1);
                 self.host.get_at(core, g, &key, at, now, wall_ms)
             }
             // The leader takes the mark under its clock rule (D-003, D-069).
             RemoteReq::Read { key, at: None } => {
+                note_core_read(CoreRead::Point, 1);
                 self.host.get(core, g, &key, ReadConcern::Majority, now, wall_ms)
             }
             // A read that knows about transactions whose intents it met (008 FR-003).
             RemoteReq::ReadWith { key, scan, backward, at, concern, view, uncertain_to } => {
                 let scan =
                     scan.map(|(end, limit)| (end, usize::try_from(limit).unwrap_or(usize::MAX)));
+                note_core_read(CoreRead::Txn, scan.as_ref().map_or(1, |(_, limit)| *limit));
                 let spec = ReadSpec { g, key, scan, backward, at, concern, view, uncertain_to };
                 self.host.read_with(core, spec, now, wall_ms)
             }
@@ -1451,6 +1530,10 @@ impl DataCore {
     pub fn resume(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
         self.host.resume_scans(core, now);
         self.answer(core, now);
+        let wall_ms = self.wall_ms;
+        for id in std::mem::take(&mut self.folds_due) {
+            self.fold_next(core, id, (now, wall_ms));
+        }
     }
 
     /// Moves the host's requests, the replicas, the leaders' duties and the transfers.
@@ -1530,10 +1613,6 @@ impl DataCore {
             // comes, it opens again from its log after a while: no replica will ever serve the
             // one it waits for.
             let since = *self.stale.entry(g).or_insert(now);
-        let wall_ms = self.wall_ms;
-        for id in std::mem::take(&mut self.folds_due) {
-            self.fold_next(core, id, (now, wall_ms));
-        }
             if now.saturating_since(since) >= UNSERVED_FETCH && core.close_group(g).is_ok() {
                 self.stale.remove(&g);
                 self.host.remove_range(g);
