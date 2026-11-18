@@ -290,7 +290,7 @@ impl EngineProbe {
                     .iter()
                     .map(|s| (s.size.get(), s.count.get(), s.backtrace.to_string()))
                     .collect();
-            sites.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            sites.sort_unstable_by_key(|s| std::cmp::Reverse(s.0));
             sites
                 .into_iter()
                 .map(move |(size, count, at)| (shard, size, count, at))
