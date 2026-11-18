@@ -8,7 +8,7 @@
 //! the range keeps in the idempotence record of a retryable write (005 FR-011).
 
 use teseladb_bson::{BsonError, Document, Limits, MAX_DEPTH, MAX_SIZE, RawDoc, RawValue, Value};
-use teseladb_changestream::describe::{Touch, describe_raw};
+use teseladb_changestream::describe::{Touch, describe_raw, describe_raws};
 use teseladb_changestream::meta::RetryInfo;
 use teseladb_changestream::pipeline_diff::{describe_diff, pipeline_diff};
 use teseladb_changestream::update_desc::UpdateDescription;
@@ -1893,6 +1893,10 @@ fn modify(
         };
         let Some(position) = position else { continue };
         r.n += 1;
+        let mut in_place = match &update {
+            Some(u) if checker.shard_key.is_none() => u.apply_in_place(doc),
+            _ => None,
+        };
         match &update {
             None => {
                 deletes.push(key.clone());
@@ -1903,6 +1907,38 @@ fn modify(
                 deletes.extend(gone);
                 if image != Image::None {
                     r.value = Some(Document::from(doc));
+                }
+            }
+            // A `$inc` or `$mul` whose fields keep their type and width is written on the stored
+            // bytes (023 FR-045): the document is neither read into values nor written back, its
+            // size and depth do not change, and without a shard key it stays where it is.
+            Some(u) if in_place.is_some() => {
+                let during = executor_error(executor_of(image));
+                let new = in_place.take().expect("checked by the guard");
+                if new.as_slice() == doc.as_bytes() {
+                    r.value = (image != Image::None).then(|| Document::from(doc));
+                } else {
+                    let after =
+                        RawDoc::from_stored(&new).map_err(CommandError::from).map_err(&during)?;
+                    if let Some(changes) = u.path_changes(false) {
+                        let touches: Vec<Touch> = changes.into_iter().map(touch).collect();
+                        let d = describe_raws(doc, after, &touches, position);
+                        checker.changes.borrow_mut().push((key.clone(), d));
+                    }
+                    r.value = match image {
+                        Image::None => None,
+                        Image::Before => Some(Document::from(doc)),
+                        Image::After => Some(Document::from(after)),
+                    };
+                    checker.check(&new, Some(doc)).map_err(&during)?;
+                    let local = checker.local_id(Some(bytes));
+                    let (entries, gone) = checker
+                        .entries_at(Some(key), (Some(doc), local), Some(&new), lookup)
+                        .map_err(&during)?;
+                    puts.push(put(key, (new, local), checker, Some(bytes)));
+                    puts.extend(entries);
+                    deletes.extend(gone);
+                    r.n_modified += 1;
                 }
             }
             Some(u) => {

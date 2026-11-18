@@ -28,6 +28,8 @@ mod tree;
 mod upsert;
 
 #[cfg(test)]
+mod in_place_tests;
+#[cfg(test)]
 mod lazy_tests;
 
 use teseladb_bson::{Document, RawArray, RawDoc, RawValue, Value};
@@ -258,6 +260,40 @@ impl Update {
         // write.
         let bytes = new.to_bytes_with(crate::value::VALUE_LIMITS).map_err(bson_error)?;
         Ok(UpdateOutcome { modified: bytes != doc.as_bytes(), doc: new })
+    }
+
+    /// The new document's bytes, written on a copy of `doc`'s, when every operator is a `$inc` or
+    /// a `$mul` on a top-level field other than `_id` that exists and whose result keeps its type
+    /// and its width (an `int32` that stays `int32`, an `int64`, a `double`): the result is what
+    /// [`Update::apply`] gives, without reading the document into values and writing it back.
+    /// `None` for any other update, which goes through [`Update::apply`].
+    #[must_use]
+    pub fn apply_in_place(&self, doc: RawDoc<'_>) -> Option<Vec<u8>> {
+        let Kind::Operators { entries, .. } = &self.kind else { return None };
+        let mut out = doc.as_bytes().to_vec();
+        for e in entries {
+            let Action::Arith(op) = &e.action else { return None };
+            let name = e.path.text.as_str();
+            if name == ops::ID || name.contains('.') || name.starts_with('$') {
+                return None;
+            }
+            let (at, current) = doc.field_at(name)?;
+            let current = Value::from(current);
+            let new = crate::arith::apply(*op, &current, &Value::from(e.arg.get()))?;
+            match (&current, &new) {
+                (Value::Int32(_), Value::Int32(n)) => {
+                    out[at..at + 4].copy_from_slice(&n.to_le_bytes())
+                }
+                (Value::Int64(_), Value::Int64(n)) => {
+                    out[at..at + 8].copy_from_slice(&n.to_le_bytes())
+                }
+                (Value::Double(_), Value::Double(n)) => {
+                    out[at..at + 8].copy_from_slice(&n.to_le_bytes());
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
     }
 
     /// A pipeline's document, as a reference router 9.0.4 stores it (measured): the stored `_id`

@@ -35,7 +35,7 @@ pub fn describe(
     touches: &[Touch],
     position: Option<usize>,
 ) -> UpdateDescription {
-    describe_from(Tree::Fields(old), new, touches, position)
+    describe_from(Tree::Fields(old), Tree::Fields(new), touches, position)
 }
 
 /// [`describe`] with the document before as its BSON: the same description, without reading
@@ -46,16 +46,27 @@ pub fn describe_raw(
     touches: &[Touch],
     position: Option<usize>,
 ) -> UpdateDescription {
-    describe_from(Tree::Raw(old), new, touches, position)
+    describe_from(Tree::Raw(old), Tree::Fields(new), touches, position)
+}
+
+/// [`describe`] with both documents as their BSON: an update written on the stored bytes
+/// describes itself without reading either document into values.
+pub fn describe_raws(
+    old: RawDoc<'_>,
+    new: RawDoc<'_>,
+    touches: &[Touch],
+    position: Option<usize>,
+) -> UpdateDescription {
+    describe_from(Tree::Raw(old), Tree::Raw(new), touches, position)
 }
 
 fn describe_from(
     old: Tree<'_>,
-    new: &Document,
+    new: Tree<'_>,
     touches: &[Touch],
     position: Option<usize>,
 ) -> UpdateDescription {
-    let new_tree = Tree::Fields(new);
+    let new_tree = new;
     let mut found = Vec::new();
     for t in touches {
         match t {
@@ -168,7 +179,7 @@ fn get<'a>(d: &'a Document, first: &str, rest: &[String]) -> Option<&'a Value> {
 /// [`get`] in place in BSON: a document's first field of the name, an array's element at the
 /// position the part reads as.
 fn raw_get<'a>(d: RawDoc<'a>, first: &str, rest: &[String]) -> Option<RawValue<'a>> {
-    let field = |d: RawDoc<'a>, name: &str| d.iter().find(|(k, _)| *k == name).map(|(_, v)| v);
+    let field = |d: RawDoc<'a>, name: &str| d.field_at(name).map(|(_, v)| v);
     rest.iter().try_fold(field(d, first)?, |v, part| match v {
         RawValue::Document(d) => field(d, part),
         RawValue::Array(a) => part.parse::<usize>().ok().and_then(|i| a.iter().nth(i)),
@@ -181,19 +192,21 @@ fn depth(d: Tree<'_>, path: &[String]) -> usize {
     (0..=path.len()).rev().find(|&k| d.exists(&path[..k])).unwrap_or(0)
 }
 
-fn assign(old: Tree<'_>, new: &Document, path: &[String], found: &mut Vec<Found>) {
-    let Some((first, rest)) = path.split_first() else { return };
-    let after = get(new, first, rest);
+fn assign(old: Tree<'_>, new: Tree<'_>, path: &[String], found: &mut Vec<Found>) {
+    if path.is_empty() {
+        return;
+    }
+    let after = new.get(path);
     let before = old.get(path);
-    if after == before.as_ref().map(Node::value).as_deref() {
+    if after.as_ref().map(Node::value) == before.as_ref().map(Node::value) {
         return;
     }
     let k = depth(old, path);
     // A new field of a document is given whole from its first missing part; a position past the
     // end of an array, alone (the nulls before it are not named).
     let at = if old.is_array(&path[..k]) { path.len() } else { (k + 1).min(path.len()) };
-    if let Some(v) = get(new, first, &path[1..at]) {
-        found.push(Found { path: path[..at].to_vec(), value: Some(v.clone()) });
+    if let Some(v) = new.get(&path[..at]) {
+        found.push(Found { path: path[..at].to_vec(), value: Some(v.value().into_owned()) });
     }
 }
 
@@ -205,11 +218,12 @@ fn unset(old: Tree<'_>, path: &[String], found: &mut Vec<Found>) {
     found.push(Found { path: path.to_vec(), value });
 }
 
-fn append(old: Tree<'_>, new: &Document, path: &[String], found: &mut Vec<Found>) {
-    let after = path.split_first().and_then(|(first, rest)| get(new, first, rest));
+fn append(old: Tree<'_>, new: Tree<'_>, path: &[String], found: &mut Vec<Found>) {
+    let after = new.get(path);
+    let after = after.as_ref().map(Node::value);
     let before = old.get(path);
     let before = before.as_ref().map(Node::value);
-    match (before.as_deref(), after) {
+    match (before.as_deref(), after.as_deref()) {
         (Some(Value::Array(a)), Some(Value::Array(b))) if b.len() > a.len() && b.starts_with(a) => {
             for (i, v) in b.iter().enumerate().skip(a.len()) {
                 let mut p = path.to_vec();

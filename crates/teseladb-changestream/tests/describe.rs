@@ -3,7 +3,7 @@
 //! the document before, the operators' touches, and the `updateDescription` of its event.
 
 use teseladb_bson::{Document, RawDoc, extjson};
-use teseladb_changestream::describe::{Touch, describe, describe_raw};
+use teseladb_changestream::describe::{Touch, describe, describe_raw, describe_raws};
 
 fn doc(text: &str) -> Document {
     extjson::parse(text).unwrap()
@@ -22,6 +22,11 @@ fn check(old: &str, new: &str, touches: &[Touch], position: Option<usize>, want:
     let raw = RawDoc::from_bytes(&bytes).unwrap();
     let in_place = describe_raw(raw, &doc(new), touches, position).to_document(true);
     assert_eq!(in_place, doc(want), "in place: {old} -> {new} with {touches:?}");
+    // And with the document after as its BSON too, as an update written on the bytes gives it.
+    let new_bytes = doc(new).to_bytes().unwrap();
+    let new_raw = RawDoc::from_bytes(&new_bytes).unwrap();
+    let both = describe_raws(raw, new_raw, touches, position).to_document(true);
+    assert_eq!(both, doc(want), "both in place: {old} -> {new} with {touches:?}");
 }
 
 const NONE: &str = r#"{"updatedFields": {}, "removedFields": [], "truncatedArrays": [], "disambiguatedPaths": {}}"#;

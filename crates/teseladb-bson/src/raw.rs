@@ -201,6 +201,13 @@ impl<'a> RawDoc<'a> {
     /// 12 ns a field skipped, 119 ns to miss a name in a document of 9 fields with a string of
     /// 600 bytes.
     fn field(&self, name: &str) -> Option<RawValue<'a>> {
+        self.field_at(name).map(|(_, v)| v)
+    }
+
+    /// The first top-level field named `name` and the offset in [`RawDoc::as_bytes`] where its
+    /// value starts: an update that keeps the value's width writes the new one there.
+    #[must_use]
+    pub fn field_at(&self, name: &str) -> Option<(usize, RawValue<'a>)> {
         let b = self.bytes;
         let want = name.as_bytes();
         let mut at = 4;
@@ -209,7 +216,7 @@ impl<'a> RawDoc<'a> {
             let len = crate::arch::find_nul(b.get(at + 1..)?)?;
             let value = at + 1 + len + 1;
             if &b[at + 1..at + 1 + len] == want {
-                return read::element(b, at, Mode::Trusted).ok().map(|(_, v, _)| v);
+                return read::element(b, at, Mode::Trusted).ok().map(|(_, v, _)| (value, v));
             }
             at = read::value_end(b, t, value)?;
         }
