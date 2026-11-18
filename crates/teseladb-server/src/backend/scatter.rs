@@ -46,6 +46,11 @@ static OUTSIDE: AtomicU64 = AtomicU64::new(0);
 /// to give way between parts.
 const OUTSIDE_PART: usize = 4 * CORE_SCAN_PART;
 
+/// Documents of an aggregation's part a core folds at once: a part of `CORE_SCAN_PART` took the
+/// core 0.3 to 1 ms in one go, past its turn's quota, and the writes on that core waited behind
+/// it (p12's diagnosis: shards almost never asleep, 47 % of their CPU in scans).
+const SCATTER_PART: usize = CORE_SCAN_PART / 4;
+
 /// Parts of split aggregations whose program this node sent to the leader of their range on
 /// another node, since the process started (010 FR-034).
 pub fn scattered_parts_sent_away() -> u64 {
@@ -274,7 +279,7 @@ impl ServerBackend {
         (program, sent): (&Arc<Program>, &std::cell::OnceCell<Option<Vec<u8>>>),
         concern: ReadConcern,
     ) -> Option<mpsc::Receiver<Result<DataReply, RangeError>>> {
-        let limit = u32::try_from(CORE_SCAN_PART).unwrap_or(u32::MAX);
+        let limit = u32::try_from(SCATTER_PART).unwrap_or(u32::MAX);
         let (start, end) = (p.from.clone(), p.stop.clone());
         let (tx, rx) = mpsc::channel();
         let msg = if leads_here(&self.h.views, p) {
