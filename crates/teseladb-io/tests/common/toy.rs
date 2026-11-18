@@ -56,6 +56,9 @@ pub enum Cmd {
     Scan(u64),
     /// Work of this many parts that goes on without anything arriving ([`CoreLogic::runnable`]).
     Parts(u64),
+    /// [`Cmd::Parts`] whose first part leaves a task of its shard ready to run, which writes in
+    /// the counter how many parts had run when its turn came.
+    PartsAndTask(u64, Arc<AtomicU64>),
     /// Hand this message to another core through its sender (from the core's own shard).
     Relay(CoreSender<Cmd>, Box<Cmd>),
 }
@@ -97,6 +100,10 @@ pub struct Toy {
     pub turns: u64,
     /// The turn each part of [`Cmd::Parts`] ran in.
     pub part_turns: Vec<u64>,
+    /// The parts run so far, for the task of [`Cmd::PartsAndTask`] to read.
+    pub parts_done: Arc<AtomicU64>,
+    /// Where the task of [`Cmd::PartsAndTask`] writes, until the first part leaves it ready.
+    pub task_due: Option<Arc<AtomicU64>>,
 }
 
 pub fn ack(req: u64) -> PeerMsg {
@@ -206,6 +213,10 @@ impl CoreLogic for Toy {
             Cmd::Stall(d) => thread::sleep(d),
             Cmd::Request(id) | Cmd::Scan(id) => self.served.push(id),
             Cmd::Parts(n) => self.parts_left = n,
+            Cmd::PartsAndTask(n, ran_after) => {
+                self.parts_left = n;
+                self.task_due = Some(ran_after);
+            }
             Cmd::Relay(to, msg) => {
                 let _ = to.send(CoreInput::App(*msg));
             }
@@ -261,6 +272,16 @@ impl CoreLogic for Toy {
     fn resume(&mut self, _now: Nanos, _wall_ms: u64) {
         self.parts_left -= 1;
         self.part_turns.push(self.turns);
+        if let Some(ran_after) = self.task_due.take() {
+            // A task of this shard, ready from now on: it runs when the core's turn lets it.
+            let done = Arc::clone(&self.parts_done);
+            let ready = teseladb::engine::core::reactor::yield_().then(move |()| {
+                ran_after.store(done.load(Ordering::SeqCst), Ordering::SeqCst);
+                teseladb::engine::core::future::make_ready_future(())
+            });
+            drop(ready);
+        }
+        self.parts_done.fetch_add(1, Ordering::SeqCst);
     }
 }
 

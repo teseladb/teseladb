@@ -44,6 +44,10 @@ pub fn run() {
         ("document_operations_go_ahead_of_long_scans", document_operations_go_ahead_of_scans),
         ("work_that_goes_on_takes_few_turns", work_that_goes_on_takes_few_turns),
         (
+            "work_that_goes_on_gives_way_to_a_task_of_its_shard",
+            work_that_goes_on_gives_way_to_a_task_of_its_shard,
+        ),
+        (
             "a_long_turn_gives_the_shard_back_between_messages",
             a_long_turn_gives_the_shard_back_between_messages,
         ),
@@ -471,6 +475,25 @@ fn work_that_goes_on_takes_few_turns(e: &NodeEngine) {
     let mut turns = t.part_turns.clone();
     turns.dedup();
     assert!(turns.len() <= TURNS, "{PARTS} parts took {} turns", turns.len());
+}
+
+fn work_that_goes_on_gives_way_to_a_task_of_its_shard(e: &NodeEngine) {
+    // The first of two thousand parts leaves a task of the core's shard ready to run. A turn
+    // that went on until the engine asked for the shard ran every part first: with a core's
+    // turn of up to 0.5 ms, the reads of the connections of its shard got slower (002 run p53b:
+    // find_id 13 % at p50). The turn ends when its shard has other work, and goes on after it.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    const PARTS: u64 = 2000;
+    const UNSET: u64 = u64::MAX;
+    let ran_after = Arc::new(AtomicU64::new(UNSET));
+    let a = start(e, 0, 26, Toy::default());
+    send(&a, Cmd::PartsAndTask(PARTS, Arc::clone(&ran_after)));
+    thread::sleep(Duration::from_millis(100));
+    let (t, _, _) = stop(e, a);
+    assert_eq!(t.part_turns.len() as u64, PARTS, "every part ran");
+    let after = ran_after.load(Ordering::SeqCst);
+    assert_ne!(after, UNSET, "the task never ran");
+    assert!(after <= 2, "the shard's task ran after {after} parts of the core's work");
 }
 
 fn background_at_a_stop_answered(e: &NodeEngine) {
