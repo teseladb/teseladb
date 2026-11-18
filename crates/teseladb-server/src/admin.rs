@@ -671,6 +671,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     }
     let (gets, probes) = teseladb_lsm::outside_probes();
     let scans = teseladb_lsm::scan_totals();
+    let took = teseladb_lsm::scan_breakdown();
     let rows = [
         ("teseladb_lsm_outside_gets_total", "Point reads served on connections' threads.", gets),
         (
@@ -685,6 +686,12 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             scans.entries,
         ),
         ("teseladb_lsm_scan_items_total", "Items those scans gave.", scans.items),
+        ("teseladb_lsm_scan_newer_total", "Scan entries above the read's mark.", took.newer),
+        ("teseladb_lsm_scan_older_total", "Scan entries of keys already decided.", took.older),
+        ("teseladb_lsm_scan_decided_total", "Scan entries that decided their key.", took.decided),
+        ("teseladb_lsm_scan_memtable_total", "Scan entries from memtables.", took.memtable),
+        ("teseladb_lsm_scan_tables_total", "Scan entries from files of levels.", took.tables),
+        ("teseladb_lsm_scan_history_total", "Scan entries from history files.", took.history),
     ];
     for (name, help, n) in rows {
         let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");

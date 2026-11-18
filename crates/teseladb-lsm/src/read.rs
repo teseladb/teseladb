@@ -954,6 +954,72 @@ static SCANS: AtomicU64 = AtomicU64::new(0);
 static SCAN_ENTRIES: AtomicU64 = AtomicU64::new(0);
 static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
 
+/// Why a scan took an entry and from where (002 run p44: scans took 4.0 entries for each item).
+/// Tallied per thread, so that a scan's steps touch no shared counter and `Scan` does not grow,
+/// and added to the process's totals ([`scan_breakdown`]) when a scan ends.
+#[derive(Clone, Copy)]
+enum Took {
+    /// A version above the read's mark, passed over.
+    Newer,
+    /// A version of a key already decided, passed over.
+    Older,
+    /// The version that decides its key (shown, deleted, or an intent's).
+    Decided,
+    /// From a memtable.
+    Memtable,
+    /// From a file of a level.
+    Tables,
+    /// From a history file (FR-031).
+    History,
+}
+
+const TOOK_KINDS: usize = 6;
+
+thread_local! {
+    static TOOK: std::cell::Cell<[u64; TOOK_KINDS]> = const { std::cell::Cell::new([0; TOOK_KINDS]) };
+}
+
+static TOOK_TOTALS: [AtomicU64; TOOK_KINDS] = [const { AtomicU64::new(0) }; TOOK_KINDS];
+
+fn took(why: Took, from: Took) {
+    TOOK.with(|t| {
+        let mut a = t.get();
+        a[why as usize] += 1;
+        a[from as usize] += 1;
+        t.set(a);
+    });
+}
+
+/// The entries every ended scan took, by why and from where, since the process started.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanBreakdown {
+    /// Versions above the read's mark, passed over.
+    pub newer: u64,
+    /// Versions of keys already decided, passed over.
+    pub older: u64,
+    /// The versions that decided their keys.
+    pub decided: u64,
+    /// Entries from memtables.
+    pub memtable: u64,
+    /// Entries from files of the levels.
+    pub tables: u64,
+    /// Entries from history files.
+    pub history: u64,
+}
+
+/// [`ScanBreakdown`] of every scan ended since the process started.
+pub fn scan_breakdown() -> ScanBreakdown {
+    let n = |k: Took| TOOK_TOTALS[k as usize].load(Ordering::Relaxed);
+    ScanBreakdown {
+        newer: n(Took::Newer),
+        older: n(Took::Older),
+        decided: n(Took::Decided),
+        memtable: n(Took::Memtable),
+        tables: n(Took::Tables),
+        history: n(Took::History),
+    }
+}
+
 /// The counts of every scan ended since the process started.
 pub fn scan_totals() -> ScanCounts {
     ScanCounts {
@@ -969,6 +1035,12 @@ impl Drop for Scan {
         SCANS.fetch_add(1, Ordering::Relaxed);
         SCAN_ENTRIES.fetch_add(u64::from(self.entries), Ordering::Relaxed);
         SCAN_ITEMS.fetch_add(u64::from(self.items), Ordering::Relaxed);
+        let tallied = TOOK.with(|t| t.replace([0; TOOK_KINDS]));
+        for (total, n) in TOOK_TOTALS.iter().zip(tallied) {
+            if n != 0 {
+                total.fetch_add(n, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -1304,16 +1376,24 @@ impl Scan {
             });
             self.moved = true;
             self.entries = self.entries.saturating_add(1);
+            let from = match &cursors[i] {
+                Cursor::Mem(_) => Took::Memtable,
+                Cursor::Table { data: Some(_), .. } => Took::History,
+                Cursor::Table { .. } => Took::Tables,
+            };
             if ts > read {
+                took(Took::Newer, from);
                 cursors[i].seek(entry::internal_key(&st.key, read));
                 continue;
             }
             if st.found.is_some() {
+                took(Took::Older, from);
                 if let Err(e) = cursors[i].skip_versions(&st.key, VERSIONS_STEPPED) {
                     return ColumnStep::Step(Step::Failed(e));
                 }
                 continue;
             }
+            took(Took::Decided, from);
             let c = &cursors[i];
             let seen = match see(ts, c.kind(), || c.stored(), &mut st.retracted, &mut st.found) {
                 Ok(seen) => seen,

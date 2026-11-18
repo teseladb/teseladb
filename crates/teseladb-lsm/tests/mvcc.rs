@@ -77,6 +77,31 @@ fn a_scan_counts_the_entries_it_examined_and_the_items_it_gave() {
 }
 
 #[test]
+fn a_scan_tells_why_and_from_where_it_took_each_entry() {
+    // A version below the read in a file, one above it in another file and one in the memtable:
+    // the scan passes over the memtable's, decides the key on the older one, and does not open
+    // the file whose versions are all above the read (002 run p44: scans took 4.0 entries for
+    // each item, and not from level 0's tiers).
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    for (index, at) in [(1, 10), (2, 40)] {
+        lsm.put(G, index, b"a", ts(at, 0), b"v").unwrap();
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    lsm.put(G, 3, b"a", ts(50, 0), b"v").unwrap();
+    let before = teseladb_lsm::scan_breakdown();
+    let v = lsm.view();
+    let rows = scan(&mut lsm, &mut disk, &v, b"a", b"b", ts(25, 0));
+    assert_eq!(rows.len(), 1);
+    let after = teseladb_lsm::scan_breakdown();
+    assert!(after.newer > before.newer, "{after:?}");
+    assert!(after.decided > before.decided, "{after:?}");
+    assert!(after.memtable > before.memtable, "{after:?}");
+    assert!(after.tables > before.tables, "{after:?}");
+}
+
+#[test]
 fn a_scan_returns_one_version_per_key() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);
