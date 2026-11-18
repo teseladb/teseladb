@@ -298,6 +298,8 @@ pub struct NodeLogic {
     sent_tenants: Option<(u64, crate::routes::TenantStates)>,
     create_op: Option<OpId>,
     balance_op: Option<OpId>,
+    /// The balancer's orders Group 0 refused in a row, for the node's log (007 FR-010).
+    balance_refusals: crate::balancer_refusals::Refusals,
     /// Group 0's automatic reassignment of the designated primary in flight (018 FR-007).
     reassign_op: Option<OpId>,
     balance_at: Nanos,
@@ -392,6 +394,7 @@ impl NodeLogic {
             sent_tenants: None,
             create_op: None,
             balance_op: None,
+            balance_refusals: crate::balancer_refusals::Refusals::default(),
             reassign_op: None,
             balance_at: Nanos::ZERO,
             balanced_nodes: Vec::new(),
@@ -897,6 +900,7 @@ impl NodeLogic {
         });
         self.settle_check_at = settling.then_some(now + SETTLE_CHECK);
         if let Some(cmd) = cmd {
+            self.balance_refusals.sent(&cmd);
             self.balance_op = self.send_group0(cmd);
         }
     }
@@ -1733,6 +1737,13 @@ impl NodeLogic {
 
     /// An operation of the core ended.
     fn op_done(&mut self, op: OpId, result: Result<Done<CoreOutput>, OpError>) {
+        // An order of the balancer that Group 0 refused goes out again at the next round: the
+        // log says so, or nothing would (007 FR-010).
+        if self.balance_op == Some(op)
+            && let Some((level, line)) = self.balance_refusals.answered(&result)
+        {
+            crate::log::defer_at(level, line);
+        }
         let mine = |slot: &mut Option<OpId>| {
             let hit = *slot == Some(op);
             if hit {
