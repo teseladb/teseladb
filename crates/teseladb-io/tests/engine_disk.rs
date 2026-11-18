@@ -154,6 +154,53 @@ engine_test_case!(the_classes_are_scheduling_groups_with_their_shares, {
     })
 });
 
+/// The `flags` line of the `fdinfo` of the descriptor this process holds open on `path`.
+fn open_flags_of(path: &Path) -> Option<u32> {
+    let want = std::fs::canonicalize(path).ok()?;
+    for fd in std::fs::read_dir("/proc/self/fd").ok()?.flatten() {
+        if std::fs::read_link(fd.path()).ok().as_deref() != Some(want.as_path()) {
+            continue;
+        }
+        let info =
+            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.file_name().to_str()?))
+                .ok()?;
+        let line = info.lines().find(|l| l.starts_with("flags:"))?;
+        return u32::from_str_radix(line.trim_start_matches("flags:").trim(), 8).ok();
+    }
+    None
+}
+
+/// `O_DSYNC` in the flags of a descriptor.
+const O_DSYNC: u32 = 0o10000;
+
+engine_test_case!(a_durable_disk_opens_its_files_so_that_each_write_ends_durable, {
+    on_engine(|g| {
+        let dir = Dir::new("durable");
+        // A durable disk: what it creates and what it opens writes through (O_DSYNC), so a write
+        // ends durable and its sync has nothing left to do.
+        let d = ShardDisk::open_durable(&dir.0, g.clone()).get().unwrap();
+        let mut d2 = d.clone();
+        assert!(matches!(d2.execute(create(1, "made")), IoDone::Ok(_)));
+        assert!(matches!(d2.execute(write(1, 0, &[7u8; 4096])), IoDone::Ok(_)));
+        let made = open_flags_of(&dir.0.join("made")).expect("the file is open");
+        assert_ne!(made & O_DSYNC, 0, "a created file writes through: flags {made:o}");
+        let opened = IoOp::Open { file: FileId(2), path: "made".into() };
+        assert!(matches!(d2.execute(IoOp::Close { file: FileId(1) }), IoDone::Ok(_)));
+        assert!(matches!(d2.execute(opened), IoDone::Ok(_)));
+        let reopened = open_flags_of(&dir.0.join("made")).expect("the file is open");
+        assert_ne!(reopened & O_DSYNC, 0, "an opened file writes through: flags {reopened:o}");
+        assert!(matches!(d2.execute(IoOp::Sync { file: FileId(2), batch: 0 }), IoDone::Ok(_)));
+        assert!(matches!(d2.execute(IoOp::Close { file: FileId(2) }), IoDone::Ok(_)));
+        // An ordinary disk does not: its writes wait for their sync.
+        let plain = ShardDisk::open(&dir.0, g).get().unwrap();
+        let mut p = plain.clone();
+        assert!(matches!(p.execute(create(3, "plain")), IoDone::Ok(_)));
+        let flags = open_flags_of(&dir.0.join("plain")).expect("the file is open");
+        assert_eq!(flags & O_DSYNC, 0, "an ordinary file does not write through: {flags:o}");
+        assert!(matches!(p.execute(IoOp::Close { file: FileId(3) }), IoDone::Ok(_)));
+    })
+});
+
 engine_test_case!(a_model_of_a_disk_comes_back_with_what_it_holds, {
     on_engine(|_| {
         let mut d = ShardDisk::mem(MemDisk::new());

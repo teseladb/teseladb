@@ -76,6 +76,8 @@ enum Backend {
     Files {
         /// The directory the operations' paths are relative to.
         root: Rc<PathBuf>,
+        /// Whether its files write through (`O_DSYNC`, [`ShardDisk::open_durable`]).
+        through: bool,
         /// The groups of the classes.
         groups: IoGroups,
         /// The open files.
@@ -174,12 +176,23 @@ impl ShardDisk {
 
     /// The executor of the files under `root` (made if missing), with the classes in `groups`.
     pub fn open(root: impl Into<PathBuf>, groups: IoGroups) -> Future<ShardDisk> {
-        let root = root.into();
+        ShardDisk::open_with(root.into(), groups, false)
+    }
+
+    /// As [`ShardDisk::open`], with every file it creates or opens writing through (`O_DSYNC`):
+    /// a write ends durable in one operation, and a sync has nothing left to do. For the Raft
+    /// log, whose every group of records waits for durability: one durable write costs about
+    /// half of a write and an `fdatasync` (76 µs against 155 µs by fio on the measuring disk).
+    pub fn open_durable(root: impl Into<PathBuf>, groups: IoGroups) -> Future<ShardDisk> {
+        ShardDisk::open_with(root.into(), groups, true)
+    }
+
+    fn open_with(root: PathBuf, groups: IoGroups, through: bool) -> Future<ShardDisk> {
         let dir = root.to_string_lossy().into_owned();
         recursive_touch_directory(&dir, FilePermissions::DEFAULT_DIR_PERMISSIONS).then(move |()| {
             let files = HashMap::new();
             let sizes = HashMap::new();
-            let backend = Backend::Files { root: Rc::new(root), groups, files, sizes };
+            let backend = Backend::Files { root: Rc::new(root), through, groups, files, sizes };
             Ok::<_, ExceptionPtr>(ShardDisk::with_backend(backend))
         })
     }
@@ -358,17 +371,18 @@ struct Launch {
     op: IoOp,
     class: IoClass,
     root: Rc<PathBuf>,
+    through: bool,
     file: Option<OpenFile>,
     group: teseladb::engine::core::scheduling::SchedulingGroup,
 }
 
 fn launch_one(inner: &Rc<RefCell<Inner>>, l: Launch) {
-    let Launch { seq, op, class, root, file, group } = l;
+    let Launch { seq, op, class, root, through, file, group } = l;
     let rc = inner.clone();
     // The operation's future never fails; the engine failing to queue its task (out of memory)
     // is the operation's failure.
     let failed = ops::fail(&op, IoErrno::Io);
-    let _ = with_scheduling_group(group, move || ops::start(root, op, file)).then_wrapped(
+    let _ = with_scheduling_group(group, move || ops::start(root, through, op, file)).then_wrapped(
         move |f: Future<Finished>| {
             let fin = f.get().unwrap_or(Finished { done: failed, effect: Effect::None });
             let inline = {
@@ -496,7 +510,7 @@ impl Inner {
         let q = self.queues[class.index()].pop_front().expect("the front just seen");
         let waited = u64::try_from(q.queued.elapsed().as_nanos()).unwrap_or(u64::MAX);
         teseladb_stages::record(teseladb_stages::Stage::DiskQueueWait, waited);
-        let Backend::Files { root, groups, files, sizes } = &mut self.backend else {
+        let Backend::Files { root, through, groups, files, sizes } = &mut self.backend else {
             unreachable!("the files' backend")
         };
         let file = match &q.op {
@@ -509,7 +523,8 @@ impl Inner {
         let group =
             if shape == Shape::Free { groups.of(IoClass::Background) } else { groups.of(class) };
         self.running.push((q.seq, class, shape));
-        Some(Some(Launch { seq: q.seq, op: q.op, class, root: root.clone(), file, group }))
+        let (root, through) = (root.clone(), *through);
+        Some(Some(Launch { seq: q.seq, op: q.op, class, root, through, file, group }))
     }
 
     /// Records the end of operation `seq` of `class` and hands out what it lets go.

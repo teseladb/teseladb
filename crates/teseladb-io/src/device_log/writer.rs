@@ -343,7 +343,9 @@ fn open_disk(disk: LogDisk) -> io::Result<ShardDisk> {
         LogDisk::Memory(m) => Ok(ShardDisk::model(m)),
         LogDisk::Files(root) => {
             let groups = IoGroups::get_or_create().get().map_err(engine_error)?;
-            ShardDisk::open(root, groups).get().map_err(engine_error)
+            // Each group of records waits for durability: its files write through, so a group is
+            // one durable write and its sync costs nothing.
+            ShardDisk::open_durable(root, groups).get().map_err(engine_error)
         }
     }
 }

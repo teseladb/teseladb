@@ -121,10 +121,20 @@ fn text(p: &Path) -> String {
 
 /// Starts `op` on the files under `root`; `file` is the open file it names, if it names one and
 /// it is open. The future never fails: a failure is the operation's result.
-pub(crate) fn start(root: Rc<PathBuf>, op: IoOp, file: Option<OpenFile>) -> Future<Finished> {
+/// With `through`, the files it creates and opens write through (`O_DSYNC`): each write ends
+/// durable, and a sync has nothing left to do.
+pub(crate) fn start(
+    root: Rc<PathBuf>,
+    through: bool,
+    op: IoOp,
+    file: Option<OpenFile>,
+) -> Future<Finished> {
+    let extra = if through { OpenFlags::DSYNC } else { OpenFlags::from_bits(0) };
     let outcome: Io<Effect> = match (&op, file) {
-        (IoOp::Create { file, path, prealloc }, _) => create(root.join(path), *file, *prealloc),
-        (IoOp::Open { file, path }, _) => open(&root.join(path), *file, OpenFlags::RW),
+        (IoOp::Create { file, path, prealloc }, _) => {
+            create(root.join(path), *file, *prealloc, extra)
+        }
+        (IoOp::Open { file, path }, _) => open(&root.join(path), *file, OpenFlags::RW | extra),
         (IoOp::SyncDir { path }, _) => none(sync_directory(&text(&root.join(path)))),
         (IoOp::Rename { from, to }, _) => {
             none(rename_file(&text(&root.join(from)), &text(&root.join(to))))
@@ -281,9 +291,9 @@ fn parents(full: &Path) -> Io<()> {
 }
 
 /// Creates `full` as `id`, with `prealloc` bytes reserved that read as zeros. A file that cannot
-/// get its space does not stay.
-fn create(full: PathBuf, id: FileId, prealloc: u64) -> Io<Effect> {
-    let flags = OpenFlags::RW | OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
+/// get its space does not stay. `extra` are flags it is opened with besides.
+fn create(full: PathBuf, id: FileId, prealloc: u64, extra: OpenFlags) -> Io<Effect> {
+    let flags = OpenFlags::RW | OpenFlags::CREATE | OpenFlags::EXCLUSIVE | extra;
     let first = open(&full, id, flags);
     let again = full.clone();
     let made = first.then(move |r: Result<Effect, IoErrno>| match r {
