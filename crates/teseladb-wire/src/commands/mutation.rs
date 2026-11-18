@@ -571,9 +571,10 @@ fn read_rules(d: &Fields<'_>) -> Result<Rules, CommandError> {
         partitions: match d.get(f::PARTITIONS) {
             Some(RawValue::Int64(n)) => u8::try_from(n)
                 .ok()
-                .filter(|n| (1..=teseladb_keys::partition::MAX_PARTITIONS).contains(n))
+                .filter(|n| *n <= teseladb_keys::partition::MAX_PARTITIONS)
                 .ok_or_else(bad_rules)?,
-            None => 1,
+            // Rules written before partitions: 0, which is one.
+            None => 0,
             Some(_) => return Err(bad_rules()),
         },
         fields: match d.get(f::FIELDS) {
