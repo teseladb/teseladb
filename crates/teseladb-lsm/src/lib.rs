@@ -121,7 +121,7 @@ pub use lsm::{
 };
 pub use memtable::frozen_alive_bytes;
 pub use metrics::{FileSpace, LsmMetrics, SpaceUse};
-pub use read::{Found, Item, Lookup, ReadToken, Scan, Step};
+pub use read::{Found, Item, Lookup, ReadToken, Scan, ScanCounts, Step, scan_totals};
 pub use read_back::BackScan;
 pub use size::IntervalSize;
 pub use time_iter::TimeScan;

@@ -39,6 +39,44 @@ fn a_read_sees_the_newest_version_up_to_its_timestamp() {
 }
 
 #[test]
+fn a_scan_counts_the_entries_it_examined_and_the_items_it_gave() {
+    // Each of three versions of four keys in a file of its own: the scan meets every version and
+    // gives one item per key. The ratio of the two is the scan's read amplification (002 run p41:
+    // scans take more than half the node's CPU).
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let mut index = 0;
+    for t in 1..=3u64 {
+        for k in [b"a", b"b", b"c", b"d"] {
+            index += 1;
+            lsm.put(G, index, k, ts(t * 10, 0), format!("{t}").as_bytes()).unwrap();
+        }
+        lsm.flush();
+        lsm.run_io(&mut disk, Nanos::ZERO);
+    }
+    let before = teseladb_lsm::scan_totals();
+    let v = lsm.view();
+    let mut s = v.scan(b"a", b"e", ts(35, 0));
+    let mut items = 0;
+    loop {
+        match s.next(&mut lsm) {
+            Step::Item(_) => items += 1,
+            Step::Miss(_) => {
+                lsm.run_io(&mut disk, Nanos::ZERO);
+            }
+            Step::Done => break,
+            Step::Failed(e) => panic!("{e}"),
+        }
+    }
+    let counts = s.counts();
+    assert_eq!((items, counts.items), (4, 4));
+    assert!(counts.entries >= 12, "{counts:?}: every version of every key");
+    drop(s);
+    let after = teseladb_lsm::scan_totals();
+    assert!(after.scans > before.scans && after.entries >= before.entries + 12, "{after:?}");
+}
+
+#[test]
 fn a_scan_returns_one_version_per_key() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);

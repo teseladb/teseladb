@@ -670,6 +670,7 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         let _ = writeln!(out, "{name}{{reason=\"{reason}\"}} {n}");
     }
     let (gets, probes) = teseladb_lsm::outside_probes();
+    let scans = teseladb_lsm::scan_totals();
     let rows = [
         ("teseladb_lsm_outside_gets_total", "Point reads served on connections' threads.", gets),
         (
@@ -677,6 +678,13 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "Files those point reads searched past their filters.",
             probes,
         ),
+        ("teseladb_lsm_scans_total", "Scans of the storage ended.", scans.scans),
+        (
+            "teseladb_lsm_scan_entries_total",
+            "Entries those scans took from their sources: versions, deletions and intents included.",
+            scans.entries,
+        ),
+        ("teseladb_lsm_scan_items_total", "Items those scans gave.", scans.items),
     ];
     for (name, help, n) in rows {
         let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");

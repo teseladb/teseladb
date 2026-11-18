@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_keys::Hlc;
 use teseladb_keys::zone::Zones;
@@ -830,6 +831,8 @@ impl View {
             finished: false,
             skipped: 0,
             want: None,
+            entries: 0,
+            items: 0,
         }
     }
 }
@@ -928,6 +931,45 @@ pub struct Scan {
     /// The top-level fields whose columns the scan takes in place of whole data blocks (010
     /// FR-033), when it takes any.
     want: Option<Arc<[String]>>,
+    /// Entries the scan took from its sources and items it gave: its read amplification, added
+    /// to the process's totals ([`scan_totals`]) when it ends. 32 bits each, saturating: a
+    /// wider pair made `Scan` too large beside a backward scan in the enums that hold either.
+    entries: u32,
+    items: u32,
+}
+
+/// A scan's entries taken from its sources, the items it gave, and how many scans: the
+/// process's totals ([`scan_totals`]) or one scan's ([`Scan::counts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanCounts {
+    /// Scans ended (1 for one scan's counts).
+    pub scans: u64,
+    /// Entries taken from the sources: versions, deletions and intents included.
+    pub entries: u64,
+    /// Items given.
+    pub items: u64,
+}
+
+static SCANS: AtomicU64 = AtomicU64::new(0);
+static SCAN_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
+
+/// The counts of every scan ended since the process started.
+pub fn scan_totals() -> ScanCounts {
+    ScanCounts {
+        scans: SCANS.load(Ordering::Relaxed),
+        entries: SCAN_ENTRIES.load(Ordering::Relaxed),
+        items: SCAN_ITEMS.load(Ordering::Relaxed),
+    }
+}
+
+impl Drop for Scan {
+    fn drop(&mut self) {
+        // Once per scan, so that a scan's steps touch no shared counter.
+        SCANS.fetch_add(1, Ordering::Relaxed);
+        SCAN_ENTRIES.fetch_add(u64::from(self.entries), Ordering::Relaxed);
+        SCAN_ITEMS.fetch_add(u64::from(self.items), Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for Scan {
@@ -999,6 +1041,7 @@ impl Scan {
             return None;
         }
         let item = Item { key: st.key, ts: f.ts, kind: f.kind, value: f.value };
+        self.items = self.items.saturating_add(1);
         match f.deferred {
             None => Some(item),
             Some(d) => {
@@ -1035,8 +1078,14 @@ impl Scan {
     /// The scan taking each data block it may as its column block, with the columns of the
     /// top-level fields `want` (010 FR-033): [`Scan::next_columns`] gives those batches in key
     /// order among the other documents.
-    pub fn with_columns(self, want: Arc<[String]>) -> Scan {
-        Scan { want: Some(want), ..self }
+    pub fn with_columns(mut self, want: Arc<[String]>) -> Scan {
+        self.want = Some(want);
+        self
+    }
+
+    /// The entries this scan took from its sources and the items it gave so far.
+    pub fn counts(&self) -> ScanCounts {
+        ScanCounts { scans: 1, entries: u64::from(self.entries), items: u64::from(self.items) }
     }
 
     /// [`Scan::next_pruned`] for a scan [`Scan::with_columns`]: the next document, or the next
@@ -1254,6 +1303,7 @@ impl Scan {
                 found: None,
             });
             self.moved = true;
+            self.entries = self.entries.saturating_add(1);
             if ts > read {
                 cursors[i].seek(entry::internal_key(&st.key, read));
                 continue;
