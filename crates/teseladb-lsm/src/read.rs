@@ -771,7 +771,10 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
         let history = t.history.as_ref().map(|h| (h, false));
         for (f, of_level) in std::iter::once((t, true)).chain(history) {
             let gave = best.as_ref().map(|b| b.ts) != before;
-            let wanted = of_level || (!gave && (read < t.props.max_ts || passed));
+            // Also when the version found, from a newer source, is below the file's highest
+            // mark: the file may have sent a newer deletion of the key to its history file.
+            let under = before.is_some_and(|b| b < t.props.max_ts);
+            let wanted = of_level || (!gave && (read < t.props.max_ts || passed || under));
             let newer = best.as_ref().is_none_or(|b| f.props.max_ts > b.ts);
             if !wanted || !newer || f.props.min_ts > read || !f.may_contain(hashes) {
                 continue;
@@ -869,6 +872,28 @@ fn skippable(
     older.iter().enumerate().all(|(j, c)| match c {
         Cursor::Table { table: t, .. } => asleep(j) || !t.may_hold(lo, hi),
         Cursor::Mem(_) => true,
+    })
+}
+
+/// The first file older than source `i` whose history file is closed, that may hold `key` and
+/// whose highest mark is above `ts`.
+fn closed_history_over(
+    cursors: &[Cursor],
+    asleep: &[Option<usize>],
+    i: usize,
+    key: &[u8],
+    ts: Hlc,
+) -> Option<usize> {
+    (i + 1..cursors.len()).find(|&m| {
+        asleep[m].is_some()
+            && match &cursors[m] {
+                Cursor::Table { table: t, .. } => {
+                    t.props.max_ts > ts
+                        && t.props.lo.as_slice() <= key
+                        && key <= t.props.hi.as_slice()
+                }
+                Cursor::Mem(_) => false,
+            }
     })
 }
 
@@ -1400,6 +1425,19 @@ impl Scan {
                 retracted: Vec::new(),
                 found: None,
             });
+            // A version below the highest mark of an older file whose history file is closed:
+            // that file may have sent a newer deletion of the key there (FR-031), so the scan
+            // opens it at this key before deciding.
+            if ts <= read
+                && st.found.is_none()
+                && let Some(m) = closed_history_over(cursors, &self.asleep, i, &st.key, ts)
+            {
+                let j = self.asleep[m].take().expect("found closed");
+                took_one(Took::HistoryOpened);
+                cursors[j].seek(entry::internal_key(&st.key, read));
+                self.joining = Some(j);
+                continue;
+            }
             self.moved = true;
             self.entries = self.entries.saturating_add(1);
             let from = match &cursors[i] {

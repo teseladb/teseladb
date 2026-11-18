@@ -383,6 +383,20 @@ impl TableWriter {
         }
     }
 
+    /// Takes in the bounds and marks of the file the version `ikey` that goes to its history file
+    /// alone (FR-031): the key of a deletion set apart whole. Its key stays out of the filter.
+    pub(crate) fn cover(&mut self, ikey: &[u8]) {
+        let (logical, ts) = entry::split(ikey);
+        if self.first_logical.is_none() {
+            self.first_logical = Some(logical.to_vec());
+        }
+        if self.last_logical.as_deref().is_none_or(|l| l < logical) {
+            self.last_logical = Some(logical.to_vec());
+        }
+        self.min_ts = Some(self.min_ts.map_or(ts, |m| m.min(ts)));
+        self.max_ts = Some(self.max_ts.map_or(ts, |m| m.max(ts)));
+    }
+
     /// Counts a version just added: its key in the filter and the bounds.
     fn note(&mut self, ikey: &[u8]) {
         let (logical, ts) = entry::split(ikey);
@@ -529,7 +543,9 @@ impl TableWriter {
         number: u64,
         mut tombstones: Vec<RangeTombstone>,
     ) -> Option<(Vec<(u64, Bytes)>, Table)> {
-        if self.versions == 0 && tombstones.is_empty() {
+        // A file may hold no version: only range deletions, or only the bounds of keys whose
+        // deletions went whole to its history file (FR-031).
+        if self.versions == 0 && tombstones.is_empty() && self.max_ts.is_none() {
             return None;
         }
         if !self.data.is_empty() {

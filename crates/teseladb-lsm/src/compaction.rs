@@ -66,6 +66,19 @@ pub(crate) struct Plan {
     /// Value files it collects (FR-034): the values its inputs keep in them are read and written
     /// again, to a value file of its own.
     pub(crate) collect: Vec<u64>,
+    /// The key spans of the files below the output level that touch the inputs' keys, when the
+    /// output level is not 0: a key outside them whose newest version is a deletion goes whole
+    /// to the history file (FR-031). `None` keeps every such deletion in the file.
+    pub(crate) below: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl Plan {
+    /// Whether nothing below the output holds `key`, so that its deletion may leave the file.
+    fn nothing_below(&self, key: &[u8]) -> bool {
+        self.below.as_ref().is_some_and(|spans| {
+            !spans.iter().any(|(lo, hi)| lo.as_slice() <= key && key <= hi.as_slice())
+        })
+    }
 }
 
 fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
@@ -76,9 +89,21 @@ fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
 
 fn plan(v: &Version, inputs: Vec<(u8, Arc<Table>)>, output_level: usize) -> Plan {
     let (lo, hi) = span(&inputs);
-    let bottommost =
-        (output_level + 1..v.levels.len()).all(|l| v.overlapping(l, &lo, &hi).is_empty());
-    Plan { inputs, output_level, bottommost, cuts: Vec::new(), reserved: None, collect: Vec::new() }
+    let spans: Vec<(Vec<u8>, Vec<u8>)> = (output_level + 1..v.levels.len())
+        .flat_map(|l| v.overlapping(l, &lo, &hi))
+        .map(|t| (t.props.lo.clone(), t.props.hi.clone()))
+        .collect();
+    let bottommost = spans.is_empty();
+    let below = (output_level > 0).then_some(spans);
+    Plan {
+        inputs,
+        output_level,
+        bottommost,
+        cuts: Vec::new(),
+        reserved: None,
+        collect: Vec::new(),
+        below,
+    }
 }
 
 /// Largest ratio between the sizes of the files a tier joins (FR-036).
@@ -602,6 +627,7 @@ impl CompactJob {
             cuts: Vec::new(),
             reserved: None,
             collect: Vec::new(),
+            below: None,
         };
         let mut job = CompactJob::new(cfg, plan, GcTable::default());
         for lane in &mut job.lanes {
@@ -753,6 +779,17 @@ impl CompactJob {
             }
         };
         let versions = std::mem::take(&mut self.versions);
+        // A key whose newest version kept is a deletion, with nothing below the output that
+        // holds it: the deletion and the versions under it go to the history file, and the file
+        // keeps the key's bounds and mark, so a read below the deletion opens that history file
+        // (FR-031; 002 run p46: scans walked 1.24 deletions for each item they gave).
+        let whole = self.export.is_none()
+            && versions
+                .iter()
+                .zip(&keep)
+                .find(|(_, k)| **k)
+                .is_some_and(|((c, _), _)| c.kind == Kind::Delete)
+            && self.plan.nothing_below(&key);
         let mut first = true;
         // The version written just before, when it is a `Put` with its value in line: the base
         // of the next one's delta in the history file (FR-035).
@@ -772,8 +809,11 @@ impl CompactJob {
                 }
             }
             let ikey = entry::internal_key(&key, c.ts);
+            if whole && c.kind == Kind::Delete {
+                self.out.as_mut().expect("started above").writer.cover(&ikey);
+            }
             // An export writes every version to its files: they are ingested as they are.
-            let apart = self.export.is_none() && self.split.sets_apart(&ikey, c.kind);
+            let apart = whole || (self.export.is_none() && self.split.sets_apart(&ikey, c.kind));
             if apart && self.out.as_ref().is_some_and(|o| o.history.is_none()) {
                 self.start_history(next_file);
             }
