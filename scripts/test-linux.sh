@@ -93,6 +93,7 @@ docker run --rm -i --privileged --dns 127.0.0.1 ${cpuset[@]+"${cpuset[@]}"} \
   --tmpfs /full:rw,size=1m --ulimit memlock=-1 -e TESELADB_FULL_DIR=/full \
   ${passed_env[@]+"${passed_env[@]}"} -e MODE="$mode" \
   -e CARGO_HOME=/cargo-home -e CARGO_TARGET_DIR="$TARGET_DIR" -e TARGET="$TARGET" \
+  -e CARGO_PROFILE_DEV_DEBUG=line-tables-only \
   -v "$REGISTRY:/cargo-home/registry" -v "$VOLUME:/target" -v "$PWD:$PWD" -w "$PWD" "$IMAGE" \
   bash -s -- "${args[@]}" <<'SH'
 set -uo pipefail
@@ -103,16 +104,36 @@ case $MODE in
     cargo build --offline --target "$TARGET" --release -p teseladb-server || exit 1
     exec scripts/check-deps.sh --needed "$CARGO_TARGET_DIR/$TARGET/release/teseladb" ;;
 esac
+# The tests build with line tables only (`CARGO_PROFILE_DEV_DEBUG`): a panic still names its file
+# and line, and each test binary is a fraction of its size with the full debug information.
 # Every test binary, as `crate-dir:binary`: those built with the test profile, and the test targets
 # with their own `main` (`harness = false`, built without it). The plain programs that integration
 # tests run through `CARGO_BIN_EXE_*`, and examples, are not tests.
+# A test that does not build fails the run and shows cargo's errors: before, they went to /dev/null and
+# the binaries that did build ran alone, or the run ended with "nothing was built".
+if ! cargo test --offline --target "$TARGET" "$@" --no-run --message-format=json \
+  >/tmp/test-build.json 2>/dev/null; then
+  # The JSON carries the diagnostics: the same build, cached, says them as text.
+  cargo test --offline --target "$TARGET" "$@" --no-run >&2
+  echo "test-linux: the tests did not build" >&2
+  exit 1
+fi
 runs=()
 while IFS= read -r run; do runs+=("$run"); done < <(
-  cargo test --offline --target "$TARGET" "$@" --no-run --message-format=json 2>/dev/null |
-    grep -E '"profile":\{[^}]*"test":true|"kind":\["test"\]' |
+  grep -E '"profile":\{[^}]*"test":true|"kind":\["test"\]' /tmp/test-build.json |
     sed -n 's/.*"manifest_path":"\([^"]*\)\/Cargo.toml".*"executable":"\([^"]*\)".*/\1:\2/p'
 )
 [[ ${#runs[@]} -gt 0 ]] || { echo "test-linux: nothing was built" >&2; exit 1; }
+# Cargo keeps every earlier build of a test executable next to the new one, each up to 1 GiB with
+# its debug information: they filled the Docker disk (91 GiB of test binaries, 18-11-2026). Only
+# this build's executable of each test stays; the libraries, and so the incremental build, stay.
+for run in "${runs[@]}"; do
+  exe=${run#*:}
+  for old in "${exe%-*}"-*; do
+    [[ $old == "$exe" || $old == "$exe".* ]] && continue
+    if [[ -f $old && ( -x $old || $old == *.d ) ]]; then rm -f "$old"; fi
+  done
+done
 fail=0
 for run in "${runs[@]}"; do
   dir=${run%%:*}

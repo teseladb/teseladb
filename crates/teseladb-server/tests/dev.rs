@@ -210,16 +210,31 @@ fn a_node_that_cannot_start_stops_the_cluster() {
 static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn two_ports() -> (u16, std::net::TcpListener) {
+    let (base, mut held) = ports_in_a_row(2);
+    (base, held.pop().expect("two ports"))
+}
+
+/// Where [`ports_in_a_row`] looks: below Linux's ephemeral ports (32768 and up), which the
+/// outgoing connections of every test take. A base port picked by binding port 0 came from that
+/// range, and the third node of a cluster on it found its port taken now and then.
+const QUIET_PORTS: std::ops::Range<u16> = 20_000..32_000;
+
+/// `n` free ports in a row on loopback below the ephemeral range: the first and the listeners
+/// that hold them, in order, for the caller to drop when the cluster may take them.
+fn ports_in_a_row(n: u16) -> (u16, Vec<std::net::TcpListener>) {
     use std::net::TcpListener;
-    for _ in 0..100 {
-        let first = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = first.local_addr().unwrap().port();
-        let Some(next) = port.checked_add(1) else { continue };
-        if let Ok(busy) = TcpListener::bind(("127.0.0.1", next)) {
-            return (port, busy);
+    let span = QUIET_PORTS.end - QUIET_PORTS.start - n;
+    let seed =
+        std::process::id() as u16 ^ (std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos() as u16);
+    for attempt in 0..1_000u16 {
+        let base = QUIET_PORTS.start + seed.wrapping_add(attempt.wrapping_mul(97)) % span;
+        let held: Vec<TcpListener> =
+            (0..n).map_while(|k| TcpListener::bind(("127.0.0.1", base + k)).ok()).collect();
+        if held.len() == usize::from(n) {
+            return (base, held);
         }
     }
-    panic!("no two free ports in a row on loopback");
+    panic!("no {n} free ports in a row on loopback");
 }
 
 /// A first node that does not create the cluster in time is stopped and the cluster fails.
@@ -321,8 +336,9 @@ fn a_node_that_dies_stops_the_development_cluster() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     let _turn = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (base, busy) = two_ports();
-    drop(busy);
+    // Three nodes on base port + 0, 1 and 2: all three free.
+    let (base, held) = ports_in_a_row(3);
+    drop(held);
     let mut dev = Command::new(teseladb())
         .args(["dev", "--nodes", "3", "--cores", "1", "--port", &base.to_string()])
         .stdout(Stdio::piped())
