@@ -159,6 +159,9 @@ pub struct LogState {
     durable: u64,
     /// Records written since the sync in flight started.
     ahead: usize,
+    /// The most records written while a sync runs: [`AHEAD_RECORDS`], or none when the files
+    /// write through ([`LogState::set_write_through`]).
+    ahead_records: usize,
     failed: Option<IoErrno>,
     disk_full: bool,
     syncs: u64,
@@ -243,6 +246,7 @@ impl LogState {
             sync_upto: 0,
             durable: 0,
             ahead: 0,
+            ahead_records: AHEAD_RECORDS,
             failed: None,
             disk_full: false,
             syncs: 0,
@@ -359,6 +363,14 @@ impl LogState {
     #[must_use]
     pub fn has_waiting(&self) -> bool {
         !self.waiting.is_empty()
+    }
+
+    /// Whether the disk's files write through (`O_DSYNC`): each write ends durable, so a record
+    /// written while a sync runs is a durable write of its own that the next group waits for (on
+    /// the measuring disk such writes go one after another). Then nothing is written ahead: what
+    /// comes during a sync goes in the next group's one record (012 FR-035).
+    pub fn set_write_through(&mut self, through: bool) {
+        self.ahead_records = if through { 0 } else { AHEAD_RECORDS };
     }
 
     /// Whether a sync handed out by [`next`](LogState::next) has not ended.
@@ -945,7 +957,7 @@ impl LogState {
         all: bool,
     ) -> Result<Answers, IoErrno> {
         if self.sync_left > 0 {
-            let room = self.ahead < AHEAD_RECORDS || self.body.len() >= WRITE_AHEAD;
+            let room = self.ahead < self.ahead_records || self.body.len() >= WRITE_AHEAD;
             if !self.body.is_empty() && room {
                 ops.push(self.place(disk)?);
                 self.ahead += 1;

@@ -197,6 +197,12 @@ impl ShardDisk {
         })
     }
 
+    /// Whether its files write through (`O_DSYNC`, [`ShardDisk::open_durable`]).
+    #[must_use]
+    pub fn writes_through(&self) -> bool {
+        matches!(self.inner.borrow().backend, Backend::Files { through: true, .. })
+    }
+
     /// The executor of a disk in memory.
     #[must_use]
     pub fn mem(disk: MemDisk) -> ShardDisk {

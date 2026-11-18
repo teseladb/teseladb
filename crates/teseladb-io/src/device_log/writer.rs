@@ -443,6 +443,9 @@ fn run(
         Err(e) => return drop(started.send(Err(io::Error::other(format!("raft log: {e:?}"))))),
     };
     bound.set_durable(state.durable_bound());
+    // A record written ahead on files that write through is a durable write the next group waits
+    // for: none is written ahead there (012 FR-035, measured p29).
+    state.set_write_through(disk.writes_through());
     let inbox = Rc::new(Inbox::default());
     WRITERS.with(|w| w.borrow_mut().insert(log, inbox.clone()));
     let mut sinks: Vec<Sink> = Vec::new();

@@ -571,6 +571,46 @@ fn writes_nobody_syncs_wait_until_enough_bytes_wait_or_a_flush() {
     assert_eq!(&got[got.len() - 4..], b"tail");
 }
 
+/// A log whose files write through (O_DSYNC, 012 FR-035) writes nothing ahead while a sync runs:
+/// each record would be a durable write of its own that the next group waits for. What comes
+/// meanwhile goes in the next group's one record. A log that syncs its files writes ahead.
+#[test]
+fn a_log_that_writes_through_writes_no_record_ahead_while_a_sync_runs() {
+    for through in [false, true] {
+        let mut disk = MemDisk::new();
+        let mut s = LogState::recover(&mut disk, 4 << 20).unwrap();
+        s.set_write_through(through);
+        let mut ops = Vec::new();
+        s.create(0, 1, 0);
+        s.write(0, 1, 0, b"first");
+        s.sync(0, sync_op(1));
+        assert!(s.next(&mut disk, &mut ops).is_empty());
+        assert!(s.syncing());
+        let first: Vec<IoOp> = std::mem::take(&mut ops);
+        // While the first group's sync runs, another write and its sync come.
+        s.write(0, 1, 5, b"second");
+        s.sync(0, sync_op(2));
+        assert!(s.next(&mut disk, &mut ops).is_empty());
+        let ahead = ops.iter().any(|o| matches!(o, IoOp::WriteAt { .. }));
+        assert_eq!(ahead, !through, "written ahead with write-through {through}");
+        let mut answers = Vec::new();
+        for op in first.into_iter().chain(ops.drain(..)) {
+            let done = disk.execute(op);
+            answers.extend(s.on_done(&done));
+        }
+        for _ in 0..4 {
+            answers.extend(s.next(&mut disk, &mut ops));
+            for op in ops.drain(..) {
+                let done = disk.execute(op);
+                answers.extend(s.on_done(&done));
+            }
+        }
+        assert_eq!(answers.len(), 2, "both syncs answered: {answers:?}");
+        let mut s = LogState::recover(&mut disk, 4 << 20).unwrap();
+        assert_eq!(s.read(&mut disk, 0, 1).unwrap(), b"firstsecond");
+    }
+}
+
 /// The HLC's bound rides in the log's records (005 FR-003, D-172): an offered bound goes in the
 /// next record and is durable once its sync ends, and it comes back on recovery.
 #[test]
