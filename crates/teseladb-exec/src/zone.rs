@@ -2,7 +2,9 @@
 //! FR-039): the storage passes over the blocks this rules out without reading them.
 //!
 //! A zone gives, for a top-level field, the lowest and the highest value of the block in
-//! the reference server's order across types, arrays left out. A block is ruled out only by predicates whose
+//! the reference server's order across types, arrays left out, or each of its values when they
+//! are few: an equality then rules the block out when its value is none of them, inside their
+//! interval too. A block is ruled out only by predicates whose
 //! documents always hold the field with a value in that order:
 //!
 //! - `$eq`, `$gt`, `$gte`, `$lt`, `$lte` and `$in` of values on a top-level field, when the value
@@ -49,13 +51,13 @@ type Outside<'f> = &'f dyn Fn(&[u8], &[u8], &[u8]) -> bool;
 
 fn pred_rules_out(p: &Pred, collated: bool, b: Bounds<'_>) -> bool {
     let ordered = |v: RawValue<'_>, out: Outside<'_>| {
-        literal(v, collated).is_some_and(|x| match b {
-            Bounds::Unknown => false,
-            Bounds::Absent => true,
-            Bounds::Within { min, max } => out(&x, min, max),
+        literal(v, collated).is_some_and(|x| match (b, b.span()) {
+            (Bounds::Absent, _) => true,
+            (_, Some((min, max))) => out(&x, min, max),
+            (_, None) => false,
         })
     };
-    let equal = |v: RawValue<'_>| ordered(v, &|x, min, max| x < min || x > max);
+    let equal = |v: RawValue<'_>| literal(v, collated).is_some_and(|x| !b.may_hold(&x));
     match p {
         Pred::And(preds) => preds.iter().any(|p| pred_rules_out(p, collated, b)),
         Pred::Eq(v) => equal(v.get()),

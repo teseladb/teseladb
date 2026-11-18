@@ -543,6 +543,8 @@ pub(crate) struct GetReq {
     /// The top-level fields whose columns a scan in key order takes in place of whole data blocks
     /// (010 FR-033): the answer is then [`Reply::Pieces`].
     columns: Option<std::sync::Arc<[String]>>,
+    /// What rules out the data blocks of a scan in key order by their zone maps (004 FR-039).
+    prune: Option<crate::push::BlockFilter>,
 }
 
 /// A read with what its reader knows about transactions (008 FR-003): a point read of `key`, or a
@@ -730,8 +732,12 @@ fn reading(lsm: &RefCell<Lsm>, q: &GetReq, ts: Hlc) -> GetState {
         Some((end, _)) => {
             let mark = (ts, window_of(q));
             let scan = ScanState::new(lsm, (&q.key, end), mark, &q.view, q.backward);
-            GetState::Scanning(Box::new(match &q.columns {
+            let scan = match &q.columns {
                 Some(want) => scan.with_columns(want.clone()),
+                None => scan,
+            };
+            GetState::Scanning(Box::new(match &q.prune {
+                Some(prune) => scan.with_prune(prune.clone()),
                 None => scan,
             }))
         }
@@ -1132,6 +1138,7 @@ impl RangeHost {
             view: TxnView::default(),
             uncertain_to: None,
             columns: None,
+            prune: None,
         };
         self.read(core, req, true, now)
     }
@@ -1165,6 +1172,7 @@ impl RangeHost {
             view: TxnView::default(),
             uncertain_to: None,
             columns: None,
+            prune: None,
         };
         self.read(core, req, true, now)
     }
@@ -1203,6 +1211,7 @@ impl RangeHost {
             view,
             uncertain_to,
             columns: None,
+            prune: None,
         };
         self.read(core, req, ends_inside, now)
     }
@@ -1215,7 +1224,7 @@ impl RangeHost {
         now: Nanos,
         wall_ms: u64,
     ) -> ReqId {
-        self.scan_with(core, (r, None), now, wall_ms)
+        self.scan_with(core, (r, None, None), now, wall_ms)
     }
 
     /// A scan in key order that takes the data blocks it may as their columns of the top-level
@@ -1229,13 +1238,35 @@ impl RangeHost {
         wall_ms: u64,
     ) -> ReqId {
         let columns = (!r.backward).then_some(columns);
-        self.scan_with(core, (r, columns), now, wall_ms)
+        self.scan_with(core, (r, columns, None), now, wall_ms)
+    }
+
+    /// A scan in key order for a reader with a filter: it passes over the data blocks `prune`
+    /// rules out by their zone maps (004 FR-039), whose documents the reader would not keep,
+    /// and takes the others as [`RangeHost::scan_columns`] does when `columns` is given, or as
+    /// [`RangeHost::scan`] does.
+    pub fn scan_pruned<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        (r, columns, prune): (ScanReq, Option<std::sync::Arc<[String]>>, crate::push::BlockFilter),
+        now: Nanos,
+        wall_ms: u64,
+    ) -> ReqId {
+        let (columns, prune) = match r.backward {
+            true => (None, None),
+            false => (columns, Some(prune)),
+        };
+        self.scan_with(core, (r, columns, prune), now, wall_ms)
     }
 
     fn scan_with<S: StateMachine + RangeState>(
         &mut self,
         core: &mut MultiRaftCore<S>,
-        (r, columns): (ScanReq, Option<std::sync::Arc<[String]>>),
+        (r, columns, prune): (
+            ScanReq,
+            Option<std::sync::Arc<[String]>>,
+            Option<crate::push::BlockFilter>,
+        ),
         now: Nanos,
         wall_ms: u64,
     ) -> ReqId {
@@ -1259,6 +1290,7 @@ impl RangeHost {
             view: TxnView::default(),
             uncertain_to: None,
             columns,
+            prune,
         };
         self.read(core, req, ends_inside, now)
     }

@@ -6,7 +6,13 @@
 //! zones := fields(varint) · name(bytes)* · blocks(varint) · block*
 //! block := flags(u8) · field*            (the fields only when the block is summarised)
 //! field := 0 (unknown) | 1 (absent) | 2 · min(bytes) · max(bytes)
+//!          | 3 · values(varint) · value(bytes)*
 //! ```
+//!
+//! A field with at most [`MAX_SET`] distinct values in the block's versions, of at most
+//! [`MAX_SET_BYTES`] encoded bytes in all, keeps them one by one in ascending order (3); with
+//! more it keeps their bounds (2). A file written before the values were kept has none and
+//! reads as it did.
 //!
 //! Flag bit 0: the block is summarised, every version in it is a document, the history of one or
 //! a deletion. Flag bit 1: the logical key of its last version goes on in the next block.
@@ -36,15 +42,23 @@ const MAX_FIELDS: usize = 16;
 const SUMMARISED: u8 = 1;
 const CONTINUES: u8 = 2;
 
+/// Distinct values of a field a block keeps one by one; with more it keeps their bounds.
+pub(crate) const MAX_SET: usize = 8;
+/// Encoded bytes of the values a block keeps one by one, all of them together, at most.
+pub(crate) const MAX_SET_BYTES: usize = 128;
+
 const UNKNOWN: u8 = 0;
 const ABSENT: u8 = 1;
 const WITHIN: u8 = 2;
+const AMONG: u8 = 3;
 
 /// What a block knows of one field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Field {
     Unknown,
     Absent,
+    /// Its distinct values, ascending: at most [`MAX_SET`], of [`MAX_SET_BYTES`] in all.
+    Among(Vec<Box<[u8]>>),
     Within(Box<[u8]>, Box<[u8]>),
 }
 
@@ -56,7 +70,19 @@ impl Field {
         };
         match self {
             Field::Unknown => {}
-            Field::Absent => *self = Field::Within(v.into(), v.into()),
+            Field::Absent => *self = Field::Among(vec![v.into()]),
+            Field::Among(values) => {
+                let Err(at) = values.binary_search_by(|x| (**x).cmp(v)) else { return };
+                values.insert(at, v.into());
+                let bytes: usize = values.iter().map(|x| x.len()).sum();
+                if values.len() <= MAX_SET && bytes <= MAX_SET_BYTES {
+                    return;
+                }
+                // Too many to keep one by one: their bounds from here on.
+                if let (Some(min), Some(max)) = (values.first().cloned(), values.last().cloned()) {
+                    *self = Field::Within(min, max);
+                }
+            }
             Field::Within(min, max) => {
                 if v < &**min {
                     *min = v.into();
@@ -203,6 +229,13 @@ impl ZoneBuilder {
                 match b.fields.get(i).unwrap_or(&Field::Absent) {
                     Field::Unknown => out.push(UNKNOWN),
                     Field::Absent => out.push(ABSENT),
+                    Field::Among(values) => {
+                        out.push(AMONG);
+                        put_varint(&mut out, values.len() as u64);
+                        for v in values {
+                            put_bytes(&mut out, v);
+                        }
+                    }
                     Field::Within(min, max) => {
                         out.push(WITHIN);
                         put_bytes(&mut out, min);
@@ -268,6 +301,23 @@ impl ZoneMap {
                             }
                             Field::Within(min.into(), max.into())
                         }
+                        AMONG => {
+                            let count =
+                                usize::try_from(get_varint(b, &mut at)?).map_err(|_| Bad)?;
+                            if count == 0 || count > MAX_SET {
+                                return Err(Bad);
+                            }
+                            let mut values: Vec<Box<[u8]>> = Vec::with_capacity(count);
+                            for _ in 0..count {
+                                let v = get_bytes(b, &mut at)?;
+                                // Distinct and ascending, as they were written.
+                                if values.last().is_some_and(|last| &**last >= v) {
+                                    return Err(Bad);
+                                }
+                                values.push(v.into());
+                            }
+                            Field::Among(values)
+                        }
                         _ => return Err(Bad),
                     });
                 }
@@ -303,6 +353,7 @@ impl Zones for BlockZones<'_> {
         match &self.block.fields[i] {
             Field::Unknown => Bounds::Unknown,
             Field::Absent => Bounds::Absent,
+            Field::Among(values) => Bounds::Among(values),
             Field::Within(min, max) => Bounds::Within { min, max },
         }
     }
@@ -352,8 +403,9 @@ mod tests {
         z.end_block();
         let map = ZoneMap::decode(&z.finish().unwrap(), 4).unwrap();
         let b0 = map.block(0).unwrap();
-        let (five, forty) = (enc(RawValue::Int32(5)), enc(RawValue::Double(40.0)));
-        assert_eq!(b0.field("a"), Bounds::Within { min: &five, max: &forty });
+        let both: [Box<[u8]>; 2] =
+            [enc(RawValue::Int32(5)).into(), enc(RawValue::Double(40.0)).into()];
+        assert_eq!(b0.field("a"), Bounds::Among(&both));
         assert_eq!(b0.field("missing"), Bounds::Unknown);
         assert!(map.block(1).is_none(), "its last key goes on");
         assert!(map.block(2).is_none(), "not summarised");
@@ -383,8 +435,9 @@ mod tests {
         let (p, t) = (plain.finish().unwrap(), tabled.finish().unwrap());
         assert_eq!(p, t);
         let map = ZoneMap::decode(&t, 1).unwrap();
-        let (three, eleven) = (enc(RawValue::Int32(3)), enc(RawValue::Int32(11)));
-        assert_eq!(map.block(0).unwrap().field("a"), Bounds::Within { min: &three, max: &eleven });
+        let both: [Box<[u8]>; 2] =
+            [enc(RawValue::Int32(3)).into(), enc(RawValue::Int32(11)).into()];
+        assert_eq!(map.block(0).unwrap().field("a"), Bounds::Among(&both));
     }
 
     #[test]
@@ -446,7 +499,8 @@ mod tests {
         assert!(ZoneMap::decode(&good[..good.len() - 1], 1).is_err());
         assert!(ZoneMap::decode(&[good.clone(), vec![0]].concat(), 1).is_err());
         let mut flags = good.clone();
-        let at = good.len() - 1 - 2 * (1 + enc(RawValue::Int32(1)).len()) - 1;
+        // The block's flags come before its one field: a tag, a count and a value.
+        let at = good.len() - 2 - (1 + enc(RawValue::Int32(1)).len()) - 1;
         flags[at] = 0x80;
         assert!(ZoneMap::decode(&flags, 1).is_err());
     }
@@ -483,6 +537,71 @@ mod tests {
     }
 
     #[test]
+    fn a_field_of_few_values_keeps_them_one_by_one_and_of_many_its_bounds() {
+        let mut z = ZoneBuilder::default();
+        // Twenty documents: `g` takes four values over and over, `n` twenty, `s` three long
+        // strings (more than MAX_SET_BYTES together) and `t` exactly MAX_SET values.
+        for i in 0..20i32 {
+            let d = Document::new()
+                .with("g", (i % 4) * 4)
+                .with("n", i)
+                .with("s", format!("{}{}", "x".repeat(50), i % 3))
+                .with("t", i % MAX_SET as i32);
+            z.add(&ikey(i, 9), Kind::Put, Some(&stored(d)));
+        }
+        z.end_block();
+        let map = ZoneMap::decode(&z.finish().unwrap(), 1).unwrap();
+        let b = map.block(0).unwrap();
+        let ints = |vs: &[i32]| -> Vec<Box<[u8]>> {
+            vs.iter().map(|v| enc(RawValue::Int32(*v)).into()).collect()
+        };
+        assert_eq!(b.field("g"), Bounds::Among(&ints(&[0, 4, 8, 12])));
+        let (first, last) = (enc(RawValue::Int32(0)), enc(RawValue::Int32(19)));
+        assert_eq!(b.field("n"), Bounds::Within { min: &first, max: &last });
+        let s = |i: i32| enc(RawValue::String(&format!("{}{i}", "x".repeat(50))));
+        assert_eq!(b.field("s"), Bounds::Within { min: &s(0), max: &s(2) });
+        assert_eq!(b.field("t"), Bounds::Among(&ints(&[0, 1, 2, 3, 4, 5, 6, 7])));
+        // What the zone says of a value: none of the block's four, inside their interval.
+        assert!(b.field("g").may_hold(&enc(RawValue::Int32(8))));
+        assert!(!b.field("g").may_hold(&enc(RawValue::Int32(5))));
+        assert!(b.field("n").may_hold(&enc(RawValue::Int32(5))));
+        assert!(!b.field("n").may_hold(&enc(RawValue::Int32(20))));
+        assert_eq!(b.field("g").span(), Some((&*ints(&[0])[0], &*ints(&[12])[0])));
+        assert_eq!(b.field("n").span(), Some((first.as_slice(), last.as_slice())));
+        assert_eq!(b.field("missing").span(), None);
+        assert!(b.field("missing").may_hold(&first));
+        assert!(!Bounds::Absent.may_hold(&first));
+    }
+
+    #[test]
+    fn a_set_of_values_empty_too_long_or_out_of_order_does_not_decode() {
+        // One field `a`, one summarised block that keeps the values of `a` one by one.
+        let payload = |values: &[Vec<u8>]| {
+            let mut out = Vec::new();
+            put_varint(&mut out, 1);
+            put_bytes(&mut out, b"a");
+            put_varint(&mut out, 1);
+            out.push(SUMMARISED);
+            out.push(AMONG);
+            put_varint(&mut out, values.len() as u64);
+            for v in values {
+                put_bytes(&mut out, v);
+            }
+            out
+        };
+        let n = |i: i32| enc(RawValue::Int32(i));
+        let map = ZoneMap::decode(&payload(&[n(3), n(5)]), 1).unwrap();
+        let both: [Box<[u8]>; 2] = [n(3).into(), n(5).into()];
+        assert_eq!(map.block(0).unwrap().field("a"), Bounds::Among(&both));
+        assert!(ZoneMap::decode(&payload(&[]), 1).is_err(), "no value");
+        assert!(ZoneMap::decode(&payload(&[n(5), n(3)]), 1).is_err(), "descending");
+        assert!(ZoneMap::decode(&payload(&[n(3), n(3)]), 1).is_err(), "twice the same");
+        let many: Vec<Vec<u8>> = (0..=MAX_SET as i32).map(n).collect();
+        assert!(ZoneMap::decode(&payload(&many), 1).is_err(), "more than a block keeps");
+        assert!(ZoneMap::decode(&payload(&many[..MAX_SET]), 1).is_ok());
+    }
+
+    #[test]
     fn history_values_keep_the_block_summarised_and_fields_past_the_tracked_ones_are_dropped() {
         let mut z = ZoneBuilder::default();
         // Nothing ended yet: there is no block whose versions go on.
@@ -497,8 +616,8 @@ mod tests {
         z.end_block();
         let map = ZoneMap::decode(&z.finish().unwrap(), 1).unwrap();
         let b = map.block(0).expect("summarised, its last key does not go on");
-        let one = enc(RawValue::Int32(1));
-        assert_eq!(b.field("a"), Bounds::Within { min: &one, max: &one });
+        let one: [Box<[u8]>; 1] = [enc(RawValue::Int32(1)).into()];
+        assert_eq!(b.field("a"), Bounds::Among(&one));
         let last = format!("f{:02}", MAX_TRACKED - 1);
         assert_eq!(b.field(&last), Bounds::Unknown, "past the names it tracks");
     }

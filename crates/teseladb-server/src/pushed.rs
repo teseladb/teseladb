@@ -247,6 +247,7 @@ impl Work {
         let next = next_after(&rows, limit);
         match self {
             Work::Fold(program) => {
+                crate::data::note_fold_documents(rows.len());
                 let groups = Program::decode(program)
                     .and_then(|p| p.run(&rows))
                     .and_then(|groups| groups.encode());
@@ -278,6 +279,7 @@ impl Work {
         let (inputs, docs, next) = crate::data::inputs_of(pieces, limit);
         let examined = u32::try_from(docs).unwrap_or(u32::MAX);
         let Work::Fold(program) = self else { return Worked::Declined };
+        crate::data::note_fold_documents(docs);
         let groups = Program::decode(program)
             .and_then(|p| p.run_inputs(&inputs))
             .and_then(|groups| groups.encode());

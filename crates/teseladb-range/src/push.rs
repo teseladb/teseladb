@@ -279,7 +279,15 @@ pub struct ScanState {
     piece_docs: usize,
     /// Whether the last step stopped at its [`SCAN_STEP_ENTRIES`] and not for a block.
     paused: bool,
+    /// What rules out the data blocks of the main scan by their zone maps, for a scan whose
+    /// reader has a filter (004 FR-039).
+    prune: Option<BlockFilter>,
 }
+
+/// Whether a data block may hold a document the reader of a scan keeps, from the block's zone
+/// map (004 FR-039): the scan passes over the blocks it rules out. It runs on the core that
+/// scans, which made it.
+pub type BlockFilter = std::rc::Rc<dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool>;
 
 /// The most entries one step of a scan in the core looks at: a part of thousands of documents
 /// held its shard for milliseconds in one turn (stall reports of the one-node load p25). A step
@@ -334,7 +342,14 @@ impl ScanState {
             pieces: Vec::new(),
             piece_docs: 0,
             paused: false,
+            prune: None,
         }
+    }
+
+    /// The scan passing over the data blocks `prune` rules out by their zone maps (004 FR-039):
+    /// their documents are not read. Only a scan in key order skips them.
+    pub fn with_prune(self, prune: BlockFilter) -> ScanState {
+        ScanState { prune: Some(prune), ..self }
     }
 
     /// The scan taking the data blocks it may as their columns of the top-level fields `want`
@@ -361,14 +376,20 @@ impl ScanState {
                 self.below = None;
                 continue;
             }
-            let step = match (&mut self.main, self.columnar) {
-                (MainScan::Forward(s), true) => match s.next_columns(&mut lsm.borrow_mut(), None) {
-                    ColumnStep::Step(step) => step,
-                    ColumnStep::Columns(c) => {
-                        self.main_batch = Some(c);
-                        continue;
+            let prune = self.prune.as_deref();
+            let step = match (&mut self.main, self.columnar, prune) {
+                (MainScan::Forward(s), true, _) => {
+                    match s.next_columns(&mut lsm.borrow_mut(), prune) {
+                        ColumnStep::Step(step) => step,
+                        ColumnStep::Columns(c) => {
+                            self.main_batch = Some(c);
+                            continue;
+                        }
                     }
-                },
+                }
+                (MainScan::Forward(s), false, Some(prune)) => {
+                    s.next_pruned(&mut lsm.borrow_mut(), prune)
+                }
                 _ => self.main.next(&mut lsm.borrow_mut()),
             };
             match step {

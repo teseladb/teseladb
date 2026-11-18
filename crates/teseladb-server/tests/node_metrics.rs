@@ -85,6 +85,15 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
             assert!(text.contains(&line), "{line} in {text}");
         }
     }
+    // The blocks scans passed over by their zones (004 FR-039), the documents of index scans
+    // read with one scan of their span (010 FR-027) and those the cores read for aggregations.
+    for name in [
+        "teseladb_lsm_scan_skipped_blocks_total",
+        "teseladb_pushed_lookup_keys_in_runs_total",
+        "teseladb_core_fold_documents_total",
+    ] {
+        assert!(sample(&text, name).is_some(), "{name} in {text}");
+    }
     // The memory by component (012 FR-016).
     for name in ["teseladb_memory_frozen_memtables_bytes", "teseladb_memory_aggregations_bytes"] {
         assert!(sample(&text, name).is_some(), "{name} in {text}");

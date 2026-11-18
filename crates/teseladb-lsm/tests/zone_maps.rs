@@ -47,10 +47,10 @@ fn encoded(a: i32) -> Vec<u8> {
 
 /// Whether a block may hold a document with `a >= 100`.
 fn may_match(z: &dyn Zones) -> bool {
-    match z.field("a") {
-        Bounds::Within { max, .. } => max >= encoded(AT_LEAST).as_slice(),
-        Bounds::Absent => false,
-        Bounds::Unknown => true,
+    match (z.field("a"), z.field("a").span()) {
+        (_, Some((_, max))) => max >= encoded(AT_LEAST).as_slice(),
+        (Bounds::Absent, _) => false,
+        _ => true,
     }
 }
 

@@ -978,11 +978,14 @@ pub struct ScanCounts {
     pub entries: u64,
     /// Items given.
     pub items: u64,
+    /// Data blocks passed over by their zone maps (FR-039).
+    pub skipped: u64,
 }
 
 static SCANS: AtomicU64 = AtomicU64::new(0);
 static SCAN_ENTRIES: AtomicU64 = AtomicU64::new(0);
 static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
+static SCAN_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Why a scan took an entry and from where (002 run p44: scans took 4.0 entries for each item).
 /// Tallied per thread, so that a scan's steps touch no shared counter and `Scan` does not grow,
@@ -1084,6 +1087,7 @@ pub fn scan_totals() -> ScanCounts {
         scans: SCANS.load(Ordering::Relaxed),
         entries: SCAN_ENTRIES.load(Ordering::Relaxed),
         items: SCAN_ITEMS.load(Ordering::Relaxed),
+        skipped: SCAN_SKIPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -1093,6 +1097,9 @@ impl Drop for Scan {
         SCANS.fetch_add(1, Ordering::Relaxed);
         SCAN_ENTRIES.fetch_add(u64::from(self.entries), Ordering::Relaxed);
         SCAN_ITEMS.fetch_add(u64::from(self.items), Ordering::Relaxed);
+        if self.skipped != 0 {
+            SCAN_SKIPPED.fetch_add(self.skipped, Ordering::Relaxed);
+        }
         let tallied = TOOK.with(|t| t.replace([0; TOOK_KINDS]));
         for (total, n) in TOOK_TOTALS.iter().zip(tallied) {
             if n != 0 {
@@ -1220,7 +1227,12 @@ impl Scan {
 
     /// The entries this scan took from its sources and the items it gave so far.
     pub fn counts(&self) -> ScanCounts {
-        ScanCounts { scans: 1, entries: u64::from(self.entries), items: u64::from(self.items) }
+        ScanCounts {
+            scans: 1,
+            entries: u64::from(self.entries),
+            items: u64::from(self.items),
+            skipped: self.skipped,
+        }
     }
 
     /// [`Scan::next_pruned`] for a scan [`Scan::with_columns`]: the next document, or the next

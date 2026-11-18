@@ -316,6 +316,12 @@ impl RowFilter {
         filter.matches_batch(&stored, &ctx).unwrap_or(all)
     }
 
+    /// Whether the program has a `$match`: without one it keeps every document, and no block
+    /// is ruled out.
+    pub fn filters(&self) -> bool {
+        self.filter.is_some()
+    }
+
     /// Whether a data block whose zone maps are `zones` may hold a document the program keeps
     /// (004 FR-039); a program runs with no collation.
     pub fn block_may_match(&self, zones: &dyn teseladb_keys::zone::Zones) -> bool {

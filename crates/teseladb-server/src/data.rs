@@ -364,6 +364,22 @@ pub fn core_reads() -> [(u64, u64); CoreRead::ALL.len()] {
     std::array::from_fn(|i| (CORE_READS[i].load(Relaxed), CORE_READ_DOCS[i].load(Relaxed)))
 }
 
+/// Documents the cores read for the parts of aggregations, since the process started.
+static FOLD_DOCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The documents the cores read for the parts of aggregations they folded (010 FR-034), since
+/// the process started: those of the blocks a part skipped by their zones are not read and do
+/// not count (004 FR-039).
+#[must_use]
+pub fn fold_documents() -> u64 {
+    FOLD_DOCS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn note_fold_documents(docs: usize) {
+    let docs = u64::try_from(docs).unwrap_or(u64::MAX);
+    FOLD_DOCS.fetch_add(docs, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Parts of a [`DataReq::Folds`] a core went on with itself, since the process started.
 static FOLDS_GONE_ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -395,6 +411,16 @@ struct Gather {
     left: usize,
 }
 
+/// What rules out by their zone maps the data blocks of a scan whose documents `program` folds
+/// (004 FR-039, 010 FR-034): `None` when the program has no `$match` or its filter does not
+/// parse, and every block is read.
+fn block_filter(
+    program: &teseladb_exec::pipeline::Program,
+) -> Option<teseladb_range::push::BlockFilter> {
+    let filter = program.row_filter().filter(teseladb_exec::pipeline::RowFilter::filters)?;
+    Some(Rc::new(move |zones: &dyn teseladb_keys::zone::Zones| filter.block_may_match(zones)))
+}
+
 /// The answer to a [`DataReq::Partial`] from the answer `r` of its scan of at most `limit`
 /// documents: the program run over the rows, on this core. A leader that moved, or an answer
 /// without rows, goes back as an error and the caller reads the range itself.
@@ -409,6 +435,7 @@ fn folded(
                 (true, Some((k, _))) => Some([k.as_slice(), &[0]].concat()),
                 _ => None,
             };
+            note_fold_documents(rows.len());
             let groups = fold.0.run(&rows).map(Arc::new);
             Ok(DataReply::Partial(Folded {
                 before: Vec::new(),
@@ -425,6 +452,7 @@ fn folded(
 /// (010 FR-033): the program run over its rows and batches, on this core.
 fn folded_pieces(pieces: &[Piece], fold: &Fold, limit: usize) -> DataReply {
     let (inputs, examined, next) = inputs_of(pieces, limit);
+    note_fold_documents(examined);
     let groups = fold.0.run_inputs(&inputs).map(Arc::new);
     DataReply::Partial(Folded { before: Vec::new(), groups, examined, next })
 }
@@ -1012,34 +1040,31 @@ impl DataCore {
                 let folds = matches!(client, Client::Partial(..));
                 note_core_read(if folds { CoreRead::Fold } else { CoreRead::Scan }, limit);
                 // An aggregation's part takes the columns of the fields its program reads (010
-                // FR-033).
-                let want = match &client {
-                    Client::Partial(_, fold, ..) => fold.0.columns(),
-                    _ => None,
+                // FR-033) and passes over the blocks its `$match`es rule out (004 FR-039).
+                let (want, prune) = match &client {
+                    Client::Partial(_, fold, ..) => (fold.0.columns(), block_filter(&fold.0)),
+                    _ => (None, None),
                 };
-                match want {
-                    Some(w) => self.host.scan_columns(core, (req, w.into()), now, wall_ms),
-                    None => self.host.scan(core, req, now, wall_ms),
-                }
+                self.scan_for(core, req, (want, prune), (now, wall_ms))
             }
             // The scan as any other on the leader; its rows go through the work (010 FR-034).
             RemoteReq::Pushed { start, end, limit, concern, work } => {
                 let limit = usize::try_from(limit).unwrap_or(usize::MAX);
                 let req = ScanReq { g, start, end, concern, limit, backward: false };
-                let want = match &work {
+                let (want, prune) = match &work {
                     crate::pushed::Work::Fold(p) => {
                         note_core_read(CoreRead::Fold, limit);
-                        teseladb_exec::pipeline::Program::decode(p).and_then(|p| p.columns())
+                        match teseladb_exec::pipeline::Program::decode(p) {
+                            Some(p) => (p.columns(), block_filter(&p)),
+                            None => (None, None),
+                        }
                     }
                     crate::pushed::Work::Filter(_) => {
                         note_core_read(CoreRead::Filter, limit);
-                        None
+                        (None, None)
                     }
                 };
-                let id = match want {
-                    Some(w) => self.host.scan_columns(core, (req, w.into()), now, wall_ms),
-                    None => self.host.scan(core, req, now, wall_ms),
-                };
+                let id = self.scan_for(core, req, (want, prune), (now, wall_ms));
                 self.clients.insert(id, Client::Worked(Box::new(client), work, limit));
                 self.answer(core, now);
                 return;
@@ -1436,6 +1461,25 @@ impl DataCore {
     /// The numbers of the [`DataReq::FoldsNext`] the core has to send to itself.
     pub fn take_folds_due(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.folds_due)
+    }
+
+    /// Starts scan `req` for a reader that takes the columns of `want`, if any (010 FR-033),
+    /// and passes over the blocks `prune` rules out, if given (004 FR-039).
+    fn scan_for(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        req: ScanReq,
+        (want, prune): (Option<Vec<String>>, Option<teseladb_range::push::BlockFilter>),
+        (now, wall_ms): (Nanos, u64),
+    ) -> ReqId {
+        match (want, prune) {
+            (want, Some(prune)) => {
+                let read = (req, want.map(Into::into), prune);
+                self.host.scan_pruned(core, read, now, wall_ms)
+            }
+            (Some(want), None) => self.host.scan_columns(core, (req, want.into()), now, wall_ms),
+            (None, None) => self.host.scan(core, req, now, wall_ms),
+        }
     }
 
     /// Runs the next part of the [`DataReq::Folds`] numbered `id`; nothing when it is gone.

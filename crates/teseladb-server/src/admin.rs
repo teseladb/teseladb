@@ -670,6 +670,13 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         let _ =
             writeln!(out, "teseladb_core_read_documents_total{{kind=\"{}\"}} {docs}", kind.label());
     }
+    let name = "teseladb_core_fold_documents_total";
+    let _ = writeln!(
+        out,
+        "# HELP {name} Documents the cores read for the parts of aggregations they folded: those of the blocks a part skipped by their zones do not count."
+    );
+    let _ = writeln!(out, "# TYPE {name} counter");
+    let _ = writeln!(out, "{name} {}", crate::data::fold_documents());
     let name = "teseladb_writes_evaluated_total";
     let _ = writeln!(
         out,
@@ -702,6 +709,11 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             "teseladb_lsm_scan_entries_total",
             "Entries those scans took from their sources: versions, deletions and intents included.",
             scans.entries,
+        ),
+        (
+            "teseladb_lsm_scan_skipped_blocks_total",
+            "Data blocks those scans passed over by their zone maps.",
+            scans.skipped,
         ),
         ("teseladb_lsm_scan_items_total", "Items those scans gave.", scans.items),
         ("teseladb_lsm_scan_newer_total", "Scan entries above the read's mark.", took.newer),

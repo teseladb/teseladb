@@ -1,7 +1,7 @@
 //! 004 FR-039: a block the zone adapter rules out holds no document the filter accepts. Blocks
-//! of seeded documents get their zones as the storage builds them (the lowest and highest
-//! encoded value of each top-level field, arrays unknown), and every filter is checked against
-//! the documents of every block it rules out.
+//! of seeded documents get their zones as the storage builds them (each encoded value of a
+//! top-level field while they are few, the lowest and the highest with more, arrays unknown),
+//! and every filter is checked against the documents of every block it rules out.
 
 use std::collections::BTreeMap;
 
@@ -11,10 +11,14 @@ use teseladb_keys::zone::{Bounds, Zones};
 use teseladb_keys::{Direction, TypeBits, encode_value};
 use teseladb_mql::{Filter, FilterUse, MatchContext, NoExtensions};
 
-/// The zones of a block, as the storage computes them.
+/// The values of a field a block's zone keeps one by one at most (the storage's `MAX_SET`).
+const KEPT: usize = 8;
+
+/// The zones of a block, as the storage computes them: the distinct values of each field in
+/// ascending order, `None` once one of them is an array.
 #[derive(Default)]
 struct Block {
-    fields: BTreeMap<String, Option<(Vec<u8>, Vec<u8>)>>,
+    fields: BTreeMap<String, Option<Vec<Box<[u8]>>>>,
 }
 
 impl Block {
@@ -22,23 +26,16 @@ impl Block {
         let mut b = Block::default();
         for d in docs {
             for (name, v) in RawDoc::from_bytes(d).unwrap().iter() {
-                let slot = b.fields.entry(name.to_owned()).or_insert_with(|| {
-                    let mut e = Vec::new();
-                    encode_value(&mut e, v, Direction::Ascending, &mut TypeBits::default());
-                    Some((e.clone(), e))
-                });
-                let Some((min, max)) = slot.as_mut() else { continue };
+                let slot = b.fields.entry(name.to_owned()).or_insert_with(|| Some(Vec::new()));
+                let Some(values) = slot.as_mut() else { continue };
                 if matches!(v, RawValue::Array(_)) {
                     *slot = None;
                     continue;
                 }
                 let mut e = Vec::new();
                 encode_value(&mut e, v, Direction::Ascending, &mut TypeBits::default());
-                if e < *min {
-                    *min = e.clone();
-                }
-                if e > *max {
-                    *max = e;
+                if let Err(at) = values.binary_search_by(|x| (**x).cmp(e.as_slice())) {
+                    values.insert(at, e.into());
                 }
             }
         }
@@ -51,7 +48,11 @@ impl Zones for Block {
         match self.fields.get(name) {
             None => Bounds::Absent,
             Some(None) => Bounds::Unknown,
-            Some(Some((min, max))) => Bounds::Within { min, max },
+            // Few values: each of them; more: the lowest and the highest.
+            Some(Some(values)) if values.len() <= KEPT => Bounds::Among(values),
+            Some(Some(values)) => {
+                Bounds::Within { min: &values[0], max: &values[values.len() - 1] }
+            }
         }
     }
 }
@@ -140,6 +141,41 @@ fn a_block_ruled_out_holds_no_document_the_filter_accepts() {
         }
     }
     assert!(ruled_out > 10_000, "{ruled_out} blocks ruled out");
+}
+
+#[test]
+fn an_equality_rules_out_a_block_that_holds_other_values_around_it() {
+    // Four values of `g` in every block, as in each collection of the one-node load of 002:
+    // three of four aggregations by `g` read a whole collection to find nothing.
+    let of = |values: std::ops::Range<i32>, step: i32| -> Block {
+        let docs: Vec<Vec<u8>> =
+            values.map(|i| Document::new().with("g", (i % step) * 4).to_bytes().unwrap()).collect();
+        Block::of(&docs)
+    };
+    let block = of(0..16, 4);
+    let may = |text: &str, b: &Block| block_may_match(filter(text).expr(), false, b);
+    for held in [0, 4, 8, 12] {
+        assert!(may(&format!(r#"{{"g": {held}}}"#), &block), "{held}");
+    }
+    for other in [1, 5, 11, -3, 13] {
+        assert!(!may(&format!(r#"{{"g": {other}}}"#), &block), "{other}");
+    }
+    assert!(!may(r#"{"g": {"$in": [1, 5, 9]}}"#, &block));
+    assert!(may(r#"{"g": {"$in": [1, 8]}}"#, &block));
+    // A number of another type that equals one of them is one of them.
+    assert!(may(r#"{"g": 8.0}"#, &block));
+    assert!(!may(r#"{"g": 8.5}"#, &block));
+    // The comparisons take the lowest and the highest.
+    assert!(!may(r#"{"g": {"$gt": 12}}"#, &block));
+    assert!(may(r#"{"g": {"$gte": 12}}"#, &block));
+    assert!(!may(r#"{"g": {"$lt": 0}}"#, &block));
+    // What matches documents without the field, or values out of the order, stays.
+    assert!(may(r#"{"g": null}"#, &block));
+    assert!(may(r#"{"g": {"$ne": 4}}"#, &block));
+    // With more values than a zone keeps one by one, only their interval tells.
+    let wide = of(0..40, 20);
+    assert!(may(r#"{"g": 5}"#, &wide));
+    assert!(!may(r#"{"g": 77}"#, &wide));
 }
 
 #[test]
