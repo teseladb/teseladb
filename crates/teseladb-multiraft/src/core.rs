@@ -2742,6 +2742,9 @@ impl<S: StateMachine> MultiRaftCore<S> {
     /// lease's clock wait for the tick.
     pub fn on_clock(&mut self, now: Nanos, wall_ms: u64) {
         self.now = now;
+        // The log store counts the waits of its batches from its own clock (012 FR-015):
+        // without the turn's reading it kept that of its last poll, a turn earlier.
+        self.store.on_tick(now);
         let was = self.clock_rule.in_margin(now);
         self.wall_ms = wall_ms;
         self.clock_rule.tick(now, wall_ms);
