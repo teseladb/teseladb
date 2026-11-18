@@ -273,7 +273,8 @@ pub fn node_config(o: &StartOpts) -> NodeConfig {
             cache_bytes: u64::MAX,
             codec: o.block_codec.unwrap_or(DEFAULT_BLOCK_CODEC),
             ..teseladb_lsm::LsmConfig::default()
-        },
+        }
+        .with_l0_trigger_from(std::env::var(teseladb_lsm::L0_TRIGGER_ENV).ok().as_deref()),
         ..NodeConfig::default()
     }
 }

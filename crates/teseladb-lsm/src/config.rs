@@ -112,7 +112,23 @@ impl Default for LsmConfig {
     }
 }
 
+/// The environment variable that sets the level 0 files that start a compaction, for a diagnosis
+/// run: fewer overlapping files mean fewer copies of a hot key for a scan to pass over (002 run
+/// p42: 3.92 entries for each item a scan gave). Not an option of the node.
+pub const L0_TRIGGER_ENV: &str = "TESELADB_L0_TRIGGER";
+
 impl LsmConfig {
+    /// This configuration with the level 0 trigger of [`L0_TRIGGER_ENV`]'s value `env`, when it
+    /// is a whole number from 1 to below `l0_slow`; otherwise as it is.
+    #[must_use]
+    pub fn with_l0_trigger_from(mut self, env: Option<&str>) -> LsmConfig {
+        let wanted = env.and_then(|v| v.trim().parse::<usize>().ok());
+        if let Some(n) = wanted.filter(|n| (1..self.l0_slow).contains(n)) {
+            self.l0_trigger = n;
+        }
+        self
+    }
+
     /// Size budget of level `level` (1 and up).
     pub fn level_bytes(&self, level: usize) -> u64 {
         let mut b = self.l1_bytes;
@@ -134,5 +150,17 @@ mod tests {
         assert_eq!(c.level_bytes(1), 64 << 20);
         assert_eq!(c.level_bytes(3), 6400 << 20);
         assert_eq!(LsmConfig { l1_bytes: u64::MAX, ..c }.level_bytes(4), u64::MAX);
+    }
+
+    #[test]
+    fn the_level_0_trigger_changes_only_for_a_diagnosis_and_below_the_slow_down() {
+        let c = LsmConfig::default();
+        assert_eq!(c.clone().with_l0_trigger_from(None).l0_trigger, c.l0_trigger);
+        assert_eq!(c.clone().with_l0_trigger_from(Some("2")).l0_trigger, 2);
+        assert_eq!(c.clone().with_l0_trigger_from(Some(" 3 ")).l0_trigger, 3);
+        // Zero, at or past the slow-down, or no number, leaves the default.
+        for bad in ["0", "x", &c.l0_slow.to_string()] {
+            assert_eq!(c.clone().with_l0_trigger_from(Some(bad)).l0_trigger, c.l0_trigger, "{bad}");
+        }
     }
 }
