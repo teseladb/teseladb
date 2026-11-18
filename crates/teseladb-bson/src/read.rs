@@ -346,6 +346,33 @@ fn text<'a>(bytes: &'a [u8], at: usize, mode: Mode<'_>) -> Result<&'a str, BsonE
     }
 }
 
+/// Where the value of type `t` that starts at `p` of a validated document ends, from its type and
+/// its length alone: nothing of it is read or checked. `None` for bytes that do not hold it.
+pub(crate) fn value_end(b: &[u8], t: u8, p: usize) -> Option<usize> {
+    let int_at = |at: usize| -> Option<usize> {
+        let n = i32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?);
+        usize::try_from(n).ok()
+    };
+    let end = match t {
+        types::UNDEFINED | types::NULL | types::MIN_KEY | types::MAX_KEY => p,
+        types::BOOLEAN => p + 1,
+        types::INT32 => p + 4,
+        types::DOUBLE | types::DATE_TIME | types::TIMESTAMP | types::INT64 => p + 8,
+        types::OBJECT_ID => p + 12,
+        types::DECIMAL128 => p + 16,
+        types::STRING | types::JAVASCRIPT | types::SYMBOL => p + 4 + int_at(p)?,
+        types::DOCUMENT | types::ARRAY | types::JAVASCRIPT_WITH_SCOPE => p + int_at(p)?,
+        types::BINARY => p + 5 + int_at(p)?,
+        types::DB_POINTER => p + 4 + int_at(p)? + 12,
+        types::REGEX => {
+            let pattern = p + crate::arch::find_nul(b.get(p..)?)? + 1;
+            pattern + crate::arch::find_nul(b.get(pattern..)?)? + 1
+        }
+        _ => return None,
+    };
+    (end <= b.len()).then_some(end)
+}
+
 /// A `00`-terminated UTF-8 name at `at`, and where it ends.
 fn cstring<'a>(b: &'a [u8], at: usize, mode: Mode<'_>) -> Result<(&'a str, usize), BsonError> {
     let len = b
