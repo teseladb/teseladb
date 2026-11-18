@@ -44,6 +44,8 @@ fn storage(
             for d in n.disks() {
                 let d = d.stats();
                 t.ops += d.ops;
+                t.syncs += d.syncs;
+                t.bytes_written += d.bytes_written;
                 t.crashes += d.crashes;
                 t.torn_sectors += d.torn_sectors;
                 t.no_space += d.no_space;
@@ -96,8 +98,20 @@ fn a_slow_disk_gets_through_fewer_operations() {
     let (v, stats, _) = storage(5, FaultPlan::None, Some(slow));
     let (_, normal, _) = storage(5, FaultPlan::None, None);
     assert_eq!(v, Verdict::Pass);
-    // Not 50 times fewer: the engine puts more writes in each sync while its clients wait.
-    assert!(stats[0].ops * 2 < normal[0].ops, "{} against {}", stats[0].ops, normal[0].ops);
+    // A slow disk makes each sync slow: the node gets through fewer of them, though not 50 times
+    // fewer, since the engine puts more writes in each sync while its clients wait. The device
+    // log goes on writing records ahead during a sync (012 FR-035), so its count of all the disk's
+    // operations falls by less than its count of syncs.
+    let (slow, base) = (&stats[0], &normal[0]);
+    assert!(slow.syncs * 2 < base.syncs, "syncs {} against {}", slow.syncs, base.syncs);
+    assert!(
+        slow.ops * base.syncs > base.ops * slow.syncs,
+        "writes per sync {}/{} against {}/{}",
+        slow.ops,
+        slow.syncs,
+        base.ops,
+        base.syncs
+    );
     // The others keep their pace.
     assert!(stats[1].ops * 10 > normal[1].ops * 9, "{} against {}", stats[1].ops, normal[1].ops);
 }
