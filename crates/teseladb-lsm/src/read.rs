@@ -821,6 +821,8 @@ impl View {
             read: ts,
             cursors: None,
             heap: None,
+            prefix: shared_prefix(start, end),
+            heads: Vec::new(),
             moved: false,
             asleep: Vec::new(),
             joining: None,
@@ -838,9 +840,37 @@ impl View {
 /// them: a key has a few versions in each file, and a seek builds a key and searches the block.
 const VERSIONS_STEPPED: usize = 8;
 
+/// Bytes of a logical key a scan's merge compares as one number before it compares whole keys.
+const HEAD_LEN: usize = 8;
+
+/// The head of internal key `ikey` in a scan whose keys all start with `prefix`: the
+/// [`HEAD_LEN`] bytes of its logical key after the prefix, padded with zeros, as a big-endian
+/// number. Where two heads differ they order the keys as [`entry::compare`] does: a shorter
+/// logical key pads with zeros below any byte of a longer one it starts. A key without the prefix
+/// is past every key with it (the scan's cursors start at its first key), and gets the largest
+/// head. Every key of a collection starts with the same tenant and collection, so the bytes right
+/// after them are the ones that tell keys apart.
+fn head(ikey: &[u8], prefix: &[u8]) -> u64 {
+    let Some(rest) = entry::logical(ikey).strip_prefix(prefix) else { return u64::MAX };
+    let mut bytes = [0u8; HEAD_LEN];
+    let n = rest.len().min(HEAD_LEN);
+    bytes[..n].copy_from_slice(&rest[..n]);
+    u64::from_be_bytes(bytes)
+}
+
+/// The bytes every key of `[start, end)` starts with: what `start` and `end` share.
+fn shared_prefix(start: &[u8], end: &[u8]) -> Vec<u8> {
+    let n = start.iter().zip(end).take_while(|(a, b)| a == b).count();
+    start[..n].to_vec()
+}
+
 /// Whether cursor `a` goes before cursor `b`: the smaller internal key, and with the same one
-/// the source that comes first (the newer one).
-fn goes_before(cursors: &[Cursor], a: usize, b: usize) -> bool {
+/// the source that comes first (the newer one). Their heads decide most pairs without reading
+/// the keys; the whole keys decide the rest, such as two versions of one key.
+fn goes_before(cursors: &[Cursor], heads: &[u64], a: usize, b: usize) -> bool {
+    if heads[a] != heads[b] {
+        return heads[a] < heads[b];
+    }
     let key = |i: usize| cursors[i].key().expect("a cursor in the heap is at an entry");
     entry::compare(key(a), key(b)).then(a.cmp(&b)).is_lt()
 }
@@ -870,18 +900,19 @@ fn skippable(
 }
 
 /// Puts the cursor at `at` of `heap` in its place below.
-fn sift_down(heap: &mut [usize], cursors: &[Cursor], mut at: usize) {
+fn sift_down(heap: &mut [usize], cursors: &[Cursor], heads: &[u64], mut at: usize) {
     loop {
         let left = 2 * at + 1;
         if left >= heap.len() {
             return;
         }
         let right = left + 1;
-        let first = match right < heap.len() && goes_before(cursors, heap[right], heap[left]) {
+        let before = |a: usize, b: usize| goes_before(cursors, heads, a, b);
+        let first = match right < heap.len() && before(heap[right], heap[left]) {
             true => right,
             false => left,
         };
-        if !goes_before(cursors, heap[first], heap[at]) {
+        if !before(heap[first], heap[at]) {
             return;
         }
         heap.swap(first, at);
@@ -908,6 +939,10 @@ pub struct Scan {
     /// collection reads a cursor per file it overlaps, tens of them, and looking at each one
     /// for every entry cost more than reading the entries.
     heap: Option<Vec<usize>>,
+    /// What every key of the scan starts with, and each cursor's [`head`] after it, set when the
+    /// cursor takes its place in the heap.
+    prefix: Vec<u8>,
+    heads: Vec<u64>,
     /// The first cursor of the heap moved: it is made ready and put in its place before the
     /// scan looks at the heap again.
     moved: bool,
@@ -1159,10 +1194,13 @@ impl Scan {
                 return ColumnStep::Step(Step::Miss(t));
             }
             let cursors = self.cursors.as_mut().expect("opened");
+            let prefix = &self.prefix;
+            self.heads =
+                cursors.iter().map(|c| c.key().map_or(u64::MAX, |k| head(k, prefix))).collect();
             let mut heap: Vec<usize> =
                 (0..cursors.len()).filter(|i| cursors[*i].key().is_some()).collect();
             for at in (0..heap.len() / 2).rev() {
-                sift_down(&mut heap, cursors, at);
+                sift_down(&mut heap, cursors, &self.heads, at);
             }
             self.heap = Some(heap);
         }
@@ -1178,10 +1216,13 @@ impl Scan {
                 let cursors = self.cursors.as_mut().expect("opened");
                 let heap = self.heap.as_mut().expect("ordered");
                 self.moved = false;
-                if cursors[top].key().is_none() {
-                    heap.swap_remove(0);
+                match cursors[top].key() {
+                    None => {
+                        heap.swap_remove(0);
+                    }
+                    Some(k) => self.heads[top] = head(k, &self.prefix),
                 }
-                sift_down(heap, cursors, 0);
+                sift_down(heap, cursors, &self.heads, 0);
             }
             if let Some(j) = self.joining {
                 // A history file a key woke: at its entry, it takes its place among the others.
@@ -1192,11 +1233,12 @@ impl Scan {
                 }
                 let cursors = self.cursors.as_mut().expect("opened");
                 self.joining = None;
-                if cursors[j].key().is_some() {
+                if let Some(k) = cursors[j].key() {
+                    self.heads[j] = head(k, &self.prefix);
                     let heap = self.heap.as_mut().expect("ordered");
                     heap.push(j);
                     for at in (0..heap.len() / 2).rev() {
-                        sift_down(heap, cursors, at);
+                        sift_down(heap, cursors, &self.heads, at);
                     }
                 }
             }
@@ -1287,6 +1329,53 @@ impl Scan {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    /// Every tail over `alphabet` up to `len` bytes.
+    fn tails(alphabet: &[u8], len: usize) -> Vec<Vec<u8>> {
+        let mut all = vec![Vec::new()];
+        let mut last = vec![Vec::new()];
+        for _ in 0..len {
+            last = last
+                .iter()
+                .flat_map(|t: &Vec<u8>| {
+                    alphabet.iter().map(move |&b| [t.as_slice(), &[b]].concat())
+                })
+                .collect();
+            all.extend(last.iter().cloned());
+        }
+        all
+    }
+
+    #[test]
+    fn where_two_heads_differ_they_order_the_keys_as_the_whole_comparison_does() {
+        let prefix = [1u8, 0, 0, 0, 7];
+        let mut logical: Vec<Vec<u8>> = tails(&[0, 1, 0xFF], 3)
+            .into_iter()
+            .chain([vec![0xFF; 9], vec![0xFF; 8], vec![3, 0, 0, 0, 0, 0, 0, 0, 0, 1]])
+            .chain([vec![3, 0, 0, 0, 0, 0, 0, 0, 0, 2], vec![2; 12], vec![0; 8]])
+            .map(|t| [prefix.as_slice(), &t].concat())
+            .collect();
+        // Keys past every key with the prefix, as a cursor may hold beyond the scan's end.
+        logical.extend([vec![1, 0, 0, 0, 8], vec![1, 0, 0, 1], vec![2]]);
+        let keys: Vec<Vec<u8>> = logical
+            .iter()
+            .flat_map(|l| {
+                [1u64, 7].map(|p| entry::internal_key(l, Hlc { physical: p, logical: 0 }))
+            })
+            .collect();
+        let mut decided = 0;
+        for a in &keys {
+            for b in &keys {
+                let (ha, hb) = (head(a, &prefix), head(b, &prefix));
+                if ha != hb {
+                    decided += 1;
+                    assert_eq!(ha < hb, entry::compare(a, b).is_lt(), "{a:?} {b:?}");
+                }
+            }
+        }
+        // Most pairs are decided by their heads alone.
+        assert!(decided * 10 > keys.len() * keys.len() * 8, "{decided} of {}", keys.len().pow(2));
+    }
 
     #[test]
     fn a_block_cut_from_a_larger_read_gets_bytes_of_its_own() {
