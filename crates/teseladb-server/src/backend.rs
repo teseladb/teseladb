@@ -1339,11 +1339,16 @@ impl Backend for ServerBackend {
         }
         let until = self.until();
         let deadline = self.deadline_of(until);
+        // Each part's evaluation on the versions this thread sees, as a single write's (005
+        // FR-035): its core only checks them and proposes, instead of evaluating every part.
+        let prepared: Vec<Ahead> =
+            ops.iter().map(|op| Ahead(self.prepare_outside(op).map(Box::new))).collect();
         // Every write goes to its range's core before any answer is awaited (D-186): the parts
         // of an unordered insert in a collection's partitions run on their cores at once.
         let sent: Vec<_> = ops
             .iter()
-            .map(|op| {
+            .zip(prepared)
+            .map(|(op, prepared)| {
                 let entry = self.h.routes.lookup(op.keys.first()?)?;
                 let dedup = op.dedup.map(|k| DedupKey {
                     lsid: k.lsid,
@@ -1356,7 +1361,7 @@ impl Backend for ServerBackend {
                     dedup,
                     wc: op.wc,
                     deadline: Some(deadline),
-                    prepared: Ahead(None),
+                    prepared,
                 };
                 let (tx, rx) = mpsc::channel();
                 let msg = NodeMsg::Data(DataReq::Remote(entry.group, req), tx);
