@@ -12,15 +12,20 @@ fn element(out: &mut Vec<u8>, t: u8, name: &str, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
+/// `n` as the little-endian `i32` of a BSON length.
+fn len(n: usize) -> [u8; 4] {
+    i32::try_from(n).expect("a length of a test document").to_le_bytes()
+}
+
 fn string(s: &str) -> Vec<u8> {
-    let mut v = ((s.len() + 1) as i32).to_le_bytes().to_vec();
+    let mut v = len(s.len() + 1).to_vec();
     v.extend_from_slice(s.as_bytes());
     v.push(0);
     v
 }
 
 fn document(elements: &[u8]) -> Vec<u8> {
-    let mut v = ((elements.len() + 5) as i32).to_le_bytes().to_vec();
+    let mut v = len(elements.len() + 5).to_vec();
     v.extend_from_slice(elements);
     v.push(0);
     v
@@ -48,7 +53,7 @@ fn every_type() -> Vec<u8> {
     element(&mut scope_doc, 0x10, "s", &1i32.to_le_bytes());
     let scope_doc = document(&scope_doc);
     let code = string("return s;");
-    let mut with_scope = ((4 + code.len() + scope_doc.len()) as i32).to_le_bytes().to_vec();
+    let mut with_scope = len(4 + code.len() + scope_doc.len()).to_vec();
     with_scope.extend_from_slice(&code);
     with_scope.extend_from_slice(&scope_doc);
 
