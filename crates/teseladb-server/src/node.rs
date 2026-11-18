@@ -1680,7 +1680,7 @@ impl Node {
             | DataReq::At(_, g, _)
             | DataReq::Partial(g, ..)
             | DataReq::Folds(g, ..) => Some(*g),
-            DataReq::Lsm => None,
+            DataReq::Lsm | DataReq::FoldsNext(_) => None,
         };
         let (tx, rx) = teseladb_io::engine::answer::channel();
         let core = usize::from(self.core_of(g.unwrap_or(DATA_RANGE)));

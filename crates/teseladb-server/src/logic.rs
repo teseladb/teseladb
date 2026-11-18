@@ -1119,6 +1119,7 @@ impl NodeLogic {
             data.poll(&mut self.core, (self.now, self.wall_ms));
         }
         self.pump();
+        self.send_folds_due();
         self.forward_group0();
         self.forward_relocations();
         let applied = self.group0().map_or(0, |sm| sm.applied);
@@ -1128,6 +1129,36 @@ impl NodeLogic {
         self.publish_indexes();
         self.catalog.poll(applied, self.authz.fenced());
         took(Stage::CoreDataStep, began);
+    }
+
+    /// Sends to this core's own mailbox the next parts of the aggregations' scans it goes on with
+    /// (`DataReq::FoldsNext`), in the background class: they run when the document operations
+    /// left the core nothing to do, as the coordinator's requests of each part did. Without a
+    /// mailbox (before the node gives the cores theirs), or with a full one, the part runs now.
+    fn send_folds_due(&mut self) {
+        let Some(data) = &mut self.data else { return };
+        let due = data.take_folds_due();
+        if due.is_empty() {
+            return;
+        }
+        let own = self.cores.get(usize::from(self.core.core_index())).cloned();
+        for id in due {
+            let (tx, _) = teseladb_io::engine::answer::channel();
+            let msg = CoreInput::App(NodeMsg::Data(DataReq::FoldsNext(id), tx));
+            let back = match &own {
+                Some(mailbox) => match mailbox.send(msg) {
+                    Ok(()) => None,
+                    Err(SendError::Full(back) | SendError::Closed(back)) => Some(back),
+                },
+                None => Some(msg),
+            };
+            if let Some(CoreInput::App(NodeMsg::Data(req, reply))) = back {
+                let at = (self.now, self.wall_ms);
+                if let Some(data) = &mut self.data {
+                    data.request(&mut self.core, req, reply, at);
+                }
+            }
+        }
     }
 
     /// Publishes this node's copies of the catalog and of the cluster settings for the workers
@@ -1967,7 +1998,9 @@ impl CoreLogic for NodeLogic {
             NodeMsg::Data(DataReq::Remote(_, req) | DataReq::At(_, _, req), _)
             | NodeMsg::Forwarded(_, _, req) => remote_class(req),
             // An aggregation's part reads a whole range's part: behind the document operations.
-            NodeMsg::Data(DataReq::Partial(..) | DataReq::Folds(..), _) => ServiceClass::Background,
+            NodeMsg::Data(DataReq::Partial(..) | DataReq::Folds(..) | DataReq::FoldsNext(_), _) => {
+                ServiceClass::Background
+            }
             _ => ServiceClass::Foreground,
         }
     }

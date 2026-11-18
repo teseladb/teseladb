@@ -120,6 +120,10 @@ pub enum DataReq {
     /// partial groups of every part in key order (010 FR-034). The coordinator then waits for one
     /// answer per range instead of one per part.
     Folds(GroupId, RemoteReq, Fold),
+    /// The next part of the [`DataReq::Folds`] numbered `.0` this core goes on with, which it
+    /// sends to itself in the background class: the parts give way to the document operations
+    /// as each [`DataReq::Partial`] did, without a round trip to the coordinator.
+    FoldsNext(u64),
 }
 
 /// The program of an aggregation that a core runs over the documents of its range (010 FR-034).
@@ -309,6 +313,8 @@ struct Folding {
     concern: ReadConcern,
     before: Vec<Arc<teseladb_exec::pipeline::PartialGroups>>,
     examined: usize,
+    /// The scan of its next part, while it waits for its [`DataReq::FoldsNext`].
+    next: Option<RemoteReq>,
 }
 
 /// A lookup whose point reads the host runs: who waits, its keys and filter, and the reads
@@ -473,9 +479,12 @@ pub struct DataCore {
     pressure: Option<(CorePressure, Nanos)>,
     /// The LSM left background work that waits for no disk operation (004 FR-030).
     lsm_more: bool,
-    /// A part of a [`DataReq::Folds`] went on and has not stepped yet: the core takes its next
-    /// turn at once instead of at its tick.
-    folds_waiting: bool,
+    /// The [`DataReq::Folds`] this core goes on with, by number, until their next part runs.
+    folds: BTreeMap<u64, (DataSender, Fold, usize, Box<Folding>)>,
+    /// Their numbers whose [`DataReq::FoldsNext`] the core still has to send to itself.
+    folds_due: Vec<u64>,
+    /// The number of the next of them.
+    next_fold: u64,
 }
 
 impl DataCore {
@@ -519,7 +528,9 @@ impl DataCore {
             compactions: BTreeMap::new(),
             pressure: None,
             lsm_more: false,
-            folds_waiting: false,
+            folds: BTreeMap::new(),
+            folds_due: Vec::new(),
+            next_fold: 0,
         }
     }
 
@@ -527,7 +538,7 @@ impl DataCore {
     /// core's loop comes back to [`DataCore::poll_io`] without sleeping, and serves what
     /// arrived meanwhile between two steps of that work.
     pub fn has_more(&self) -> bool {
-        self.lsm_more || self.folds_waiting
+        self.lsm_more
     }
 
     /// The core counts its memtables and its log with the node's other cores, and flushes for
@@ -790,6 +801,11 @@ impl DataCore {
             }
             DataReq::Folds(g, r, fold) => {
                 self.fold(core, (g, r, fold, true), reply, (now, wall_ms));
+                return;
+            }
+            DataReq::FoldsNext(id) => {
+                drop(reply);
+                self.fold_next(core, id, (now, wall_ms));
                 return;
             }
             DataReq::At(_, g, r) | DataReq::Remote(g, r) => {
@@ -1276,6 +1292,7 @@ impl DataCore {
                         concern: *concern,
                         before: Vec::new(),
                         examined: 0,
+                        next: None,
                     })
                 }),
             ),
@@ -1323,15 +1340,11 @@ impl DataCore {
                     concern: folding.concern,
                     backward: false,
                 };
-                let g = folding.g;
-                let wall_ms = self.wall_ms;
-                self.folds_waiting = true;
-                self.run(
-                    core,
-                    (g, scan),
-                    Client::Partial(to, fold, limit, Some(folding)),
-                    (now, wall_ms),
-                );
+                folding.next = Some(scan);
+                let id = self.next_fold;
+                self.next_fold += 1;
+                self.folds.insert(id, (to, fold, limit, folding));
+                self.folds_due.push(id);
             }
             _ => {
                 let mut before = std::mem::take(&mut folding.before);
@@ -1340,6 +1353,28 @@ impl DataCore {
                 let _ = to.send(Ok(DataReply::Partial(Folded { before, examined, ..part })));
             }
         }
+    }
+
+    /// The numbers of the [`DataReq::FoldsNext`] the core has to send to itself.
+    pub fn take_folds_due(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.folds_due)
+    }
+
+    /// Runs the next part of the [`DataReq::Folds`] numbered `id`; nothing when it is gone.
+    fn fold_next(
+        &mut self,
+        core: &mut MultiRaftCore<CoreSm>,
+        id: u64,
+        (now, wall_ms): (Nanos, u64),
+    ) {
+        let Some((to, fold, limit, mut folding)) = self.folds.remove(&id) else { return };
+        let Some(scan) = folding.next.take() else { return };
+        let g = folding.g;
+        if !self.host_has(g) {
+            let _ = to.send(Err(RangeError::NotLeader { hint: NodeId(0) }));
+            return;
+        }
+        self.run(core, (g, scan), Client::Partial(to, fold, limit, Some(folding)), (now, wall_ms));
     }
 
     /// Sends a leader's answer `r` to `client`: a request of the handle that this replica does
@@ -1411,8 +1446,6 @@ impl DataCore {
         // handed to the LSM.
         self.host.follow_state(core);
         self.host.poll(core, now, wall_ms);
-        // The host stepped every part that went on: the next turn comes when it is due.
-        self.folds_waiting = false;
         for (g, why) in core.take_stops() {
             crate::log::defer_at(
                 crate::log::Level::Error,
