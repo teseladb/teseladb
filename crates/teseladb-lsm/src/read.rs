@@ -1000,11 +1000,13 @@ enum Took {
     Deleted,
     /// A retraction, or a version one retracted, passed over by `see`.
     Retracted,
-    /// A history file opened: at the scan's start, or at a key whose version it passed over.
+    /// A history file opened at the scan's start: the read is below its file's highest mark.
     HistoryOpened,
+    /// A history file the scan left closed, opened at a key (FR-031).
+    HistoryWoken,
 }
 
-const TOOK_KINDS: usize = 9;
+const TOOK_KINDS: usize = 10;
 
 thread_local! {
     static TOOK: std::cell::Cell<[u64; TOOK_KINDS]> = const { std::cell::Cell::new([0; TOOK_KINDS]) };
@@ -1048,8 +1050,10 @@ pub struct ScanBreakdown {
     pub deleted: u64,
     /// Retractions and the versions they retracted, passed over.
     pub retracted: u64,
-    /// History files opened.
+    /// History files opened at the scans' start.
     pub history_opened: u64,
+    /// History files left closed and opened at a key.
+    pub history_woken: u64,
 }
 
 /// [`ScanBreakdown`] of every scan ended since the process started.
@@ -1065,6 +1069,7 @@ pub fn scan_breakdown() -> ScanBreakdown {
         deleted: n(Took::Deleted),
         retracted: n(Took::Retracted),
         history_opened: n(Took::HistoryOpened),
+        history_woken: n(Took::HistoryWoken),
     }
 }
 
@@ -1433,7 +1438,7 @@ impl Scan {
                 && let Some(m) = closed_history_over(cursors, &self.asleep, i, &st.key, ts)
             {
                 let j = self.asleep[m].take().expect("found closed");
-                took_one(Took::HistoryOpened);
+                took_one(Took::HistoryWoken);
                 cursors[j].seek(entry::internal_key(&st.key, read));
                 self.joining = Some(j);
                 continue;
@@ -1473,7 +1478,7 @@ impl Scan {
             // it left closed, which it opens at this key (FR-031).
             if let (Seen::Next, Some(j)) = (seen, self.asleep[i]) {
                 self.asleep[i] = None;
-                took_one(Took::HistoryOpened);
+                took_one(Took::HistoryWoken);
                 cursors[j].seek(entry::internal_key(&st.key, read));
                 self.joining = Some(j);
             }

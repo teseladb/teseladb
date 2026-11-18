@@ -700,8 +700,13 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         ),
         (
             "teseladb_lsm_scan_history_opened_total",
-            "History files scans opened.",
+            "History files scans opened at their start.",
             took.history_opened,
+        ),
+        (
+            "teseladb_lsm_scan_history_woken_total",
+            "History files scans opened at a key.",
+            took.history_woken,
         ),
     ];
     for (name, help, n) in rows {

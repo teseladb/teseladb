@@ -66,17 +66,24 @@ pub(crate) struct Plan {
     /// Value files it collects (FR-034): the values its inputs keep in them are read and written
     /// again, to a value file of its own.
     pub(crate) collect: Vec<u64>,
-    /// The key spans of the files below the output level that touch the inputs' keys, when the
-    /// output level is not 0: a key outside them whose newest version is a deletion goes whole
-    /// to the history file (FR-031). `None` keeps every such deletion in the file.
-    pub(crate) below: Option<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// The files below the output level that touch the inputs' keys, when the output level is
+    /// not 0: a key none of them may hold, whose newest version is a deletion, goes whole to
+    /// the history file (FR-031). `None` keeps every such deletion in the file.
+    pub(crate) below: Option<Vec<Arc<Table>>>,
 }
 
 impl Plan {
     /// Whether nothing below the output holds `key`, so that its deletion may leave the file.
     fn nothing_below(&self, key: &[u8]) -> bool {
-        self.below.as_ref().is_some_and(|spans| {
-            !spans.iter().any(|(lo, hi)| lo.as_slice() <= key && key <= hi.as_slice())
+        // A file's filter answers for its own versions; a chain it sent whole to its history
+        // file ends in a deletion, which shows nothing through the one above it.
+        self.below.as_ref().is_some_and(|files| {
+            let hashes = crate::sst::filter::hashes(key);
+            !files.iter().any(|t| {
+                t.props.lo.as_slice() <= key
+                    && key <= t.props.hi.as_slice()
+                    && t.may_contain(hashes)
+            })
         })
     }
 }
@@ -89,12 +96,10 @@ fn span(inputs: &[(u8, Arc<Table>)]) -> (Vec<u8>, Vec<u8>) {
 
 fn plan(v: &Version, inputs: Vec<(u8, Arc<Table>)>, output_level: usize) -> Plan {
     let (lo, hi) = span(&inputs);
-    let spans: Vec<(Vec<u8>, Vec<u8>)> = (output_level + 1..v.levels.len())
-        .flat_map(|l| v.overlapping(l, &lo, &hi))
-        .map(|t| (t.props.lo.clone(), t.props.hi.clone()))
-        .collect();
-    let bottommost = spans.is_empty();
-    let below = (output_level > 0).then_some(spans);
+    let files: Vec<Arc<Table>> =
+        (output_level + 1..v.levels.len()).flat_map(|l| v.overlapping(l, &lo, &hi)).collect();
+    let bottommost = files.is_empty();
+    let below = (output_level > 0).then_some(files);
     Plan {
         inputs,
         output_level,
