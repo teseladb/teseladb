@@ -446,9 +446,10 @@ pub struct SmpWakeupAioCompletion {
     pub(crate) cwi: CompletionWithIocb,
 }
 
-/// The linux-aio context of the preempting events: the task-quota timer and the high
-/// resolution timer. Its completion ring is the reactor's preemption monitor, so a completion
-/// queued by the kernel makes [`need_preempt`] return `true`.
+/// The linux-aio context of the preempting events: the task-quota timer, the high resolution
+/// timer and the request of another shard to poll the queues between shards
+/// ([`Reactor::preempt_from`]). Its completion ring is the reactor's preemption monitor, so a
+/// completion queued by the kernel makes [`need_preempt`] return `true`.
 pub struct PreemptIoContext {
     /// The reactor.
     pub(crate) _r: *mut Reactor,
@@ -459,7 +460,13 @@ pub struct PreemptIoContext {
     pub(crate) _task_quota_aio_completion: TaskQuotaAioCompletion,
     /// The high resolution timer completion.
     pub(crate) _hrtimer_aio_completion: HrtimerAioCompletion,
+    /// The completion of the eventfd another shard writes to ask for a poll.
+    pub(crate) _preempt_ask_aio_completion: SmpWakeupAioCompletion,
 }
+
+/// The events the preempting context polls, which count against the system's AIO capacity for
+/// every shard.
+pub(crate) const PREEMPTING_EVENTS: usize = 3;
 
 impl PreemptIoContext {
     /// Submits the queued control blocks; returns how many.
@@ -1552,16 +1559,16 @@ unsafe impl KernelCompletionImpl for SmpWakeupAioCompletion {
 }
 
 impl PreemptIoContext {
-    /// The preempting context for reactor `r`, with the task-quota timer `task_quota` and the
-    /// high resolution timer `hrtimer`:
+    /// The preempting context for reactor `r`, with the task-quota timer `task_quota`, the
+    /// eventfd of the requests to poll `preempt_ask` and the high resolution timer `hrtimer`:
     /// `hrtimer_fd` is the number of the `hrtimer` descriptor, which may still be null.
     ///
     /// # Safety
-    /// `r` is the reactor that owns the backend; `task_quota` points to a live descriptor
-    /// that outlives the context; `hrtimer` as in [`HrtimerAioCompletion::new`].
+    /// `r` is the reactor that owns the backend; `task_quota` and `preempt_ask` point to live
+    /// descriptors that outlive the context; `hrtimer` as in [`HrtimerAioCompletion::new`].
     pub unsafe fn new(
         r: *mut Reactor,
-        task_quota: *mut FileDesc,
+        (task_quota, preempt_ask): (*mut FileDesc, *mut FileDesc),
         hrtimer: *mut FileDesc,
         hrtimer_fd: i32,
     ) -> Result<Self, ExceptionPtr> {
@@ -1569,9 +1576,10 @@ impl PreemptIoContext {
         unsafe {
             Ok(PreemptIoContext {
                 _r: r,
-                _context: AioGeneralContext::new(2)?,
+                _context: AioGeneralContext::new(PREEMPTING_EVENTS)?,
                 _task_quota_aio_completion: TaskQuotaAioCompletion::new(task_quota),
                 _hrtimer_aio_completion: HrtimerAioCompletion::new(r, hrtimer, hrtimer_fd),
+                _preempt_ask_aio_completion: SmpWakeupAioCompletion::new(preempt_ask),
             })
         }
     }
@@ -1645,6 +1653,10 @@ impl PreemptIoContext {
                 std::ptr::addr_of_mut!((*this)._task_quota_aio_completion),
                 ctx,
             );
+            SmpWakeupAioCompletion::maybe_queue(
+                std::ptr::addr_of_mut!((*this)._preempt_ask_aio_completion),
+                ctx,
+            );
             (*this).flush();
         }
     }
@@ -1653,13 +1665,20 @@ impl PreemptIoContext {
     /// As [`PreemptIoContext::request_preemption`].
     pub unsafe fn service_preempting_io(this: *mut Self) -> bool {
         // Left uninitialized: the kernel fills the first `r` events.
-        let mut a = [MaybeUninit::<IoEvent>::uninit(); 2];
+        let mut a = [MaybeUninit::<IoEvent>::uninit(); PREEMPTING_EVENTS];
         // SAFETY: see above; a plain read of the context id.
         let ioc = unsafe { (*this)._context.io_context };
         // SAFETY: `ioc` is the context's own, set up in `AioGeneralContext::new` and destroyed
-        // with it; `a` has the 2 slots asked for; no timeout.
+        // with it; `a` has the slots asked for; no timeout.
         let r = unsafe {
-            io_getevents(ioc, 0, 2, a.as_mut_ptr().cast::<IoEvent>(), std::ptr::null_mut(), false)
+            io_getevents(
+                ioc,
+                0,
+                PREEMPTING_EVENTS as i64,
+                a.as_mut_ptr().cast::<IoEvent>(),
+                std::ptr::null_mut(),
+                false,
+            )
         };
         engine_assert!(r != -1);
         let did_work = r > 0;
@@ -1757,7 +1776,10 @@ impl ReactorBackendAio {
         // does not move.
         let (task_quota, notify, max_blocks, tfd) = unsafe {
             (
-                std::ptr::addr_of_mut!((*r)._task_quota_timer),
+                (
+                    std::ptr::addr_of_mut!((*r)._task_quota_timer),
+                    std::ptr::addr_of_mut!((*r)._preempt_eventfd),
+                ),
                 std::ptr::addr_of_mut!((*r)._notify_eventfd),
                 (*r)._cfg.max_networking_aio_io_control_blocks as usize,
                 (*r)._task_quota_timer.get(),
@@ -4516,7 +4538,10 @@ impl ReactorBackendUring {
         // does not move.
         let (task_quota, notify, tfd) = unsafe {
             (
-                std::ptr::addr_of_mut!((*r)._task_quota_timer),
+                (
+                    std::ptr::addr_of_mut!((*r)._task_quota_timer),
+                    std::ptr::addr_of_mut!((*r)._preempt_eventfd),
+                ),
                 std::ptr::addr_of_mut!((*r)._notify_eventfd),
                 (*r)._task_quota_timer.get(),
             )

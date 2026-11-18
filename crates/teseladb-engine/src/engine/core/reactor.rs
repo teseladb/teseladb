@@ -510,6 +510,11 @@ pub struct Reactor {
     pub(crate) _cfg: ReactorConfig,
     /// The eventfd other threads write to wake the reactor.
     pub(crate) _notify_eventfd: FileDesc,
+    /// The eventfd another shard writes to end the reactor's run of tasks at their next
+    /// preemption check (see [`Reactor::preempt_from`]).
+    pub(crate) _preempt_eventfd: FileDesc,
+    /// Whether a shard asked for that since the reactor last polled its queues between shards.
+    pub(crate) _preempt_asked: CacheAligned<AtomicBool>,
     /// The task-quota timer.
     pub(crate) _task_quota_timer: FileDesc,
     /// The I/O backend, in a node whose address is the
@@ -2961,6 +2966,8 @@ impl Reactor {
                     _alien: alien,
                     _cfg: cfg,
                     _notify_eventfd: FileDesc::eventfd(0, EFD_CLOEXEC)?,
+                    _preempt_eventfd: FileDesc::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)?,
+                    _preempt_asked: CacheAligned(AtomicBool::new(false)),
                     _task_quota_timer: FileDesc::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC)?,
                     _backend: None,
                     _active_sigmask: SigsetT::default(),
@@ -5949,16 +5956,18 @@ impl Reactor {
     /// Wakes the reactor if it sleeps.
     pub fn wakeup(&self) {
         // SAFETY: `self` is a live reactor.
-        unsafe { Self::wakeup_from(self) }
+        unsafe { Self::wakeup_from(self) };
     }
 
     /// Wakes the reactor from another thread (an alien thread or another shard):
     /// only the atomic flag and the eventfd's descriptor are reached, as places of `this`,
     /// so no reference to the reactor is formed while its own thread holds one.
     ///
+    /// Returns whether it slept.
+    ///
     /// # Safety
     /// `this` points to a live reactor.
-    pub(crate) unsafe fn wakeup_from(this: *const Self) {
+    pub(crate) unsafe fn wakeup_from(this: *const Self) -> bool {
         // SAFETY: the contract above; the flag is an atomic and the descriptor is written
         // once, at construction, before any other thread can reach the reactor.
         let (sleeping, notify_fd) = unsafe {
@@ -5968,7 +5977,7 @@ impl Reactor {
             )
         };
         if !sleeping.load(Ordering::Relaxed) {
-            return;
+            return false;
         }
 
         // We are free to clear it, because we're sending a signal now
@@ -5978,6 +5987,41 @@ impl Reactor {
         // SAFETY: writing 8 bytes from a local to our eventfd.
         let res = unsafe { write(notify_fd, &one as *const u64 as *const std::ffi::c_void, 8) };
         engine_assert!(res == 8 /* "write(2) failed on _reactor._notify_eventfd" */);
+        true
+    }
+
+    /// Asks the reactor, from another shard, to end its run of tasks at their next preemption
+    /// check and poll its queues: a message for a shard that is running a long task otherwise
+    /// waits for the rest of that task's quota (002 run p51: 0.26 to 0.42 ms at each of the
+    /// crossings of a write). The eventfd is polled in the reactor's preemption context, so
+    /// writing it makes [`need_preempt`](crate::engine::core::preempt::need_preempt) true
+    /// there, as the task-quota timer does. One request stands until the reactor polls its
+    /// queues ([`Smp::poll_queues`] takes it back): the shards that ask meanwhile write nothing.
+    /// A backend without a preemption context polls its queues at the end of the quota, as
+    /// before.
+    ///
+    /// # Safety
+    /// `this` points to a live reactor.
+    pub(crate) unsafe fn preempt_from(this: *const Self) {
+        // SAFETY: as in `wakeup_from`.
+        let (asked, fd) = unsafe {
+            (
+                &(*std::ptr::addr_of!((*this)._preempt_asked)).0,
+                (*std::ptr::addr_of!((*this)._preempt_eventfd)).get(),
+            )
+        };
+        // With the store in `poll_queues`, a store and then a load on each side with a full
+        // barrier between them: this shard queued its message and now reads the request, the
+        // reactor takes the request back and then reads its queues. Either this shard sees the
+        // request taken back and asks again, or the poll that took it back finds the message.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if asked.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let one: u64 = 1;
+        // SAFETY: writing 8 bytes from a local to the eventfd.
+        let res = unsafe { write(fd, &one as *const u64 as *const std::ffi::c_void, 8) };
+        engine_assert!(res == 8 /* "write(2) failed on _reactor._preempt_eventfd" */);
     }
 
     /// Starts the loop that reads the aio eventfd, when one is used.
@@ -7314,7 +7358,13 @@ impl LfQueue {
         // However, we do need a compiler barrier:
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
         // SAFETY: the remote reactor outlives the queues between shards.
-        unsafe { Reactor::wakeup_from(self.remote.remote) };
+        unsafe {
+            // One that is awake is asked to poll its queues before its running tasks use up
+            // their quota.
+            if !Reactor::wakeup_from(self.remote.remote) {
+                Reactor::preempt_from(self.remote.remote);
+            }
+        }
     }
 }
 
@@ -8457,7 +8507,7 @@ impl Smp {
     ) -> Result<u32, ExceptionPtr> {
         use crate::engine::util::log::LogLevel;
         const STORAGE_IOCBS: u32 = Reactor::MAX_AIO;
-        const PREEMPT_IOCBS: u32 = 2;
+        const PREEMPT_IOCBS: u32 = crate::engine::core::reactor_backend::PREEMPTING_EVENTS as u32;
 
         let aio_max_nr = crate::engine::util::read_first_line::read_first_line_as::<u32>(
             std::path::Path::new("/proc/sys/fs/aio-max-nr"),
@@ -9239,6 +9289,14 @@ impl Smp {
     pub fn poll_queues() -> bool {
         let mut got: usize = 0;
         let me = crate::engine::core::shard_id::this_shard_id();
+        // The request of another shard to poll ([`Reactor::preempt_from`]) is taken back before
+        // the queues are read: a message queued after this asks again.
+        // SAFETY: on this shard's reactor thread; only the atomic is reached.
+        let asked = unsafe { &(*std::ptr::addr_of!((*engine())._preempt_asked)).0 };
+        if asked.load(Ordering::Relaxed) {
+            asked.store(false, Ordering::SeqCst);
+            std::sync::atomic::fence(Ordering::SeqCst);
+        }
         for i in 0..Smp::count() {
             if me != i {
                 // SAFETY: the matrix is installed on every reactor thread before it polls;
