@@ -174,7 +174,7 @@ fn a_write_sent_again_with_its_key_applies_once_across_nodes_and_leaders() {
     assert_eq!(counts(at[1]), want);
     // The node that ran both writes stops once every range has a voter on each node: the two
     // left elect new leaders, and the retries sent to them still answer the first answers.
-    assert!(replicated(&first), "{:?}", first.ranges());
+    assert!(replicated(&first), "{}", replica_report(&first, &others));
     assert!(first.stop().success());
     let again = settled(|| send(at[2], "POST", &format!("{C}/insertOne"), one, Some("k-insert")));
     assert_eq!((again.status, doc(&again)), (a.status, doc(&a)));
@@ -202,6 +202,21 @@ fn replicated(node: &NodeProc) -> bool {
         std::thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+/// What Group 0 and each node say of the ranges, for a cluster whose ranges did not get their
+/// three voters in time: the descriptors, each node's routes and each replica's configuration.
+#[cfg(target_os = "linux")]
+fn replica_report(first: &NodeProc, others: &[NodeProc]) -> String {
+    let (code, descs, err) = admin_run(first, &["--format", "json", "ranges"]);
+    let mut out = format!("ranges of Group 0 (exit {code}): {descs}{err}");
+    for (i, node) in std::iter::once(first).chain(others).enumerate() {
+        for e in node.ranges() {
+            let status = node.range_status(e.group, ANSWER);
+            out.push_str(&format!("\nnode {}: {e:?}\n  its replica: {status:?}", i + 1));
+        }
+    }
+    out
 }
 
 /// `teseladb admin` on `node`'s administration port: its exit code, its output and its errors.
