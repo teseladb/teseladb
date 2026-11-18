@@ -399,6 +399,12 @@ impl ServerBackend {
         None
     }
 
+    /// Where the range that holds `key` ends (empty: at the end of the keys), as this worker's
+    /// routing table has it; `None` when no range holds it.
+    pub(super) fn range_end_of(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.h.routes.span_of(&mut self.outside.routes, key).map(|(_, _, end)| end.to_vec())
+    }
+
     /// The documents of `[start, end)` that one range holds, at most `limit`, read on this thread
     /// when its view serves them (005 FR-028, H-011, H-009 and H-003 of the native tests): from
     /// `start` up, or from `end` down when `backward`; with where that range's part of the span
