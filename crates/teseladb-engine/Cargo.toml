@@ -119,6 +119,12 @@ name = "cov3_core_startup_options_test"
 path = "tests/entry/cov3_core_startup_options_test.rs"
 harness = false
 
+# Starts the engine once per case, each in a process of its own.
+[[test]]
+name = "app_template_test"
+path = "tests/entry/app_template_test.rs"
+harness = false
+
 # Runs with the epoll reactor backend, which its main adds to the reactor options.
 [[test]]
 name = "defect_epoll_error_spin"
