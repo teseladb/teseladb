@@ -692,6 +692,17 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         ("teseladb_lsm_scan_memtable_total", "Scan entries from memtables.", took.memtable),
         ("teseladb_lsm_scan_tables_total", "Scan entries from files of levels.", took.tables),
         ("teseladb_lsm_scan_history_total", "Scan entries from history files.", took.history),
+        ("teseladb_lsm_scan_deleted_total", "Deletions that decided a scan's key.", took.deleted),
+        (
+            "teseladb_lsm_scan_retracted_total",
+            "Retracted versions a scan passed over.",
+            took.retracted,
+        ),
+        (
+            "teseladb_lsm_scan_history_opened_total",
+            "History files scans opened.",
+            took.history_opened,
+        ),
     ];
     for (name, help, n) in rows {
         let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");

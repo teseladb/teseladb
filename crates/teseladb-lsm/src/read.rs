@@ -971,15 +971,29 @@ enum Took {
     Tables,
     /// From a history file (FR-031).
     History,
+    /// A deletion that decided its key: no item.
+    Deleted,
+    /// A retraction, or a version one retracted, passed over by `see`.
+    Retracted,
+    /// A history file opened: at the scan's start, or at a key whose version it passed over.
+    HistoryOpened,
 }
 
-const TOOK_KINDS: usize = 6;
+const TOOK_KINDS: usize = 9;
 
 thread_local! {
     static TOOK: std::cell::Cell<[u64; TOOK_KINDS]> = const { std::cell::Cell::new([0; TOOK_KINDS]) };
 }
 
 static TOOK_TOTALS: [AtomicU64; TOOK_KINDS] = [const { AtomicU64::new(0) }; TOOK_KINDS];
+
+fn took_one(kind: Took) {
+    TOOK.with(|t| {
+        let mut a = t.get();
+        a[kind as usize] += 1;
+        t.set(a);
+    });
+}
 
 fn took(why: Took, from: Took) {
     TOOK.with(|t| {
@@ -1005,6 +1019,12 @@ pub struct ScanBreakdown {
     pub tables: u64,
     /// Entries from history files.
     pub history: u64,
+    /// Deletions that decided their keys.
+    pub deleted: u64,
+    /// Retractions and the versions they retracted, passed over.
+    pub retracted: u64,
+    /// History files opened.
+    pub history_opened: u64,
 }
 
 /// [`ScanBreakdown`] of every scan ended since the process started.
@@ -1017,6 +1037,9 @@ pub fn scan_breakdown() -> ScanBreakdown {
         memtable: n(Took::Memtable),
         tables: n(Took::Tables),
         history: n(Took::History),
+        deleted: n(Took::Deleted),
+        retracted: n(Took::Retracted),
+        history_opened: n(Took::HistoryOpened),
     }
 }
 
@@ -1084,6 +1107,9 @@ impl Scan {
                     continue;
                 }
                 let pos = if open { Pos::Seek(first.clone()) } else { Pos::Done };
+                if open && !Arc::ptr_eq(f, t) {
+                    took_one(Took::HistoryOpened);
+                }
                 let data = (!Arc::ptr_eq(f, t)).then(|| t.clone());
                 cursors.push(Cursor::Table {
                     table: f.clone(),
@@ -1395,14 +1421,21 @@ impl Scan {
             }
             took(Took::Decided, from);
             let c = &cursors[i];
-            let seen = match see(ts, c.kind(), || c.stored(), &mut st.retracted, &mut st.found) {
+            let kind = c.kind();
+            let seen = match see(ts, kind, || c.stored(), &mut st.retracted, &mut st.found) {
                 Ok(seen) => seen,
                 Err(e) => return ColumnStep::Step(Step::Failed(e)),
             };
+            match seen {
+                Seen::Next => took_one(Took::Retracted),
+                Seen::Answer if kind == Kind::Delete => took_one(Took::Deleted),
+                Seen::Answer => {}
+            }
             // The scan passes over this version: the ones under it may be in the history file
             // it left closed, which it opens at this key (FR-031).
             if let (Seen::Next, Some(j)) = (seen, self.asleep[i]) {
                 self.asleep[i] = None;
+                took_one(Took::HistoryOpened);
                 cursors[j].seek(entry::internal_key(&st.key, read));
                 self.joining = Some(j);
             }

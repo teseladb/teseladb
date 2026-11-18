@@ -102,6 +102,25 @@ fn a_scan_tells_why_and_from_where_it_took_each_entry() {
 }
 
 #[test]
+fn a_scan_tells_the_deletions_it_decided_keys_on() {
+    // Two keys deleted under the read and one shown: the deletions decide their keys and give no
+    // item (002 run p45: 2.29 entries decided for each item given).
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    for (index, key) in [(1, b"a"), (2, b"b"), (3, b"c")] {
+        lsm.put(G, index, key, ts(10, 0), b"v").unwrap();
+    }
+    lsm.delete(G, 4, b"a", ts(20, 0)).unwrap();
+    lsm.delete(G, 5, b"b", ts(20, 0)).unwrap();
+    let before = teseladb_lsm::scan_breakdown();
+    let v = lsm.view();
+    let rows = scan(&mut lsm, &mut disk, &v, b"a", b"d", ts(30, 0));
+    assert_eq!(rows.len(), 1);
+    let after = teseladb_lsm::scan_breakdown();
+    assert!(after.deleted >= before.deleted + 2, "{after:?}");
+}
+
+#[test]
 fn a_scan_returns_one_version_per_key() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);
