@@ -2082,20 +2082,6 @@ impl CoreLogic for NodeLogic {
         self.data_step();
     }
 
-    fn inputs_begin(&mut self) {
-        if let Some(data) = &mut self.data {
-            data.defer_scans(true);
-        }
-    }
-
-    fn inputs_end(&mut self, now: Nanos) {
-        if let Some(data) = &mut self.data {
-            data.defer_scans(false);
-            self.now = now;
-            self.data_step();
-        }
-    }
-
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>) {
         // End of the turn: one round per range for the reads its events registered. A single
         // voter answers them at once, and what that moves may register more.
