@@ -5112,6 +5112,14 @@ impl Reactor {
         });
     }
 
+    /// Whether a task waits in one of the queues; the task that runs is in none.
+    fn has_ready_task(&self) -> bool {
+        self._task_queues.iter().flatten().any(|tq| {
+            // SAFETY: the queue is live while its node is; no `&mut` to it is live here.
+            unsafe { (*tq.as_ptr())._q.size() != 0 }
+        })
+    }
+
     fn pending_task_count(&self) -> u64 {
         let mut ret = 0u64;
         for tq in self._task_queues.iter().flatten() {
@@ -9566,6 +9574,25 @@ impl Reactor {
         // so we don't sleep in a request/reply workload
         if virtualized() { Duration::from_micros(2000) } else { Duration::from_micros(200) }
     }
+}
+
+/// Whether this shard has other work than the task that runs (FR-048): the engine asked the
+/// task to yield ([`need_preempt`](crate::engine::core::preempt::need_preempt): its quota ran
+/// out, a timer is due or another shard sent a message), another task is ready to run, or the
+/// kernel has completions the reactor has not taken (a request that came by the network, the
+/// result of a read). A task that goes on with work of its own while this is `false` delays
+/// nothing on its shard; one that looks only at `need_preempt` may hold a ready task or a
+/// completion for the rest of its quota. Beyond the original, where completions wait for the
+/// next poll. For a task of a reactor's thread.
+pub fn other_work_waits() -> bool {
+    if crate::engine::core::preempt::need_preempt() {
+        return true;
+    }
+    let r = engine();
+    // SAFETY: on the reactor's thread, from one of its tasks: the reactor and its backend are
+    // live, and they are read for this call only, with no reference to them kept (see
+    // `engine()`); the backend's method only reads it.
+    unsafe { (*r).has_ready_task() || (*Reactor::backend_of(r)).completions_wait() }
 }
 
 /// Yields to the reactor: the returned future resolves after the other pending tasks ran.
