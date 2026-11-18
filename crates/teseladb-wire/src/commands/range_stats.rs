@@ -115,6 +115,20 @@ fn ranges<B: Backend + ?Sized>(
     Ok(published)
 }
 
+/// Leaves the ranges that hold keys of `coll` due for the next pass, as a compaction of each
+/// would: an index just built has entries no statistics count yet, and the planner would know
+/// nothing of its fields until each range was compacted (010 FR-029). A node that cannot read
+/// its routes now marks nothing: its ranges get their statistics at their next compaction, as
+/// before, and what asked (an index build that is done) does not fail for it.
+pub(super) fn due_for<B: Backend + ?Sized>(backend: &mut B, coll: &CollectionEntry) {
+    let Ok(entries) = backend.route_entries() else { return };
+    for e in entries {
+        if holds(&(e.start.clone(), e.end.clone()), coll) {
+            stats::mark_compacted(e.group.0, &e.start, &e.end);
+        }
+    }
+}
+
 /// Whether range `span` holds keys of collection `c` (its documents or its indexes).
 fn holds(span: &Span, c: &CollectionEntry) -> bool {
     let first = KeyBuilder::collection_start(c.tenant, c.id).as_bytes().to_vec();

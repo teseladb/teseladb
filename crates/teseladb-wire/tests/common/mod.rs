@@ -273,6 +273,8 @@ pub struct Mem {
     /// The ranges the router knows (018 chunks); the chunk commands' orders apply to them at
     /// once.
     pub routes: Vec<teseladb_router::table::RouteEntry>,
+    /// Whether the router does not answer: asking for the ranges fails.
+    pub routes_fail: bool,
     /// The range orders sent to Group 0, in order.
     pub range_orders: Vec<teseladb_meta::command::Group0Command>,
     /// Range orders Group 0 refuses, with this error.
@@ -1312,6 +1314,10 @@ impl Backend for Mem {
     }
 
     fn route_entries(&mut self) -> Result<Vec<teseladb_router::table::RouteEntry>, CommandError> {
+        if self.routes_fail {
+            let msg = "the routes do not answer";
+            return Err(CommandError::new(teseladb_wire::error::INTERNAL_ERROR, msg));
+        }
         Ok(self.routes.clone())
     }
 

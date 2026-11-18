@@ -127,9 +127,15 @@ fn an_aggregation_over_ranges_on_several_cores_merges_into_the_answer_in_one_pla
         ]),
     );
     assert!(ok(&c.run("app", index)));
+    // A `$match` that keeps ten documents: the index, whatever the statistics say by then (a
+    // read that would bring most of the collection goes through the ranges, FR-034).
+    let few =
+        Document::new().with("$match", Document::new().with("v", op("$gte", (DOCS - 10) * 10)));
+    let by_few = vec![few, group(Value::Null)];
+    let one_place = aggregate(&mut c, &by_few, true);
     let by_index = teseladb_stages::count(teseladb_stages::Stage::AggByIndex);
-    let again = aggregate(&mut c, &pipelines[2], false);
-    assert_eq!(again, whole);
+    let again = aggregate(&mut c, &by_few, false);
+    assert_eq!(again, one_place);
     assert!(teseladb_stages::count(teseladb_stages::Stage::AggByIndex) > by_index);
     node.stop();
 }

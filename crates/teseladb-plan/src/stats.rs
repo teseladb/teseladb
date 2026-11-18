@@ -163,6 +163,11 @@ const FETCH_COST: f64 = 1.0;
 const SCAN_COST: f64 = 0.5;
 /// The cost of sorting `n` documents in memory, per comparison.
 const SORT_COST: f64 = 0.05;
+/// What a document costs a scan the ranges run where they hold it (010 FR-034): the scan folds or
+/// filters as it reads, by columns where it can, and no document travels. A tenth of a document
+/// read by an index entry: the one-node load spent 3.5 µs of CPU on each document it fetched by
+/// an index and 0.35 µs on each one a range scanned (002 runs p51 and p52).
+const PUSHED_SCAN_COST: f64 = 0.125;
 
 /// Two plans whose costs are within this factor of each other are tried against each other.
 pub const TRIAL_FACTOR: f64 = 2.0;
@@ -225,6 +230,16 @@ impl RangeStats {
                 keys * KEY_COST + found * FETCH_COST + sort(found, false)
             }
         })
+    }
+
+    /// Whether a scan of the whole collection that its ranges run (010 FR-034) costs less than
+    /// every plan of `plans`: an index that would bring a large part of the collection document
+    /// by document loses to it. `false` with no plan, or when a plan reads a field with no
+    /// statistics: the plans run as they did.
+    pub fn pushed_scan_wins(&self, plans: &[Access], indexes: &[IndexMeta]) -> bool {
+        let scan = self.documents as f64 * PUSHED_SCAN_COST;
+        !plans.is_empty()
+            && plans.iter().all(|p| self.cost(p, indexes, false).is_some_and(|c| c > scan))
     }
 
     /// The index keys `scan` reads: the documents of the leading field's intervals, narrowed by

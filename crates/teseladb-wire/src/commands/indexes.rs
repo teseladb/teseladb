@@ -661,7 +661,7 @@ fn build<B: Backend + ?Sized>(
         let op = BuildOp::begin(ctx.shared, full(ns), ctx.cmd, specs, now);
         let run = index_build::Backfill { asked: Some(asked), op: Some(op) };
         let rules = rules_of(ns, coll, &made)?;
-        run.run(backend, coll, &rules).map_err(|stopped| match stopped {
+        let read = run.run(backend, coll, &rules).map_err(|stopped| match stopped {
             Stopped::Node(e) => e,
             Stopped::Build(e) => {
                 let (errmsg, _) = build_failed(backend, ns, coll, &e.errmsg);
@@ -674,6 +674,12 @@ fn build<B: Backend + ?Sized>(
                 backend.index_write(IndexCommand::SetState { id: e.id, state: IndexState::Ready });
             index_build::step_since(backend, teseladb_stages::Stage::IndexBuildReady, began);
             ready?;
+        }
+        // The planner learns the values of the new indexes at the next pass of the statistics.
+        // A build that read nothing has none to teach: statistics of an empty collection would
+        // stand for it once it is written, until its range's next compaction.
+        if read > 0 {
+            super::range_stats::due_for(backend, coll);
         }
         Ok(())
     })();

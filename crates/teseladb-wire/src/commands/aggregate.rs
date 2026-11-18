@@ -1486,6 +1486,11 @@ fn plan_read<B: Backend + ?Sized>(
     if !super::plan_exec::plannable_kind(&coll)? || super::explain::matches_nothing(&parsed) {
         return Ok(None);
     }
+    // An aggregation that can split reads the collection through its ranges when the statistics
+    // say its index plans would bring a large part of it document by document (010 FR-034).
+    if scatter && plain && super::plan_exec::pushed_scan_wins(ctx.backend, &coll, &read)? {
+        return Ok(Some(Read::Scan(coll)));
+    }
     let note = super::plan_exec::CacheNote {
         shared: ctx.shared,
         ns,

@@ -627,6 +627,34 @@ pub(crate) fn choose<B: Backend + ?Sized>(
     Ok(Some(Chosen { winner, others, planning_micros }))
 }
 
+/// Whether `read`, of an aggregation that can split over the ranges (010 FR-034), costs less as
+/// a scan of the collection its ranges run than by any plan of its indexes, by the collection's
+/// statistics (FR-029). `false` without statistics, with a hint or with no index: the read is
+/// planned as any other. It looks at this read's own values, so it comes before the cached plan
+/// of its shape: `{g: 3}` may match a quarter of the collection and `{g: 5}` nothing.
+pub(crate) fn pushed_scan_wins<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    read: &ReadPlan<'_>,
+) -> Result<bool, CommandError> {
+    if read.hint.is_some() {
+        return Ok(false);
+    }
+    let indexes = plan_indexes(backend, coll)?;
+    let metas: Vec<IndexMeta> = indexes.iter().map(|i| i.meta.clone()).collect();
+    let request = Request {
+        parsed: Some(read.parsed),
+        sort: &read.sort,
+        hint: None,
+        intersect: read.intersect,
+    };
+    let plans = candidates(&request, &metas);
+    let key = query::documents_of(coll).0;
+    let stats =
+        teseladb_keys::space::collection_of(&key).and_then(teseladb_plan::stats::collection_stats);
+    Ok(stats.is_some_and(|(_, st)| st.pushed_scan_wins(&plans, &metas)))
+}
+
 /// The plans that go on after their estimates (010 FR-029): the one the statistics of the
 /// collection (`stats`) find cheapest by more than twice, alone, or those within twice the best
 /// estimate, which run a trial. Without statistics, or when a plan reads a field that has none,
@@ -2041,6 +2069,28 @@ mod tests {
         let plans = vec![Access::Index(scan(0, "a", 1)), Access::Index(scan(1, "b", 1))];
         let kept = by_estimate(plans.clone(), Some(&stats), &metas, &[]);
         assert_eq!(kept, vec![plans[0].clone()]);
+    }
+
+    #[test]
+    fn a_scan_the_ranges_run_wins_over_an_index_that_would_fetch_a_quarter() {
+        // `g` holds four values, a quarter of the documents each, and `u` is unique (002 runs
+        // p51 and p52: an aggregation by `g` fetched 12,500 documents one by one, 130-180 ms,
+        // where the scan of its collection through the ranges took 50).
+        let g: Vec<Value> = (0..10_000).map(|i| Value::Int32(i % 4)).collect();
+        let u: Vec<Value> = (0..10_000).map(Value::Int32).collect();
+        let stats = stats_of(&[("g", g), ("u", u)]);
+        let metas = [meta("g_1", "g"), meta("u_1", "u")];
+        let by_g = Access::Index(scan(0, "g", 1));
+        assert!(stats.pushed_scan_wins(std::slice::from_ref(&by_g), &metas));
+        // A value no document holds, or one document in ten thousand: the index.
+        assert!(!stats.pushed_scan_wins(&[Access::Index(scan(0, "g", 9))], &metas));
+        let by_u = Access::Index(scan(1, "u", 7));
+        assert!(!stats.pushed_scan_wins(std::slice::from_ref(&by_u), &metas));
+        // One cheap plan among them keeps the indexes; so does a field with no statistics, and
+        // a read with no plan at all.
+        assert!(!stats.pushed_scan_wins(&[by_g, by_u], &metas));
+        assert!(!stats.pushed_scan_wins(&[Access::Index(scan(0, "c", 1))], &metas));
+        assert!(!stats.pushed_scan_wins(&[], &metas));
     }
 
     #[test]
