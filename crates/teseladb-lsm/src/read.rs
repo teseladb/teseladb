@@ -771,9 +771,9 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
         let history = t.history.as_ref().map(|h| (h, false));
         for (f, of_level) in std::iter::once((t, true)).chain(history) {
             let gave = best.as_ref().map(|b| b.ts) != before;
-            // Also when the version found, from a newer source, is below the file's highest
-            // mark: the file may have sent a newer deletion of the key to its history file.
-            let under = before.is_some_and(|b| b < t.props.max_ts);
+            // Also when the version found, from a newer source, is below a deletion the file
+            // sent whole to its history file: it may be one of the key.
+            let under = before.is_some_and(|b| t.props.apart.is_some_and(|a| b < a));
             let wanted = of_level || (!gave && (read < t.props.max_ts || passed || under));
             let newer = best.as_ref().is_none_or(|b| f.props.max_ts > b.ts);
             if !wanted || !newer || f.props.min_ts > read || !f.may_contain(hashes) {
@@ -881,7 +881,7 @@ fn skippable(
 }
 
 /// The first file older than source `i` whose history file is closed, that may hold `key` and
-/// whose highest mark is above `ts`.
+/// sent there whole a deletion above `ts`, which may be one of the key.
 fn closed_history_over(
     cursors: &[Cursor],
     asleep: &[Option<usize>],
@@ -893,7 +893,7 @@ fn closed_history_over(
         asleep[m].is_some()
             && match &cursors[m] {
                 Cursor::Table { table: t, .. } => {
-                    t.props.max_ts > ts
+                    t.props.apart.is_some_and(|a| a > ts)
                         && t.props.lo.as_slice() <= key
                         && key <= t.props.hi.as_slice()
                 }
