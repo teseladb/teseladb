@@ -643,6 +643,10 @@ impl Req {
 /// The ranges of a core.
 pub struct RangeHost {
     pub(crate) lsm: Rc<RefCell<Lsm>>,
+    /// While the core hands out a turn's messages its scans do not step: every write of the
+    /// turn is proposed before any scan reads (the one-node load's profile: 70 % of the scans'
+    /// time ran on the cores, between one write of a turn and the next).
+    defer_scans: bool,
     clock: NodeClock,
     /// The views of the ranges it leads, for reads outside the core (005 FR-028).
     views: crate::view::RangeViews,
@@ -753,6 +757,7 @@ impl RangeHost {
     pub fn new(lsm: Rc<RefCell<Lsm>>, clock: NodeClock) -> RangeHost {
         RangeHost {
             lsm,
+            defer_scans: false,
             clock,
             throttle: crate::throttle::WriteThrottle::default(),
             views: crate::view::RangeViews::default(),
@@ -1419,6 +1424,11 @@ impl RangeHost {
         }
         let ids: Vec<ReqId> = self.reqs.keys().copied().collect();
         for id in ids {
+            if self.defer_scans
+                && matches!(self.reqs.get(&id), Some(Req::Get(q)) if q.scan.is_some())
+            {
+                continue;
+            }
             moved |= self.step(core, id, now);
         }
         self.publish_views(core, now);
@@ -1441,6 +1451,12 @@ impl RangeHost {
             let marks = self.ranges.keys().filter_map(|g| Some((*g, mark(g)?))).collect();
             self.views.publish_txn_marks(marks);
         }
+    }
+
+    /// Holds the scans (`true`) while the core hands out a turn's messages, and lets them step
+    /// again (`false`) at its end, when the next [`RangeHost::poll`] steps them.
+    pub fn defer_scans(&mut self, on: bool) {
+        self.defer_scans = on;
     }
 
     /// Publishes the views of the ranges this host leads in `views`, which the node's handle

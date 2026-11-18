@@ -1437,6 +1437,12 @@ impl DataCore {
     }
 
     /// The end of one of the core's operations; `false` if it is not this module's.
+    /// Holds the scans of its ranges while the core hands out a turn's messages, or lets them
+    /// step again ([`RangeHost::defer_scans`]).
+    pub fn defer_scans(&mut self, on: bool) {
+        self.host.defer_scans(on);
+    }
+
     pub fn on_done(
         &mut self,
         core: &mut MultiRaftCore<CoreSm>,

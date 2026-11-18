@@ -391,6 +391,37 @@ impl Mutation for SetKey {
 }
 
 #[test]
+fn deferred_scans_wait_while_writes_go_on_and_answer_once_let_go() {
+    // While the core hands out its turn's messages its scans wait (the writes of the turn go
+    // first), and once it lets them go they answer as before.
+    let mut n = Node::new();
+    let first = n.mutate(b"\x01a", Box::new(SetKey(b"\x01a".to_vec(), Some(1))), MAJORITY);
+    n.settle();
+    assert!(n.reply(first).is_some());
+    let (now, wall) = (n.now, n.wall());
+    let req = ScanReq {
+        g: G,
+        start: b"\x01a".to_vec(),
+        end: b"\x01z".to_vec(),
+        concern: ReadConcern::Majority,
+        limit: 10,
+        backward: false,
+    };
+    n.host.defer_scans(true);
+    let scan = n.host.scan(&mut n.core, req, now, wall);
+    let write = n.mutate(b"\x01b", Box::new(SetKey(b"\x01b".to_vec(), Some(2))), MAJORITY);
+    n.settle();
+    assert!(n.reply(write).is_some(), "the write answered");
+    assert!(n.reply(scan).is_none(), "the scan waited");
+    n.host.defer_scans(false);
+    n.settle();
+    match n.reply(scan) {
+        Some(Ok(Reply::Batch(rows))) => assert_eq!(rows.len(), 2, "{rows:?}"),
+        other => panic!("not a batch: {other:?}"),
+    }
+}
+
+#[test]
 fn a_scan_returns_the_visible_documents_up_to_its_limit() {
     let mut n = Node::new();
     for (k, v) in

@@ -69,6 +69,13 @@ pub trait CoreLogic {
     fn service_class(&self, _msg: &Self::Msg) -> ServiceClass {
         ServiceClass::Foreground
     }
+    /// The turn starts handing out what arrived (I/O results, the device log's answers, messages
+    /// and frames): the logic may hold its scans until [`CoreLogic::inputs_end`], so that every
+    /// write of the turn goes before them. Nothing by default.
+    fn inputs_begin(&mut self) {}
+    /// The turn handed out what arrived: the scans held since [`CoreLogic::inputs_begin`] step
+    /// now. Nothing by default.
+    fn inputs_end(&mut self, _now: Nanos) {}
     /// Moves the frames to send to `out`.
     fn take_outbound(&mut self, out: &mut Vec<(NodeId, PeerMsg)>);
     /// Whether the runtime sends answers that end with a file's bytes itself (012 FR-026): told

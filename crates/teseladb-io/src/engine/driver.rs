@@ -238,6 +238,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             }
         }
         let now = self.now();
+        self.logic.inputs_begin();
         for (done, class) in std::mem::take(&mut self.reaped) {
             self.logic.on_io_done(done, class, now);
         }
@@ -251,6 +252,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         }
         self.net.inputs(&mut self.logic, now);
         self.take_inputs();
+        self.logic.inputs_end(self.now());
         self.run_background();
         let now = self.now();
         if now >= self.next_tick {
