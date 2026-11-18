@@ -71,6 +71,11 @@ pub struct Props {
     /// with one writes the count of value files, the zones and the shapes before it, with a
     /// count of shapes of zero when it has none.
     pub columns: Option<(u64, u64)>,
+    /// The highest mark of the deletions it sent whole, with the versions under them, to its
+    /// history file (004 FR-031), when it sent any: a scan below it opens that history file.
+    /// A file with one writes the fields before it, the column directory as `0 · 0` without
+    /// one; a file without one ends its properties before it.
+    pub apart: Option<Hlc>,
 }
 
 fn put_ts(out: &mut Vec<u8>, ts: Hlc) {
@@ -99,7 +104,7 @@ impl Props {
             put_ts(&mut out, t.ts);
         }
         put_varint(&mut out, self.dictionary);
-        let columns = self.columns.is_some();
+        let columns = self.columns.is_some() || self.apart.is_some();
         let shapes = !self.shapes.is_empty() || columns;
         if !self.values.is_empty() || self.zones.is_some() || shapes {
             put_varint(&mut out, self.values.len() as u64);
@@ -118,9 +123,13 @@ impl Props {
                 put_bytes(&mut out, shape);
             }
         }
-        if let Some((offset, len)) = self.columns {
+        if columns {
+            let (offset, len) = self.columns.unwrap_or((0, 0));
             put_varint(&mut out, offset);
             put_varint(&mut out, len);
+        }
+        if let Some(ts) = self.apart {
+            put_ts(&mut out, ts);
         }
         out
     }
@@ -174,8 +183,14 @@ impl Props {
             true => Some((get_varint(b, &mut at)?, get_varint(b, &mut at)?)),
             false => None,
         };
-        // A zone block at offset 0 stands for none: data blocks come first.
+        let apart = match at < b.len() {
+            true => Some(get_ts(b, &mut at)?),
+            false => None,
+        };
+        // A zone block or a column directory at offset 0 stands for none: data blocks come
+        // first.
         let zones = zones.filter(|z| *z != (0, 0));
+        let columns = columns.filter(|c| *c != (0, 0));
         if at != b.len() || lo > hi || min_ts > max_ts {
             return Err(Bad);
         }
@@ -191,6 +206,7 @@ impl Props {
             zones,
             shapes,
             columns,
+            apart,
         })
     }
 }
@@ -298,6 +314,7 @@ mod tests {
             zones: None,
             shapes: Vec::new(),
             columns: None,
+            apart: None,
         };
         let b = p.encode();
         assert_eq!(Props::decode(&b), Ok(p.clone()));
@@ -339,6 +356,13 @@ mod tests {
             let columnar = Props { zones, shapes, columns: Some((8_192, 77)), ..p.clone() };
             let e = columnar.encode();
             assert_eq!(Props::decode(&e), Ok(columnar));
+            assert_eq!(Props::decode(&e[..e.len() - 1]), Err(Bad));
+        }
+        // With the mark of the deletions set apart (FR-031), with and without a column directory.
+        for columns in [None, Some((8_192, 77))] {
+            let apart = Props { columns, apart: Some(ts(7)), ..p.clone() };
+            let e = apart.encode();
+            assert_eq!(Props::decode(&e), Ok(apart));
             assert_eq!(Props::decode(&e[..e.len() - 1]), Err(Bad));
         }
         let broken = Props { shapes: vec![vec![0x42, b'a', 0]], ..p.clone() };

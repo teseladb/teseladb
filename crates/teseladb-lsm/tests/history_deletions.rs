@@ -132,3 +132,41 @@ fn a_write_below_a_deletion_set_apart_wakes_its_history_file() {
     assert_eq!(after.history_woken, before.history_woken + 1, "{after:?}");
     assert_eq!(after.history_opened, before.history_opened, "{after:?}");
 }
+
+#[test]
+fn a_scan_below_the_files_highest_mark_wakes_its_history_only_where_it_needs_it() {
+    // Every key at 10 and 11, and a key outside the scan at 40, compacted together: the history
+    // file holds the versions at 10. A scan at 30 needs none of them (002 run p48: history files
+    // opened at the start of 0.66 scans each, 42 % of the entries scans took).
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut disk = MemDisk::new();
+    let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
+    let mut lsm = open(&cfg, &mut disk);
+    let mut index = 0;
+    for at in [10, 11] {
+        for i in 0..KEYS {
+            index += 1;
+            lsm.put(G, index, &key(i), ts(at, 0), &[at as u8]).unwrap();
+        }
+    }
+    index += 1;
+    lsm.put(G, index, b"z", ts(40, 0), b"v").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    compact(&mut lsm, &mut disk);
+    let view = lsm.view();
+
+    let before = teseladb_lsm::scan_breakdown();
+    let rows = scan(&mut lsm, &mut disk, &view, b"k", b"l", ts(30, 0));
+    let after = teseladb_lsm::scan_breakdown();
+    assert_eq!(rows.len() as u64, KEYS);
+    assert!(rows.iter().all(|r| r.3 == [11]));
+    assert_eq!(after.history, before.history, "{after:?}");
+    assert_eq!(after.history_opened, before.history_opened, "{after:?}");
+
+    // Below the versions of the file, the history file wakes at the first key and gives every
+    // key its version of then.
+    let rows = scan(&mut lsm, &mut disk, &view, b"k", b"l", ts(10, 5));
+    assert_eq!(rows.len() as u64, KEYS);
+    assert!(rows.iter().all(|r| r.3 == [10]), "{rows:?}");
+}

@@ -854,15 +854,17 @@ fn goes_before(cursors: &[Cursor], a: usize, b: usize) -> bool {
 /// Whether a filtered scan passes over data block `i` of `table` without reading it (FR-039):
 /// its zones exist and `prune` rules them out, and no source after it in the order of precedence
 /// may hold a key of the block. `older` are those sources' cursors, and `asleep(j)` says that the
-/// `j`-th of them is a history file the read keeps closed. A newer version elsewhere hides the
-/// block's versions anyway; an older one would show through once they are passed over, and could
-/// match where the block's newer version, or its deletion, does not.
+/// `j`-th of them is a history file the read keeps closed, which counts only at or above its
+/// file's highest mark: below it, a version of the file above the read wakes that history file
+/// at its key (FR-031), and a block passed over would never wake it. A newer version elsewhere
+/// hides the block's versions anyway; an older one would show through once they are passed
+/// over, and could match where the block's newer version, or its deletion, does not.
 fn skippable(
     table: &Table,
     i: usize,
     prune: &dyn Fn(&dyn Zones) -> bool,
     older: &[Cursor],
-    asleep: impl Fn(usize) -> bool,
+    (asleep, read): (impl Fn(usize) -> bool, Hlc),
 ) -> bool {
     let Some(zones) = table.zones.as_ref().and_then(|z| z.block(i)) else { return false };
     if prune(&zones) {
@@ -870,7 +872,10 @@ fn skippable(
     }
     let (lo, hi) = table.block_span(i);
     older.iter().enumerate().all(|(j, c)| match c {
-        Cursor::Table { table: t, .. } => asleep(j) || !t.may_hold(lo, hi),
+        Cursor::Table { table: t, data, .. } => {
+            let closed = asleep(j) && data.as_ref().is_none_or(|f| read >= f.props.max_ts);
+            closed || !t.may_hold(lo, hi)
+        }
         Cursor::Mem(_) => true,
     })
 }
@@ -1121,8 +1126,10 @@ impl Scan {
         let mut asleep = vec![None; cursors.len()];
         for t in v.tables() {
             // The file, then its history file (FR-031), right after it in the order of
-            // precedence. At or above the file's highest mark the history file stays closed.
-            let open = self.read < t.props.max_ts;
+            // precedence. It opens at the start below a deletion the file sent there whole, and
+            // when every version of the file is above the read (the scan passes the file by);
+            // otherwise at the key whose version in the file is above the read, or passed over.
+            let open = t.props.apart.is_some_and(|a| self.read < a) || self.read < t.props.min_ts;
             let history = t.history.as_ref().map(|h| (h, open));
             let mut of_level = None;
             for (f, open) in std::iter::once((t, true)).chain(history) {
@@ -1283,11 +1290,12 @@ impl Scan {
         let asleep = &self.asleep;
         let skipped = &mut self.skipped;
         let want = self.want.as_deref();
-        let ask = columnar::Ask { read: self.read, end: &self.end, tombstones: &self.tombstones };
+        let read = self.read;
+        let ask = columnar::Ask { read, end: &self.end, tombstones: &self.tombstones };
         let mut choose = |table: &Table, i: usize, target: Option<&[u8]>| {
             if let Some(prune) = prune {
                 let asleep = |j| asleep.contains(&Some(at + 1 + j));
-                if skippable(table, i, prune, older, asleep) {
+                if skippable(table, i, prune, older, (asleep, read)) {
                     *skipped += 1;
                     return Choice::Skip;
                 }
@@ -1453,6 +1461,12 @@ impl Scan {
             if ts > read {
                 took(Took::Newer, from);
                 cursors[i].seek(entry::internal_key(&st.key, read));
+                // The versions of the key under this one are in the history file left closed.
+                if let Some(j) = self.asleep[i].take() {
+                    took_one(Took::HistoryWoken);
+                    cursors[j].seek(entry::internal_key(&st.key, read));
+                    self.joining = Some(j);
+                }
                 continue;
             }
             if st.found.is_some() {

@@ -614,6 +614,7 @@ mod tests {
             zones: None,
             shapes: Vec::new(),
             columns: None,
+            apart: None,
         };
         let pr = put(&props.encode(), &mut out);
         let mut index = BlockBuilder::new(1);

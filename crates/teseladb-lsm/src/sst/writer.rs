@@ -107,6 +107,8 @@ pub(crate) struct TableWriter {
     first_logical: Option<Vec<u8>>,
     min_ts: Option<Hlc>,
     max_ts: Option<Hlc>,
+    /// The highest mark of the deletions [`TableWriter::cover`] took in.
+    apart: Option<Hlc>,
     versions: u64,
     /// The file's data key and its wrapped form, when the files are encrypted.
     key: Option<(Arc<FileKey>, [u8; WRAPPED_KEY_LEN])>,
@@ -148,6 +150,7 @@ impl TableWriter {
             first_logical: None,
             min_ts: None,
             max_ts: None,
+            apart: None,
             versions: 0,
             key: None,
             slots: Vec::new(),
@@ -395,6 +398,7 @@ impl TableWriter {
         }
         self.min_ts = Some(self.min_ts.map_or(ts, |m| m.min(ts)));
         self.max_ts = Some(self.max_ts.map_or(ts, |m| m.max(ts)));
+        self.apart = Some(self.apart.map_or(ts, |m| m.max(ts)));
     }
 
     /// Counts a version just added: its key in the filter and the bounds.
@@ -593,6 +597,7 @@ impl TableWriter {
             zones,
             shapes: self.packer.take().map(Packer::finish).unwrap_or_default(),
             columns,
+            apart: self.apart,
         };
         let props_handle = self.meta_block(&props.encode(), &mut chunks);
         drop(props);
