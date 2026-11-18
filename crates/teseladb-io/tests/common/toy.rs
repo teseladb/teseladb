@@ -54,6 +54,8 @@ pub enum Cmd {
     Request(u64),
     /// A long scan, in the background class (012 FR-030).
     Scan(u64),
+    /// Work of this many parts that goes on without anything arriving ([`CoreLogic::runnable`]).
+    Parts(u64),
     /// Hand this message to another core through its sender (from the core's own shard).
     Relay(CoreSender<Cmd>, Box<Cmd>),
 }
@@ -89,6 +91,12 @@ pub struct Toy {
     /// Takes, at the first [`CoreLogic::poll_io`], the bytes of stack below it on a stack of
     /// `teseladb_sys::deep_stack` (0 elsewhere).
     pub first_poll_room: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// The parts of [`Cmd::Parts`] still to run.
+    pub parts_left: u64,
+    /// The turns so far: the core asks for the logic's disk operations once in each.
+    pub turns: u64,
+    /// The turn each part of [`Cmd::Parts`] ran in.
+    pub part_turns: Vec<u64>,
 }
 
 pub fn ack(req: u64) -> PeerMsg {
@@ -137,6 +145,8 @@ impl CoreLogic for Toy {
             room.store(teseladb_sys::deep_stack::room_here().unwrap_or(0), Ordering::SeqCst);
         }
         if self.io.is_empty() || (self.one_by_one && self.in_flight > 0) {
+            // The call that ends a turn's operations.
+            self.turns += 1;
             return None;
         }
         self.in_flight += 1;
@@ -195,6 +205,7 @@ impl CoreLogic for Toy {
             }
             Cmd::Stall(d) => thread::sleep(d),
             Cmd::Request(id) | Cmd::Scan(id) => self.served.push(id),
+            Cmd::Parts(n) => self.parts_left = n,
             Cmd::Relay(to, msg) => {
                 let _ = to.send(CoreInput::App(*msg));
             }
@@ -241,6 +252,15 @@ impl CoreLogic for Toy {
 
     fn resting(&self) -> bool {
         self.rests
+    }
+
+    fn runnable(&self) -> bool {
+        self.parts_left > 0
+    }
+
+    fn resume(&mut self, _now: Nanos, _wall_ms: u64) {
+        self.parts_left -= 1;
+        self.part_turns.push(self.turns);
     }
 }
 

@@ -42,6 +42,7 @@ pub fn run() {
         ("an_overloaded_core_refuses_new_requests", an_overloaded_core_refuses_new_requests),
         ("a_core_that_keeps_up_refuses_nothing", a_core_that_keeps_up_refuses_nothing),
         ("document_operations_go_ahead_of_long_scans", document_operations_go_ahead_of_scans),
+        ("work_that_goes_on_takes_few_turns", work_that_goes_on_takes_few_turns),
         (
             "a_long_turn_gives_the_shard_back_between_messages",
             a_long_turn_gives_the_shard_back_between_messages,
@@ -454,6 +455,22 @@ fn a_long_turn_gives_the_shard_back_between_messages(e: &NodeEngine) {
     let (t, _, _) = stop(e, a);
     assert_eq!(t.served, vec![1, 2]);
     assert!(waited < Duration::from_millis(25), "the shard's task waited {waited:?}");
+}
+
+fn work_that_goes_on_takes_few_turns(e: &NodeEngine) {
+    // Two hundred parts of work that needs nothing to arrive: a turn for each made a scan of a
+    // collection wait for the shard's other tasks hundreds of times (002 run p52: four fifths of
+    // its time). The core goes on with it within the turn until the engine asks for the shard.
+    const PARTS: u64 = 200;
+    const TURNS: usize = 20;
+    let a = start(e, 0, 25, Toy::default());
+    send(&a, Cmd::Parts(PARTS));
+    thread::sleep(Duration::from_millis(100));
+    let (t, _, _) = stop(e, a);
+    assert_eq!(t.part_turns.len() as u64, PARTS);
+    let mut turns = t.part_turns.clone();
+    turns.dedup();
+    assert!(turns.len() <= TURNS, "{PARTS} parts took {} turns", turns.len());
 }
 
 fn background_at_a_stop_answered(e: &NodeEngine) {

@@ -1437,13 +1437,17 @@ impl DataCore {
         self.host.idle()
     }
 
-    /// Whether a scan of the host stopped at its share of a turn and goes on at the next poll.
+    /// Whether a scan of the host stopped at its share of a turn and goes on at the next poll,
+    /// or an aggregation's scan has its next part to start.
     pub fn runnable(&self) -> bool {
-        self.host.runnable()
+        self.host.runnable() || !self.folds_due.is_empty()
     }
 
     /// Moves the scans that stopped at their share of a turn one step on and sends what they
-    /// answered: a step each, without a whole [`poll`](DataCore::poll).
+    /// answered: a step each, without a whole [`poll`](DataCore::poll). An aggregation's scan
+    /// that ended a part starts its next one here, without a trip through the core's mailbox
+    /// and its background class for each part of 256 documents: the core asks for the shard
+    /// back between steps, and the document operations of a turn are taken before this.
     pub fn resume(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
         self.host.resume_scans(core, now);
         self.answer(core, now);
@@ -1526,6 +1530,10 @@ impl DataCore {
             // comes, it opens again from its log after a while: no replica will ever serve the
             // one it waits for.
             let since = *self.stale.entry(g).or_insert(now);
+        let wall_ms = self.wall_ms;
+        for id in std::mem::take(&mut self.folds_due) {
+            self.fold_next(core, id, (now, wall_ms));
+        }
             if now.saturating_since(since) >= UNSERVED_FETCH && core.close_group(g).is_ok() {
                 self.stale.remove(&g);
                 self.host.remove_range(g);

@@ -92,11 +92,13 @@ pub trait CoreLogic {
     fn resting(&self) -> bool;
     /// Whether the logic has work it can go on with at once, without anything arriving: a scan
     /// that stopped at its share of a turn. The core lets its shard run its other tasks and then
-    /// calls [`resume`](CoreLogic::resume) in its next turn.
+    /// calls [`resume`](CoreLogic::resume) in its next turn, again and again while there is work
+    /// and nobody needs the shard.
     fn runnable(&self) -> bool {
         false
     }
-    /// Goes on with the work [`runnable`](CoreLogic::runnable) announced.
+    /// Goes on with the work [`runnable`](CoreLogic::runnable) announced, one bounded step: the
+    /// core asks again before the next one.
     fn resume(&mut self, _now: Nanos, _wall_ms: u64) {}
 }
 

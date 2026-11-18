@@ -253,9 +253,16 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         self.take_inputs();
         self.run_background();
         // Work the last turn left for this one (a scan that stopped at its share of a turn) goes
-        // on once the shard ran its other tasks.
-        if self.logic.runnable() {
+        // on once the shard ran its other tasks, part after part until the engine asks for the
+        // shard (its tasks' quota is used up, or another shard sent it a message), a message
+        // waits in the core's inbox, or the turn's own quota ends. One part a turn made a scan
+        // of a collection wait for hundreds of turns: four fifths of its time (002 run p52).
+        let from = Instant::now();
+        while self.logic.runnable() {
             self.logic.resume(self.now(), wall_ms());
+            if need_preempt() || !self.inbox.is_empty() || from.elapsed() >= TURN_QUOTA {
+                break;
+            }
         }
         let now = self.now();
         if now >= self.next_tick {
