@@ -93,10 +93,12 @@ pub mod testing {
     ///
     /// Returns the error the test body's future resolved to.
     pub fn run_test(t: &'static dyn EngineTest) -> Result<(), ExceptionPtr> {
-        set_abort_on_internal_error(true);
         global_test_runner().run_sync(Box::new(move || {
-            // Set inside the serialized run, so a test run from another harness thread at the
-            // same time cannot overwrite it while this one runs.
+            // Both set inside the serialized run, so a test run from another harness thread at
+            // the same time cannot overwrite them while this one runs: the original's tests run
+            // one after another on one thread, and a test holds aborting off for a while with a
+            // `ScopedNoAbortOnInternalError`.
+            set_abort_on_internal_error(true);
             match CURRENT_TEST.lock() {
                 Ok(mut n) => *n = t.name(),
                 Err(p) => *p.into_inner() = t.name(),

@@ -28,7 +28,6 @@ use teseladb::engine::core::metrics::{
     make_histogram_labeled, make_total_operations, set_metric_family_configs, set_relabel_configs,
 };
 use teseladb::engine::core::metrics_registration::MetricGroups;
-use teseladb::engine::core::on_internal_error::set_abort_on_internal_error;
 use teseladb::engine::core::prometheus::{
     self, MetricAggregateByLabels, MetricsFamiliesPerShard, get_range, write_histogram,
     write_summary, write_value_as_string,
@@ -38,6 +37,7 @@ use teseladb::engine::core::relabel_config::metrics::{
 };
 use teseladb::engine::core::smp::Smp;
 use teseladb::engine::core::sstring::Sstring;
+use teseladb::engine::testing::on_internal_error::testing::ScopedNoAbortOnInternalError;
 use teseladb::engine_thread_test_case;
 
 fn text(v: &[u8]) -> String {
@@ -419,24 +419,26 @@ fn summaries_without_sum_or_count_write_only_quantiles() {
     assert_eq!(text(&s), "q_sum{} 1.5\nq_count{} 3\n");
 }
 
-#[test]
-fn aggregating_mismatched_histograms_reports_and_keeps_the_first() {
+// On the runner's reactor, where the tests take turns: the switch is of the whole process, and
+// the runner turns it on at the start of each test.
+engine_thread_test_case!(aggregating_mismatched_histograms_reports_and_keeps_the_first, {
     let mut agg = MetricAggregateByLabels::new(vec!["shard".into()]);
     assert!(agg.empty());
     let h2 = MetricValue::from_histogram(hist(1, 1.0, &[(1, 1.0), (1, 2.0)]), DataType::Histogram);
     let h1 = MetricValue::from_histogram(hist(1, 1.0, &[(1, 9.0)]), DataType::Histogram);
     agg.add(&h2, labels(&[("shard", "0"), ("x", "1")]));
-    // A mismatch is an internal error, reported without aborting when aborting is off.
-    let was = set_abort_on_internal_error(false);
-    agg.add(&h1, labels(&[("shard", "1"), ("x", "1")]));
-    set_abort_on_internal_error(was);
+    {
+        // A mismatch is an internal error, reported without aborting when aborting is off.
+        let _no_abort = ScopedNoAbortOnInternalError::new();
+        agg.add(&h1, labels(&[("shard", "1"), ("x", "1")]));
+    }
     agg.add(&h2, labels(&[("shard", "2"), ("x", "1")]));
     let v = agg.get_values();
     assert_eq!(v.len(), 1);
     let (k, sum) = v.iter().next().unwrap();
     assert_eq!(k, &labels(&[("x", "1")]));
     assert_eq!(sum.get_histogram().sample_count, 2, "the mismatched one is not added");
-}
+});
 
 engine_thread_test_case!(family_ranges_by_name_and_prefix, {
     let mut groups = MetricGroups::default();
