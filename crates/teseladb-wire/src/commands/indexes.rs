@@ -725,11 +725,15 @@ pub(super) fn drop_one<B: Backend + ?Sized>(
     let rules =
         Rules { ns: full(ns), collection: coll.id, tenant: coll.tenant, ..Rules::default() };
     let mut w = Writer::internal();
-    // Its entries, then the guards of `prepareUnique` (009 FR-004).
-    for id in [e.id, teseladb_index::prepared::guards_of(e.id)] {
+    // Its entries, then the guards of `prepareUnique` (009 FR-004), under every number of the
+    // collection (D-186): a dropped collection is no longer in the catalog that spreads a read
+    // over its partitions.
+    let numbers = super::crud::partitions_of(coll)?.numbers();
+    let spans = numbers.flat_map(|n| [(n, e.id), (n, teseladb_index::prepared::guards_of(e.id))]);
+    for (number, id) in spans {
         let start =
-            teseladb_keys::KeyBuilder::index_prefix(coll.tenant, coll.id, id).as_bytes().to_vec();
-        let end = teseladb_keys::KeyBuilder::index_prefix(coll.tenant, coll.id, id + 1)
+            teseladb_keys::KeyBuilder::index_prefix(coll.tenant, number, id).as_bytes().to_vec();
+        let end = teseladb_keys::KeyBuilder::index_prefix(coll.tenant, number, id + 1)
             .as_bytes()
             .to_vec();
         loop {

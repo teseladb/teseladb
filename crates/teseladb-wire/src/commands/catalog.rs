@@ -516,23 +516,27 @@ pub fn purge<B: Backend + ?Sized>(
     c: &CollectionEntry,
 ) -> Result<(), CommandError> {
     super::indexes::drop_all(backend, ns, c)?;
-    let (start, end) = documents_of(c);
     let mut w = Writer::internal();
     let rules = Rules { ns: full(ns), unlogged: true, ..Rules::default() };
-    loop {
-        let rows =
-            backend.scan(&start, &end, super::crud::MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
-        if rows.is_empty() {
-            break;
+    // The documents under every number of the collection (D-186): it is no longer in the
+    // catalog that spreads a read over its partitions.
+    for number in super::crud::partitions_of(c)?.numbers() {
+        let (start, end) = documents_of(&CollectionEntry { id: number, ..c.clone() });
+        loop {
+            let rows =
+                backend.scan(&start, &end, super::crud::MODIFY_CHUNK_KEYS, ReadConcern::Local)?;
+            if rows.is_empty() {
+                break;
+            }
+            let keys: Vec<Vec<u8>> = rows.into_iter().map(|(k, _)| k).collect();
+            let mutation = DocMutation::Delete {
+                filter: Document::new(),
+                multi: true,
+                image: Image::None,
+                rules: rules.clone(),
+            };
+            w.write(backend, &Bound { mutation, keys }, 0)?;
         }
-        let keys: Vec<Vec<u8>> = rows.into_iter().map(|(k, _)| k).collect();
-        let mutation = DocMutation::Delete {
-            filter: Document::new(),
-            multi: true,
-            image: Image::None,
-            rules: rules.clone(),
-        };
-        w.write(backend, &Bound { mutation, keys }, 0)?;
     }
     super::capped::purge(backend, ns, c)?;
     backend.catalog_write(CatalogCommand::Purged { id: c.id })?;

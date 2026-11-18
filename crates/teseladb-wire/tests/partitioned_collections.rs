@@ -188,3 +188,34 @@ fn a_collection_over_four_partitions_answers_as_one_over_one() {
     let listed = format!("{:?}", batch(&guarded(&mut m, cmd)));
     assert!(!listed.contains("partitions"), "{listed}");
 }
+
+#[test]
+fn a_dropped_collection_over_four_partitions_leaves_no_key_in_any() {
+    // The drop deletes the documents and the index entries under every number of the
+    // collection, not only its first: the catalog no longer has the collection when its data
+    // goes, and a read of its first number alone saw a quarter of it. The history versions next
+    // to each document (014) are not counted: the range's GC drops them past its threshold,
+    // which this backend does not run.
+    let mut m = Mem::new();
+    fill(&mut m, "spread", 4);
+    let parts = m
+        .catalog
+        .collections
+        .values()
+        .find_map(|c| c.partitions().ok().filter(|p| p.count() == 4))
+        .expect("a collection over four partitions");
+    let left = |m: &Mem| {
+        m.data
+            .keys()
+            .filter(|k| m.types.get(*k) != Some(&teseladb_range::HISTORY_VALUE))
+            .filter(|k| match KeyParts::of(k) {
+                Ok(KeyParts::Data { collection, .. }) => parts.contains(collection),
+                _ => false,
+            })
+            .count()
+    };
+    assert_eq!(left(&m), 6000, "3,000 documents and their 3,000 entries of v_1");
+    let r = guarded(&mut m, doc(&[("drop", s("spread"))]));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    assert_eq!(left(&m), 0, "keys of the dropped collection left");
+}
