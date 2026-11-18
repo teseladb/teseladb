@@ -118,8 +118,17 @@ for run in "${runs[@]}"; do
   dir=${run%%:*}
   bin=${run#*:}
   name=$(basename "$bin")
-  if out=$(cd "$dir" && "$bin" 2>&1); then
+  # The engine's two programs that a Python driver of its tests/data starts run through it, as
+  # scripts/coverage.sh runs them: alone, metrics_tester has no configuration to read.
+  case $name in
+    metrics_tester-*)
+      cmd=(python3 tests/data/prometheus_test.py --exporter "$bin" --config tests/data/conf-example.yaml) ;;
+    rest_api_httpd-*) cmd=(python3 tests/data/json2code_test.py --rest-api-httpd "$bin") ;;
+    *) cmd=("$bin") ;;
+  esac
+  if out=$(cd "$dir" && "${cmd[@]}" 2>&1); then
     echo "$out" | grep -E "^test result|^[a-z_]+: ok" | sed "s|^|$name: |"
+    [[ ${cmd[0]} == python3 ]] && echo "$name: ok (through ${cmd[1]##*/})"
   else
     echo "$out" | tail -40
     echo "FAILED: $name"
