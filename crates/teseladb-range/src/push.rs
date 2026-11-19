@@ -10,6 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{BackScan, ColumnStep, Columns, Found, Kind, Lookup, Lsm, Scan, Step, TimeScan};
@@ -225,6 +226,39 @@ impl MainScan {
             MainScan::Backward(s) => s.next(lsm),
         }
     }
+
+    /// The entries the scan took from its sources and the items it gave so far; a scan from the
+    /// last key down looks each key up and counts none.
+    fn taken(&self) -> (u64, u64) {
+        match self {
+            MainScan::Forward(s) => (s.counts().entries, s.counts().items),
+            MainScan::Backward(_) => (0, 0),
+        }
+    }
+}
+
+/// What the scans of the cores took, since the process started (012 FR-015): the entries of
+/// their sources, the items the storage gave them, the documents they gave their readers and
+/// the versions that only serve the history (the change metas, 014) they passed over.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoreScans {
+    /// Entries taken from the sources: versions, deletions and intents included.
+    pub entries: u64,
+    /// Items the storage gave.
+    pub items: u64,
+    /// Documents given to the readers, those of the column batches included.
+    pub documents: u64,
+    /// Versions that only serve the history, passed over.
+    pub metas: u64,
+}
+
+static CORE_SCANS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// What the scans of the cores took since the process started.
+#[must_use]
+pub fn core_scan_totals() -> CoreScans {
+    let at = |i: usize| CORE_SCANS[i].load(Ordering::Relaxed);
+    CoreScans { entries: at(0), items: at(1), documents: at(2), metas: at(3) }
 }
 
 /// The keys of `[start, end)` that hold an intent of `txn`, in key order, at most `limit` of them
@@ -282,6 +316,18 @@ pub struct ScanState {
     /// What rules out the data blocks of the main scan by their zone maps, for a scan whose
     /// reader has a filter (004 FR-039).
     prune: Option<BlockFilter>,
+    /// What it took and has not added to the process's counts yet ([`core_scan_totals`]): the
+    /// documents and the metas, and the main scan's entries and items already added.
+    tally: Tally,
+}
+
+/// A scan's part of [`CoreScans`] between two of its answers.
+#[derive(Clone, Copy, Debug, Default)]
+struct Tally {
+    documents: u64,
+    metas: u64,
+    /// The main scan's entries and items added so far.
+    added: (u64, u64),
 }
 
 /// Whether a data block may hold a document the reader of a scan keeps, from the block's zone
@@ -346,6 +392,34 @@ impl ScanState {
             piece_docs: 0,
             paused: false,
             prune: None,
+            tally: Tally::default(),
+        }
+    }
+
+    /// Adds what the scan took since its last answer to the process's counts.
+    fn count(&mut self) {
+        let (entries, items) = self.main.taken();
+        let t = std::mem::take(&mut self.tally);
+        let add = [entries - t.added.0, items - t.added.1, t.documents, t.metas];
+        for (total, n) in CORE_SCANS.iter().zip(add) {
+            total.fetch_add(n, Ordering::Relaxed);
+        }
+        self.tally.added = (entries, items);
+    }
+
+    /// Counts a version the main scan decided: a document for the reader, or one that only
+    /// serves the history (014), which is none. `true` for a document.
+    fn is_document(&mut self, visible: &Visible) -> bool {
+        match visible {
+            Some((t, _)) if *t == crate::HISTORY_VALUE => {
+                self.tally.metas += 1;
+                false
+            }
+            Some(_) => {
+                self.tally.documents += 1;
+                true
+            }
+            None => false,
         }
     }
 
@@ -461,21 +535,26 @@ impl ScanState {
             }
             entries += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
+                self.count();
                 return Some(Err(e));
             }
             if let Some(c) = self.main_batch.take() {
                 self.piece_docs += c.docs;
+                self.tally.documents += u64::try_from(c.docs).unwrap_or(u64::MAX);
                 self.pieces.push(Piece::Columns(c));
                 continue;
             }
             let Some((key, visible)) = self.main_next.take() else { break };
             // A version that only serves the history (014) is no document.
-            if let Some(v) = visible.filter(|(t, _)| *t != crate::HISTORY_VALUE) {
+            if self.is_document(&visible)
+                && let Some(v) = visible
+            {
                 self.pieces.push(Piece::Row((key, v)));
                 self.piece_docs += 1;
             }
         }
         self.piece_docs = 0;
+        self.count();
         Some(Ok(std::mem::take(&mut self.pieces)))
     }
 
@@ -496,9 +575,11 @@ impl ScanState {
             }
             entries += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
+                self.count();
                 return Some(Err(e));
             }
             if let Err(e) = self.fill_own(lsm)? {
+                self.count();
                 return Some(Err(e));
             }
             let own_next = self.own.as_mut().and_then(|o| o.next.take());
@@ -527,10 +608,13 @@ impl ScanState {
                 }
             };
             // A version that only serves the history (014) is no document.
-            if let Some(v) = visible.filter(|(t, _)| *t != crate::HISTORY_VALUE) {
+            if self.is_document(&visible)
+                && let Some(v) = visible
+            {
                 self.rows.push((key, v));
             }
         }
+        self.count();
         Some(Ok(std::mem::take(&mut self.rows)))
     }
 }

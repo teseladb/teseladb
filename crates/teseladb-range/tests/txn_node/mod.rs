@@ -1,5 +1,6 @@
 //! One replica of a range over `[01, 03)` that leads on its own, driven as an embedder would,
-//! for the tests of transactions on the host (008).
+//! for the tests of transactions on the host (008). Each test binary uses part of it.
+#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::rc::Rc;

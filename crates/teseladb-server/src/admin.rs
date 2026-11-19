@@ -677,6 +677,23 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     );
     let _ = writeln!(out, "# TYPE {name} counter");
     let _ = writeln!(out, "{name} {}", crate::data::fold_documents());
+    let scans = teseladb_range::push::core_scan_totals();
+    let rows = [
+        ("entries", "Entries the cores' scans took from their sources.", scans.entries),
+        ("items", "Items the storage gave the cores' scans.", scans.items),
+        ("documents", "Documents the cores' scans gave their readers.", scans.documents),
+        (
+            "metas",
+            "Versions that only serve the history the cores' scans passed over.",
+            scans.metas,
+        ),
+    ];
+    for (what, help, n) in rows {
+        let name = format!("teseladb_core_scan_{what}_total");
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        let _ = writeln!(out, "{name} {n}");
+    }
     let name = "teseladb_writes_evaluated_total";
     let _ = writeln!(
         out,
