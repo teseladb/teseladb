@@ -397,7 +397,9 @@ pub trait Backend {
     }
     /// The error that stops the running operation now, if any: its `maxTimeMS` passed or it was
     /// killed (006 FR-012). Work that touches no storage, such as the stages of an aggregation in
-    /// memory, asks it as it goes; a backend without a running operation never stops one.
+    /// memory, asks it as it goes; a backend without a running operation never stops one. A node
+    /// gives its shard back here once the engine asks for it (005 FR-035): what asks is long
+    /// work on the connection's thread.
     fn interrupted(&self) -> Result<(), crate::error::CommandError> {
         Ok(())
     }

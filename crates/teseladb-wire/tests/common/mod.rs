@@ -131,6 +131,8 @@ pub struct Mem {
     pub concerns: Vec<teseladb_range::ack::WriteConcern>,
     /// Operations that ended.
     pub ended: usize,
+    /// How many times a running operation asked whether it goes on (`Backend::interrupted`).
+    pub asked: std::cell::Cell<usize>,
     /// Reads of the indexes since the last operation ended: a server pins each until then (009 FR-006).
     pub open_index_reads: usize,
     /// Where a second range starts: a write whose outcome reaches the other side of it from its
@@ -797,6 +799,11 @@ impl Backend for Mem {
         let behind = self.gate_lagging > 0;
         self.gate_lagging = self.gate_lagging.saturating_sub(1);
         Ok(!behind)
+    }
+
+    fn interrupted(&self) -> Result<(), CommandError> {
+        self.asked.set(self.asked.get() + 1);
+        Ok(())
     }
 
     // One range, with no intents: a read sees the committed documents.

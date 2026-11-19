@@ -920,7 +920,9 @@ impl<B: Backend + ?Sized> Backend for Guarded<'_, B> {
     }
 
     fn interrupted(&self) -> Result<(), CommandError> {
-        self.check()
+        self.check()?;
+        // The node hears it too: there the shard gets its other tasks (005 FR-035).
+        self.inner.interrupted()
     }
 
     fn txn_wait_clock(&mut self, until_ms: u64) -> bool {

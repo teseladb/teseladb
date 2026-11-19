@@ -1783,6 +1783,15 @@ impl Backend for ServerBackend {
         })
     }
 
+    fn interrupted(&self) -> Result<(), CommandError> {
+        // Long work on this thread asks as it goes (the stages of an aggregation between two
+        // batches): the shard runs its other tasks once the engine asks for it, so its core,
+        // its log's writer and its other connections do not wait for the end of a pipeline
+        // (002 run p69s: 96 of 236 stall reports at 2 ms named it).
+        wait::yield_if_asked();
+        Ok(())
+    }
+
     fn txn_pause(&mut self) -> bool {
         wait::sleep(RETRY_PAUSE);
         Instant::now() < self.until()

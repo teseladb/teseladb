@@ -382,6 +382,43 @@ fn rules_with_a_bad_delete_only_flag_are_malformed() {
     assert_eq!(e.errmsg, "malformed index rules");
 }
 
+/// A running operation asks as it goes whether it stops (006 FR-012), and the node's backend is
+/// asked too: there the shard gets its other tasks once the engine asks for them (005 FR-035).
+/// The stages of an aggregation in memory ask between two batches; the operation's wrapper
+/// answered by itself and the node never heard, so a pipeline over thousands of documents held
+/// its shard (002 run p69s: 96 of 236 stall reports).
+#[test]
+fn the_guarded_backend_asks_the_node_whether_the_operation_goes_on() {
+    let mut m = seeded(1);
+    let shared = leaked();
+    let id = teseladb_wire::commands::hot::of(shared).ops.begin(Op {
+        conn: 1,
+        client: None,
+        metadata: None,
+        app_name: None,
+        op: op_type("insert"),
+        ns: "b.c".to_owned(),
+        command: Document::new(),
+        started_ms: m.now,
+        deadline_ms: None,
+        killed: false,
+        interrupt: None,
+        user: None,
+        tenant: 0,
+        privileges: None,
+        roles: None,
+        desc: None,
+        progress: None,
+        metrics: None,
+    });
+    let g = teseladb_wire::ops::Guarded::new(&mut m, shared, id);
+    use teseladb_wire::commands::Backend;
+    assert_eq!(g.interrupted(), Ok(()));
+    assert_eq!(g.interrupted(), Ok(()));
+    drop(g);
+    assert_eq!(m.asked.get(), 2);
+}
+
 #[test]
 fn the_guarded_backend_passes_voters_and_ends_the_operation() {
     let mut m = seeded(1);
