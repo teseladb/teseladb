@@ -1032,9 +1032,19 @@ enum Took {
     HistoryOpened,
     /// A history file the scan left closed, opened at a key (FR-031).
     HistoryWoken,
+    /// A version of a key already decided that came from a memtable.
+    OlderMemtable,
+    /// A version of a key already decided that came from a history file.
+    OlderHistory,
+    /// A memtable a scan opened a cursor on.
+    SourceMemtable,
+    /// A file of level 0 a scan opened a cursor on.
+    SourceLevel0,
+    /// A file of a deeper level a scan opened a cursor on.
+    SourceDeeper,
 }
 
-const TOOK_KINDS: usize = 10;
+const TOOK_KINDS: usize = 15;
 
 thread_local! {
     static TOOK: std::cell::Cell<[u64; TOOK_KINDS]> = const { std::cell::Cell::new([0; TOOK_KINDS]) };
@@ -1082,6 +1092,16 @@ pub struct ScanBreakdown {
     pub history_opened: u64,
     /// History files left closed and opened at a key.
     pub history_woken: u64,
+    /// Versions of keys already decided that came from memtables.
+    pub older_memtable: u64,
+    /// Versions of keys already decided that came from history files.
+    pub older_history: u64,
+    /// Memtables the scans opened a cursor on.
+    pub source_memtables: u64,
+    /// Files of level 0 the scans opened a cursor on.
+    pub source_level0: u64,
+    /// Files of deeper levels the scans opened a cursor on.
+    pub source_deeper: u64,
 }
 
 /// [`ScanBreakdown`] of every scan ended since the process started.
@@ -1098,6 +1118,11 @@ pub fn scan_breakdown() -> ScanBreakdown {
         retracted: n(Took::Retracted),
         history_opened: n(Took::HistoryOpened),
         history_woken: n(Took::HistoryWoken),
+        older_memtable: n(Took::OlderMemtable),
+        older_history: n(Took::OlderHistory),
+        source_memtables: n(Took::SourceMemtable),
+        source_level0: n(Took::SourceLevel0),
+        source_deeper: n(Took::SourceDeeper),
     }
 }
 
@@ -1153,6 +1178,7 @@ impl Scan {
             let mut c = Cursor::Mem(MemCursor::new(m.clone()));
             c.seek(first.clone());
             cursors.push(c);
+            took_one(Took::SourceMemtable);
         }
         let mut asleep = vec![None; cursors.len()];
         for t in v.tables() {
@@ -1179,6 +1205,11 @@ impl Scan {
                     took_one(Took::HistoryOpened);
                 }
                 let data = (!Arc::ptr_eq(f, t)).then(|| t.clone());
+                if data.is_none() {
+                    let level0 =
+                        v.levels.first().is_some_and(|l| l.iter().any(|x| Arc::ptr_eq(x, t)));
+                    took_one(if level0 { Took::SourceLevel0 } else { Took::SourceDeeper });
+                }
                 cursors.push(Cursor::Table {
                     table: f.clone(),
                     data,
@@ -1508,6 +1539,11 @@ impl Scan {
             }
             if st.found.is_some() {
                 took(Took::Older, from);
+                match from {
+                    Took::Memtable => took_one(Took::OlderMemtable),
+                    Took::History => took_one(Took::OlderHistory),
+                    _ => {}
+                }
                 if let Err(e) = cursors[i].skip_versions(&st.key, VERSIONS_STEPPED) {
                     return ColumnStep::Step(Step::Failed(e));
                 }

@@ -101,6 +101,31 @@ fn a_scan_tells_why_and_from_where_it_took_each_entry() {
     assert!(after.tables > before.tables, "{after:?}");
 }
 
+/// A scan tells which sources it opened and where the versions of keys it had decided came
+/// from (002 run p66: 2.3 such versions for each document a core's scan gave, and no way to
+/// tell the memtables' from the files').
+#[test]
+fn a_scan_tells_its_sources_and_where_its_older_versions_came_from() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    // A version in a file, and two in the memtable: the scan decides on the newest and passes
+    // one of the memtable and the file's.
+    lsm.put(G, 1, b"a", ts(10, 0), b"v").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.put(G, 2, b"a", ts(20, 0), b"v").unwrap();
+    lsm.put(G, 3, b"a", ts(30, 0), b"v").unwrap();
+    let before = teseladb_lsm::scan_breakdown();
+    let v = lsm.view();
+    let rows = scan(&mut lsm, &mut disk, &v, b"a", b"b", ts(50, 0));
+    assert_eq!(rows.len(), 1);
+    let after = teseladb_lsm::scan_breakdown();
+    assert!(after.source_memtables > before.source_memtables, "{after:?}");
+    assert!(after.source_level0 > before.source_level0, "{after:?}");
+    assert!(after.older_memtable > before.older_memtable, "{after:?}");
+    assert!(after.older > before.older, "{after:?}");
+}
+
 #[test]
 fn a_scan_tells_the_deletions_it_decided_keys_on() {
     // Two keys deleted under the read and one shown: the deletions decide their keys and give no

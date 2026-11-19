@@ -311,7 +311,7 @@ impl RangeView {
 
 /// Why reads outside the core went back to it, since the process started, by [`Decline`].
 static DECLINES: [AtomicU64; DECLINE_REASONS] = [const { AtomicU64::new(0) }; DECLINE_REASONS];
-const DECLINE_REASONS: usize = 8;
+const DECLINE_REASONS: usize = 10;
 
 /// Why a read outside the core went back to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -336,6 +336,12 @@ pub enum Decline {
     /// before the scan or while it ran: it may read below the commit without finding the
     /// intent. A later view holds the resolution.
     Resolved,
+    /// The view's mark is below the last commit of a transaction across ranges of the reader's
+    /// session: it may lack that commit.
+    Across,
+    /// A block the read needed could not be read from its file on the reader's thread, or it
+    /// needed more blocks than a read outside the core takes.
+    Blocks,
 }
 
 impl Decline {
@@ -349,6 +355,8 @@ impl Decline {
         Decline::NoView,
         Decline::Unrouted,
         Decline::Resolved,
+        Decline::Across,
+        Decline::Blocks,
     ];
 
     /// Its label in the metrics.
@@ -362,6 +370,8 @@ impl Decline {
             Decline::NoView => "no_view",
             Decline::Unrouted => "unrouted",
             Decline::Resolved => "resolved",
+            Decline::Across => "across",
+            Decline::Blocks => "blocks",
         }
     }
 

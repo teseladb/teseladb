@@ -740,6 +740,31 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
         ),
         ("teseladb_lsm_scan_newer_total", "Scan entries above the read's mark.", took.newer),
         ("teseladb_lsm_scan_older_total", "Scan entries of keys already decided.", took.older),
+        (
+            "teseladb_lsm_scan_older_memtable_total",
+            "Scan entries of keys already decided that came from memtables.",
+            took.older_memtable,
+        ),
+        (
+            "teseladb_lsm_scan_older_history_total",
+            "Scan entries of keys already decided that came from history files.",
+            took.older_history,
+        ),
+        (
+            "teseladb_lsm_scan_source_memtables_total",
+            "Memtables those scans opened a cursor on.",
+            took.source_memtables,
+        ),
+        (
+            "teseladb_lsm_scan_source_level0_total",
+            "Files of level 0 those scans opened a cursor on.",
+            took.source_level0,
+        ),
+        (
+            "teseladb_lsm_scan_source_deeper_total",
+            "Files of deeper levels those scans opened a cursor on.",
+            took.source_deeper,
+        ),
         ("teseladb_lsm_scan_decided_total", "Scan entries that decided their key.", took.decided),
         ("teseladb_lsm_scan_memtable_total", "Scan entries from memtables.", took.memtable),
         ("teseladb_lsm_scan_tables_total", "Scan entries from files of levels.", took.tables),

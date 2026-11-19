@@ -249,6 +249,7 @@ impl ServerBackend {
         // A view below the session's last commit may lack it: a transaction across ranges is
         // answered by the range of its record, not by this one; the scan goes to the core.
         if view.applied_mark() < self.across_committed {
+            Decline::Across.count();
             return None;
         }
         Some((view, begun))
@@ -267,6 +268,7 @@ impl ServerBackend {
         // A view below the session's last commit may lack it: a transaction across ranges is
         // answered by the range of its record, not by this one (D-186).
         if view.applied_mark() < self.across_committed {
+            Decline::Across.count();
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         }
@@ -391,13 +393,19 @@ impl ServerBackend {
                     return Some((value, asked.get().unwrap_or_else(Instant::now)));
                 }
                 FastRead::Need(need) => {
-                    let dir = self.h.data_dir.as_deref()?;
-                    let bytes = block(&mut self.outside.files, dir, &need)?;
-                    view.lsm().supply(&need, &bytes).ok()?;
+                    let supplied = self.h.data_dir.as_deref().is_some_and(|dir| {
+                        block(&mut self.outside.files, dir, &need)
+                            .is_some_and(|bytes| view.lsm().supply(&need, &bytes).is_ok())
+                    });
+                    if !supplied {
+                        Decline::Blocks.count();
+                        return None;
+                    }
                 }
                 FastRead::Core => return None,
             }
         }
+        Decline::Blocks.count();
         None
     }
 
