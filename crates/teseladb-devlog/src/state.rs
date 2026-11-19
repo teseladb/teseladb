@@ -15,9 +15,12 @@
 //! as soon as the one before ends, covering them. A file is removed only once the record that let
 //! go of its last live byte is durable, since records written behind a sync that ends are not.
 //!
-//! A file's header is durable before any record goes into it. On recovery a file without a valid
-//! header is the one whose creation a crash cut short, and holds only zeros after its header; one
-//! with anything else there was damaged, and the log does not start.
+//! A file's header is durable before any record goes into it, and its space is written with
+//! zeros before its header ([`ZERO_CHUNK`]): a durable write into space that was reserved and
+//! never written makes the file system convert the extent and commit that in its journal. On
+//! recovery a file without a valid header is the one whose creation a crash cut short, and holds
+//! only zeros after its header; one with anything else there was damaged, and the log does not
+//! start.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -118,6 +121,21 @@ struct LogFile {
     freed_at: Option<u64>,
 }
 
+/// Bytes of zeros a file being made is written with at a time.
+pub const ZERO_CHUNK: u64 = 1 << 20;
+
+/// The writes that fill file `id`, of `size` bytes, with zeros before its header and its records
+/// (FR-035). A durable write into space reserved and never written costs the conversion of its
+/// extent, which the file system commits in its journal: 280 µs against 54 µs for 4 KiB on the
+/// disk of the loads of 002 (19-11-2026).
+fn zeros(id: FileId, size: u64) -> impl Iterator<Item = IoOp> {
+    let chunk = Bytes::from_vec(vec![0; ZERO_CHUNK.min(size) as usize]);
+    (0..size).step_by(ZERO_CHUNK as usize).map(move |offset| {
+        let len = ZERO_CHUNK.min(size - offset) as usize;
+        IoOp::WriteAt { file: id, offset, data: chunk.slice(..len), batch: 0 }
+    })
+}
+
 /// A frame of the flush being built, to apply to the maps once its place is known.
 #[derive(Debug)]
 struct Pending {
@@ -182,6 +200,9 @@ pub struct LogState {
     /// Files made ahead whose turn passed while they were being made: once made, they hold
     /// nothing and go as any empty file.
     passed: Vec<(u64, FileId)>,
+    /// The last file made ahead could not be made: none is tried again until a record made its
+    /// own, so that a disk that fails is not asked over and over while nothing writes.
+    spare_failed: bool,
     /// The file whose copy forward is being read ([`LogState::copy_job`]).
     copying: Option<u64>,
 }
@@ -258,6 +279,7 @@ impl LogState {
             stats: LogStats::default(),
             spare: None,
             passed: Vec::new(),
+            spare_failed: false,
             copying: None,
         };
         let mut paths: Vec<(u64, std::path::PathBuf)> = match disk.list(Path::new(format::DIR)) {
@@ -746,10 +768,14 @@ impl LogState {
         made?;
         self.stats.files_made += 1;
         self.stats.files_made_waiting += 1;
+        self.spare_failed = false;
         self.next_file += 1;
         let file = LogFile { id, size, used: BLOCK, refs: 0, live: 0, freed_at: None };
         self.files.insert(seq, file);
         self.active = Some(seq);
+        for op in zeros(id, size) {
+            ok(disk.execute(op))?;
+        }
         let header = Bytes::from_vec(format::segment_header(seq));
         ok(disk.execute(IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 }))?;
         ok(disk.execute(IoOp::Sync { file: id, batch: 0 }))?;
@@ -760,15 +786,16 @@ impl LogState {
         Ok(seq)
     }
 
-    /// The operations that make the next file ahead, once the active one is half full and no file
-    /// is being made ahead: the record that opens it then neither creates a file nor syncs the
-    /// log's directory while the cores wait. `None` when it is not time to.
+    /// The operations that make the next file ahead, once the active one is half full, or there
+    /// is none yet (a log that just started), and no file is being made ahead: the record that
+    /// opens it then neither creates a file, nor writes its space, nor syncs the log's directory
+    /// while the cores wait. `None` when it is not time to, and after a job that failed until a
+    /// record made its own file.
     pub fn spare_job(&mut self) -> Option<SpareJob> {
-        if self.failed.is_some() || self.spare.is_some() || self.disk_full {
+        if self.failed.is_some() || self.spare.is_some() || self.disk_full || self.spare_failed {
             return None;
         }
-        let f = &self.files[&self.active?];
-        if f.used * 2 < f.size {
+        if self.active.is_some_and(|a| self.files[&a].used * 2 < self.files[&a].size) {
             return None;
         }
         let seq = self.next_file;
@@ -777,12 +804,13 @@ impl LogState {
         self.spare = Some(Spare { seq, id, ready: false });
         let path = format::segment_path(seq);
         let header = Bytes::from_vec(format::segment_header(seq));
-        let ops = vec![
-            IoOp::Create { file: id, path, prealloc: self.file_bytes },
+        let mut ops = vec![IoOp::Create { file: id, path, prealloc: self.file_bytes }];
+        ops.extend(zeros(id, self.file_bytes));
+        ops.extend([
             IoOp::WriteAt { file: id, offset: 0, data: header, batch: 0 },
             IoOp::Sync { file: id, batch: 0 },
             IoOp::SyncDir { path: format::DIR.into() },
-        ];
+        ]);
         Some(SpareJob { seq, ops })
     }
 
@@ -793,7 +821,10 @@ impl LogState {
         if let Some(sp) = self.spare.as_mut().filter(|sp| sp.seq == seq) {
             match made {
                 Ok(()) => sp.ready = true,
-                Err(_) => self.spare = None,
+                Err(_) => {
+                    self.spare = None;
+                    self.spare_failed = true;
+                }
             }
             return;
         }

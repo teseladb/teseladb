@@ -358,6 +358,15 @@ fn a_damaged_header_stops_the_log_and_a_creation_cut_short_does_not() {
     disk.execute(IoOp::SyncDir { path: teseladb_devlog::format::DIR.into() });
     let mut again = LogState::recover(&mut disk, 16 << 10).unwrap();
     assert_eq!(again.read(&mut disk, 0, 1).unwrap(), b"kept");
+    // A creation cut short while its space was being written with zeros: it holds nothing either.
+    let cut = teseladb_devlog::format::segment_path(10);
+    let made = disk.execute(IoOp::Create { file: FileId(78), path: cut, prealloc: 8192 });
+    assert!(matches!(made, IoDone::Ok(_)));
+    let zeros = teseladb_types::Bytes::from_vec(vec![0; 4096]);
+    disk.execute(IoOp::WriteAt { file: FileId(78), offset: 0, data: zeros, batch: 0 });
+    disk.execute(IoOp::SyncDir { path: teseladb_devlog::format::DIR.into() });
+    let mut again = LogState::recover(&mut disk, 16 << 10).unwrap();
+    assert_eq!(again.read(&mut disk, 0, 1).unwrap(), b"kept");
     // Any byte of the header block of a file with records: the log does not start.
     for at in [0u64, 17, 25, 300, 4095] {
         let (mut d, first) = kept_log();
@@ -868,6 +877,112 @@ fn the_next_file_is_made_ahead_and_a_late_or_failed_one_changes_nothing() {
         !left.iter().any(|p| p == &teseladb_devlog::format::segment_path(late_seq)),
         "{left:?}"
     );
+}
+
+/// A disk that notes which blocks of the files it made were written, and counts the writes of
+/// anything but zeros that landed on a block nothing had written.
+struct Written {
+    disk: MemDisk,
+    blocks: BTreeMap<FileId, Vec<bool>>,
+    on_fresh: usize,
+}
+
+impl Disk for Written {
+    fn list(&mut self, dir: &Path) -> Result<Vec<PathBuf>, IoErrno> {
+        self.disk.list(dir)
+    }
+
+    fn read_all(&mut self, path: &Path) -> Result<Vec<u8>, IoErrno> {
+        self.disk.read_all(path)
+    }
+
+    fn execute(&mut self, op: IoOp) -> IoDone {
+        let block = teseladb_devlog::format::BLOCK;
+        match &op {
+            IoOp::Create { file, prealloc, .. } => {
+                self.blocks.insert(*file, vec![false; (*prealloc / block) as usize]);
+            }
+            IoOp::WriteAt { file, offset, data, .. } => {
+                if let Some(blocks) = self.blocks.get_mut(file) {
+                    let first = (*offset / block) as usize;
+                    let end = (*offset + data.len() as u64).div_ceil(block) as usize;
+                    let fresh = (first..end).any(|b| blocks.get(b) != Some(&true));
+                    if fresh && data.iter().any(|b| *b != 0) {
+                        self.on_fresh += 1;
+                    }
+                    for b in blocks.iter_mut().take(end).skip(first) {
+                        *b = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.disk.execute(op)
+    }
+}
+
+/// The space of a file of the log is written before its header and before any record lands in
+/// it (FR-035): the first file, the one made ahead in its job and the one a record makes for
+/// itself when none was made ahead. Space reserved and never written costs every durable write
+/// that lands in it a conversion of its extent, which the file system commits in its journal:
+/// 280 µs against 54 µs for 4 KiB on the disk of the loads of 002 (19-11-2026).
+#[test]
+fn the_space_of_a_file_is_written_before_its_header_and_its_records() {
+    let file_bytes = 32 << 10;
+    let mut disk = Written { disk: MemDisk::new(), blocks: BTreeMap::new(), on_fresh: 0 };
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    s.allow_tidying();
+    s.create(0, 1, 0);
+    // The first file, which its first record makes.
+    records(&mut s, &mut disk, 0, 3);
+    // The next one, made ahead.
+    let job = s.spare_job().expect("half full");
+    let seq = job.seq;
+    let made = run_job(&mut disk, job);
+    s.spare_done(seq, made);
+    records(&mut s, &mut disk, 3, 3);
+    // And one that a record makes for itself: the job of the file made ahead did not run.
+    let late = s.spare_job().expect("half full again");
+    records(&mut s, &mut disk, 6, 3);
+    s.spare_done(late.seq, Err(IoErrno::Io));
+    assert_eq!(disk.blocks.len(), 3, "files made");
+    assert_eq!(disk.on_fresh, 0, "a header or a record landed on space nothing had written");
+    for (file, blocks) in &disk.blocks {
+        assert!(blocks.iter().all(|w| *w), "{file:?}: {blocks:?}");
+    }
+    // What the records hold comes back.
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let got = again.read(&mut disk, 0, 1).unwrap();
+    assert_eq!(got.len(), 9 * 5000);
+}
+
+/// A log without an active file, as every log that just started, makes its first file ahead:
+/// the first record does not wait for the space of its file to be written. A job that failed is
+/// not tried again until a record made its own file, so that a disk that fails is not asked over
+/// and over while nothing writes.
+#[test]
+fn the_first_file_is_made_ahead_and_a_failed_job_waits_for_a_record() {
+    let file_bytes = 32 << 10;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, file_bytes).unwrap();
+    let job = s.spare_job().expect("no active file");
+    assert!(s.spare_job().is_none(), "one at a time");
+    let seq = job.seq;
+    let made = run_job(&mut disk, job);
+    s.spare_done(seq, made);
+    s.create(0, 1, 0);
+    records(&mut s, &mut disk, 0, 1);
+    let st = s.stats();
+    assert_eq!((st.files_made, st.files_made_waiting), (1, 0), "nobody waited for the file");
+    // After a restart there is no active file again; its job fails, and no other is handed out
+    // until a record has made its file.
+    let mut again = LogState::recover(&mut disk, file_bytes).unwrap();
+    let failed = again.spare_job().expect("no active file");
+    again.spare_done(failed.seq, Err(IoErrno::Io));
+    assert!(again.spare_job().is_none(), "a failed job is not tried again at once");
+    records(&mut again, &mut disk, 1, 3);
+    assert_eq!(again.stats().files_made_waiting, 1);
+    assert!(again.spare_job().is_some(), "half full, after a record made its file");
 }
 
 /// A crash at any operation, the file made ahead included, keeps every answered write.
