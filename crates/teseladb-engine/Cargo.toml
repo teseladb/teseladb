@@ -131,13 +131,6 @@ name = "defect_smp_message_waits_for_quota"
 path = "tests/entry/defect_smp_message_waits_for_quota.rs"
 harness = false
 
-# Runs on one shard with the io_uring backend and a task quota of two seconds, which its main
-# adds to the options.
-[[test]]
-name = "other_work_waits_test"
-path = "tests/entry/other_work_waits_test.rs"
-harness = false
-
 # Runs with the epoll reactor backend, which its main adds to the reactor options.
 [[test]]
 name = "defect_epoll_error_spin"

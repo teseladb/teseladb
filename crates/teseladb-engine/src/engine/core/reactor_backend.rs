@@ -640,12 +640,6 @@ pub trait ReactorBackend {
     fn do_blocking_io(&self) -> bool {
         false
     }
-    /// Whether the kernel has completions the reactor has not taken, when the backend can tell
-    /// without a system call (FR-048); a backend that cannot says `false`, and a task that asks
-    /// goes by the ready tasks and the request to yield.
-    fn completions_wait(&self) -> bool {
-        false
-    }
     /// Called from the signal handler: implementations only touch atomics.
     fn signal_received(&self, signo: i32, siginfo: *mut SiginfoT, ignore: *mut c_void);
     /// Called from the signal handler: implementations only touch atomics.
@@ -3286,15 +3280,6 @@ pub mod uring {
         unsafe { (*(p as *const AtomicU32)).store(v, Ordering::Release) }
     }
 
-    /// Whether the completion ring of `ring` holds entries its owner has not taken: two loads
-    /// and no system call (FR-048).
-    #[must_use]
-    pub fn io_uring_cq_has_entries(ring: &IoUring) -> bool {
-        // SAFETY: `ktail` and `khead` point into the completion ring, mapped while `ring`
-        // lives; the kernel writes the tail and only the ring's thread writes the head.
-        unsafe { load_acquire(ring.cq.ktail) != *ring.cq.khead }
-    }
-
     unsafe fn io_uring_unmap_rings(sq: &mut IoUringSq, cq: &mut IoUringCq) {
         // SAFETY: the rings were mapped by `io_uring_mmap`.
         unsafe {
@@ -4981,9 +4966,6 @@ impl ReactorBackend for ReactorBackendUring {
     fn kernel_events_can_sleep(&self) -> bool {
         // We never need to spin while I/O is in flight.
         true
-    }
-    fn completions_wait(&self) -> bool {
-        uring::io_uring_cq_has_entries(&self._uring)
     }
     fn do_blocking_io(&self) -> bool {
         true

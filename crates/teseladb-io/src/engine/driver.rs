@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teseladb::engine::core::future::{ExceptionPtr, Future};
 use teseladb::engine::core::preempt::need_preempt;
-use teseladb::engine::core::reactor::{other_work_waits, yield_};
+use teseladb::engine::core::reactor::yield_;
 use teseladb::engine::core::temporary_buffer::TemporaryBuffer;
 use teseladb::engine::core::timer::{Clock, SteadyClockType, SteadyTimePoint, Timer};
 use teseladb_raftlog::IoDone;
@@ -260,9 +260,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         let from = Instant::now();
         while self.logic.runnable() {
             self.logic.resume(self.now(), wall_ms());
-            // Its shard's other work first: a task that is ready, a request that came by the
-            // network or the result of a read would wait for the rest of the turn (023 FR-048).
-            if other_work_waits() || !self.inbox.is_empty() || from.elapsed() >= TURN_QUOTA {
+            if need_preempt() || !self.inbox.is_empty() || from.elapsed() >= TURN_QUOTA {
                 break;
             }
         }
