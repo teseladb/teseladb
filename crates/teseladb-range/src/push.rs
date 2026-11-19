@@ -239,6 +239,12 @@ impl MainScan {
             MainScan::Backward(_) => (0, 0, 0),
         }
     }
+
+    /// The entries the scan took from its sources so far, those passed over among them.
+    fn took(&self) -> u64 {
+        let (entries, _, passed) = self.taken();
+        entries + passed
+    }
 }
 
 /// What the scans of the cores took, since the process started (012 FR-015): the entries of
@@ -316,7 +322,8 @@ pub struct ScanState {
     /// The pieces taken so far by [`ScanState::step_pieces`], and their documents.
     pieces: Vec<Piece>,
     piece_docs: usize,
-    /// Whether the last step stopped at its [`SCAN_STEP_ENTRIES`] and not for a block.
+    /// Whether the last step stopped at its documents or its entries ([`SCAN_STEP_DOCUMENTS`],
+    /// [`SCAN_STEP_ENTRIES`]) and not for a block.
     paused: bool,
     /// What rules out the data blocks of the main scan by their zone maps, for a scan whose
     /// reader has a filter (004 FR-039).
@@ -340,13 +347,23 @@ struct Tally {
 /// scans, which made it.
 pub type BlockFilter = std::rc::Rc<dyn Fn(&dyn teseladb_keys::zone::Zones) -> bool>;
 
-/// The most entries one step of a scan in the core looks at: a part of thousands of documents
+/// The most documents one step of a scan in the core gives: a part of thousands of documents
 /// held its shard for milliseconds in one turn (stall reports of the one-node load p25). A step
 /// that reaches it stops with what it has, [`ScanState::paused`], and the next turn goes on.
 /// A step is also the scan's share of its core's turn: at 32 the messages to the core waited a
 /// fifth less, and the parts of aggregations took 63 to 77 % longer with the same CPU (one-node
 /// load p60, 012 FR-030).
-pub const SCAN_STEP_ENTRIES: usize = 128;
+pub const SCAN_STEP_DOCUMENTS: usize = 128;
+
+/// The most entries of its sources one step of a scan in the core takes, the versions its
+/// cursors pass over among them (004 FR-046): what holds the core's turn is what a step reads,
+/// not what it gives (023 FR-044), and a version passed over costs four fifths of one that
+/// goes through the merge, since most of either is reading the entry (profile of run p63). A
+/// step of [`SCAN_STEP_DOCUMENTS`] took 385 entries in the one-node load while every version
+/// went through the merge; with the change metas passed over it took 870 for its 128
+/// documents, the messages to the core waited a fifth longer and the core's ticks came half as
+/// late again (run p63b).
+pub const SCAN_STEP_ENTRIES: u64 = 384;
 
 impl ScanState {
     /// The scan's mark.
@@ -354,8 +371,8 @@ impl ScanState {
         self.read_ts
     }
 
-    /// Whether the last step stopped at [`SCAN_STEP_ENTRIES`]: the scan can go on at once,
-    /// without waiting for a block.
+    /// Whether the last step stopped at its documents or its entries: the scan can go on at
+    /// once, without waiting for a block.
     pub fn paused(&self) -> bool {
         self.paused
     }
@@ -412,6 +429,12 @@ impl ScanState {
             total.fetch_add(n, Ordering::Relaxed);
         }
         self.tally.added = (entries, items, passed);
+    }
+
+    /// Whether a step used its turn up: it went `rounds` times round, one for each document it
+    /// gave at most, or its main scan took its entries since it had taken `begun`.
+    fn spent(&self, begun: u64, rounds: usize) -> bool {
+        rounds == SCAN_STEP_DOCUMENTS || self.main.took() - begun >= SCAN_STEP_ENTRIES
     }
 
     /// Counts a version the main scan decided: a document for the reader, or one that only
@@ -534,13 +557,13 @@ impl ScanState {
         limit: usize,
     ) -> Option<Result<Vec<Piece>, ReadFault>> {
         self.paused = false;
-        let mut entries = 0;
+        let (begun, mut rounds) = (self.main.took(), 0);
         while self.piece_docs < limit {
-            if entries == SCAN_STEP_ENTRIES {
+            if self.spent(begun, rounds) {
                 self.paused = true;
                 return None;
             }
-            entries += 1;
+            rounds += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
                 self.count();
                 return Some(Err(e));
@@ -574,13 +597,13 @@ impl ScanState {
         limit: usize,
     ) -> Option<Result<Vec<Row>, ReadFault>> {
         self.paused = false;
-        let mut entries = 0;
+        let (begun, mut rounds) = (self.main.took(), 0);
         while self.rows.len() < limit {
-            if entries == SCAN_STEP_ENTRIES {
+            if self.spent(begun, rounds) {
                 self.paused = true;
                 return None;
             }
-            entries += 1;
+            rounds += 1;
             if let Err(e) = self.fill_main(lsm, view)? {
                 self.count();
                 return Some(Err(e));

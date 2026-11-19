@@ -5,8 +5,9 @@
 //! through both: the counts tell how much of a scan's work is documents (one-node load p59r:
 //! the parts of aggregations on the cores were 41.5 % of the node's CPU, and no count said what
 //! they read). The scan's cursors pass over the metas before the merge (004 FR-046): they are
-//! counted, and are no entries nor items of the scan. Alone in its program: the counts are the
-//! process's.
+//! counted, and are no entries nor items of the scan. A step of a scan is measured in what it
+//! takes from its sources, the versions passed over among them (023 FR-044). Alone in its
+//! program: the counts are the process's.
 
 mod txn_node;
 
@@ -16,7 +17,9 @@ use teseladb_range::ack::WriteConcern;
 use teseladb_range::command::Put;
 use teseladb_range::host::{Mutation, MutationError, Reply, WriteReq};
 use teseladb_range::mutate::Outcome;
-use teseladb_range::push::{CoreScans, ScanState, TxnView, core_scan_totals};
+use teseladb_range::push::{
+    CoreScans, SCAN_STEP_DOCUMENTS, SCAN_STEP_ENTRIES, ScanState, TxnView, core_scan_totals,
+};
 use txn_node::*;
 
 /// Writes a document and, next to it, the meta of the write.
@@ -68,4 +71,52 @@ fn the_scans_of_the_cores_count_the_documents_and_the_metas_they_go_through() {
     // written twice is an entry of the merge.
     assert_eq!((took.documents, took.metas, took.items), (3, 3, 3), "{took:?}");
     assert_eq!(took.entries, 4, "{took:?}");
+}
+
+/// Steps `scan` to its end: its documents and how many times it stopped at its step.
+fn to_the_end(n: &Node, scan: &mut ScanState) -> (usize, usize) {
+    let (lsm, view) = (n.host.lsm(), TxnView::default());
+    let mut stops = 0;
+    loop {
+        match scan.step(lsm, &view, 10_000) {
+            Some(rows) => return (rows.expect("read").len(), stops),
+            None => {
+                assert!(scan.paused(), "in memory a step only stops at its entries");
+                stops += 1;
+            }
+        }
+    }
+}
+
+/// A step of a scan is its share of its core's turn, and what holds the turn is what the step
+/// takes from its sources, not what it gives (023 FR-044): the versions under each document and
+/// the ones its cursors pass over (004 FR-046) count. Measured in documents alone, a step over
+/// documents rewritten many times took several times the entries of one over documents written
+/// once, and the messages to the core waited a fifth longer (one-node load p63b).
+#[test]
+fn a_step_of_a_scan_stops_at_the_entries_it_takes_from_its_sources() {
+    let mut n = Node::new();
+    let docs = SCAN_STEP_DOCUMENTS - 8;
+    let key = |i: usize| [b"\x01d".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
+    let span: (&[u8], &[u8]) = (b"\x01d", b"\x01e");
+    let (view, mark) = (TxnView::default(), far());
+    // Written once: fewer documents than a step gives, and an entry and a meta for each.
+    for i in 0..docs {
+        write_with_meta(&mut n, &key(i), MAJORITY);
+    }
+    assert!(2 * u64::try_from(docs).unwrap() < SCAN_STEP_ENTRIES);
+    let mut scan = ScanState::new(n.host.lsm(), span, (mark, None), &view, false);
+    assert_eq!(to_the_end(&n, &mut scan), (docs, 0), "one step reads them all");
+    // Rewritten: the same documents, with more versions under them than a step takes.
+    let writes = 1 + 2 * usize::try_from(SCAN_STEP_ENTRIES).unwrap() / docs;
+    for _ in 1..writes {
+        for i in 0..docs {
+            write_with_meta(&mut n, &key(i), MAJORITY);
+        }
+    }
+    let mark = far();
+    let mut scan = ScanState::new(n.host.lsm(), span, (mark, None), &view, false);
+    let (read, stops) = to_the_end(&n, &mut scan);
+    assert_eq!(read, docs, "every document");
+    assert!(stops >= 1, "the step stops at the entries it took, with documents left to give");
 }

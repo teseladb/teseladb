@@ -1594,7 +1594,7 @@ impl RangeHost {
         self.reqs.is_empty()
     }
 
-    /// Whether a scan stopped at its entries ([`crate::push::SCAN_STEP_ENTRIES`]) and goes on
+    /// Whether a scan stopped at its step ([`crate::push::SCAN_STEP_ENTRIES`]) and goes on
     /// at the next [`poll`](RangeHost::poll), without waiting for anything to arrive: the
     /// embedder lets its shard run its other work and polls again at once.
     pub fn runnable(&self) -> bool {
@@ -1942,7 +1942,7 @@ fn crossing(
     }
 }
 
-/// Whether `r` is a scan that stopped at its entries ([`crate::push::SCAN_STEP_ENTRIES`]).
+/// Whether `r` is a scan that stopped at its step ([`crate::push::SCAN_STEP_ENTRIES`]).
 fn paused_scan(r: &Req) -> bool {
     matches!(r, Req::Get(GetReq { state: GetState::Scanning(s), .. }) if s.paused())
 }

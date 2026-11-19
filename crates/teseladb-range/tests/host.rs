@@ -1260,10 +1260,10 @@ fn a_view_from_before_an_answered_write_was_applied_does_not_serve_a_scan_that_b
 fn a_long_scan_in_the_core_stops_after_its_entries_and_goes_on_in_the_next_turns() {
     // A scan the core serves ran to its limit in one turn: parts of aggregations and range scans
     // held their shard 2-11 ms (stall reports of the one-node load p25, 66 % of the quota
-    // violations left). It stops after SCAN_STEP_ENTRIES entries, says it can go on at once
+    // violations left). It stops after SCAN_STEP_DOCUMENTS documents, says it can go on at once
     // (`runnable`), and the next turns finish it with every document.
     let mut n = Node::new();
-    let docs = 3 * teseladb_range::push::SCAN_STEP_ENTRIES + 7;
+    let docs = 3 * teseladb_range::push::SCAN_STEP_DOCUMENTS + 7;
     let key = |i: usize| [b"\x01b".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
     for i in 0..docs {
         n.mutate(&key(i), Box::new(SetKey(key(i), Some(1))), MAJORITY);
@@ -1286,7 +1286,7 @@ fn a_long_scan_in_the_core_stops_after_its_entries_and_goes_on_in_the_next_turns
     // whole poll of the host, until the scan read the rest.
     let mut resumed = 0;
     while n.reply(id).is_none() {
-        assert!(resumed < 3, "a step reads SCAN_STEP_ENTRIES entries");
+        assert!(resumed < 3, "a step reads SCAN_STEP_DOCUMENTS documents");
         n.host.resume_scans(&mut n.core, now);
         n.replies.extend(n.host.take_replies());
         resumed += 1;
