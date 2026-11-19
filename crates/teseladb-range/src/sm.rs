@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{EntryWrite, Kind, Lookup, Lsm, LsmError};
@@ -232,6 +233,11 @@ pub trait RangeState {
     /// is at or below it and every later entry is above it (005 FR-031). Without a default, so a
     /// wrapping state machine hands it on.
     fn applied_mark(&self) -> Hlc;
+    /// The last entry of the range that resolved intents, noted before its versions are written:
+    /// a resolution writes below the marks the range gives by then, so a view that has not
+    /// applied it serves no scan (005 FR-031). Shared with the range's views. Without a default,
+    /// so a wrapping state machine hands it on.
+    fn resolved(&self) -> Arc<AtomicU64>;
     /// The last checksum the log asked for: its entry and mark (FR-014).
     fn checksum_request(&self) -> Option<(u64, Hlc)>;
     /// The range's end as applied, which a split moves (007); `None` for a machine that is no
@@ -278,6 +284,8 @@ pub struct RangeSm {
     txn_mark: u64,
     gc_threshold: Hlc,
     last_mark: Hlc,
+    /// The last entry that resolved intents, noted before its versions are written (005 FR-031).
+    resolved: Arc<AtomicU64>,
     checksum: Option<(u64, Hlc)>,
     /// Born from a split and its `SplitGenesis` not applied when it was opened: its parent and
     /// the parent's `Split`.
@@ -586,6 +594,7 @@ impl RangeSm {
             txn_mark: applied,
             gc_threshold: s.gc,
             last_mark: s.mark,
+            resolved: Arc::default(),
             checksum: None,
             born: s.born,
             from_split: s.from_split,
@@ -1234,6 +1243,10 @@ impl RangeState for RangeSm {
 
     fn applied_mark(&self) -> Hlc {
         self.last_mark
+    }
+
+    fn resolved(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.resolved)
     }
 
     fn counts_dirty(&self) -> bool {

@@ -316,8 +316,9 @@ impl RangeHost {
             if let Some(l) = leader.filter(|l| l.term == m.term) {
                 l.latches.mark_answered(latch);
             }
-            // An intent is no version a read sees, and its transaction commits once it checked
-            // that its intents are applied (008 FR-021): no scan has to see it.
+            // An intent is no version a read sees: no scan has to see it until its transaction
+            // checks that its intents are applied, before it commits (008 FR-021), and the
+            // answer to that check notes them.
             let intents =
                 matches!(&m.work, Work::Txn(op) if matches!(**op, TxnOp::PutIntents { .. }));
             if !intents {
@@ -394,7 +395,7 @@ impl RangeHost {
     /// Notes that the write of entry `index`, which the leader of range `g` in `term` proposed,
     /// is answered to its client (005 FR-031), before the answer leaves: a scan outside the core
     /// that begins from now on reads a view that applied the entry.
-    fn note_answered(&self, g: GroupId, term: u64, index: u64) {
+    pub(super) fn note_answered(&self, g: GroupId, term: u64, index: u64) {
         let leader = self.ranges.get(&g).and_then(|r| r.leader.as_ref());
         if let Some(l) = leader.filter(|l| l.term == term) {
             l.answered.fetch_max(index, Ordering::SeqCst);

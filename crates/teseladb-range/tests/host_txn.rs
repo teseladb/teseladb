@@ -72,6 +72,106 @@ fn intents_answered_in_the_log_do_not_hold_back_a_scan_outside_the_core() {
     assert!(matches!(newest, teseladb_range::view::Newest::No), "{newest:?}");
 }
 
+/// A transaction commits once each range it wrote in answered `CheckIntents` (FR-021), and its
+/// client reads right after the commit. A view published before the intents were applied reads
+/// at a mark below the commit's: a scan outside the core that begins once the check is answered
+/// reads a view that applied them (005 FR-031), where the intent sends it to the core.
+#[test]
+fn a_scan_outside_the_core_that_begins_after_the_check_of_the_intents_reads_a_view_with_them() {
+    let mut n = Node::new();
+    let base = n.write(A, b"v1");
+    let w1 = WriteConcern { w: W::Nodes(1), j: false };
+    let (now, wall) = (n.now, n.wall());
+    let op = intents(T1, base, &[(B, put(b"x"))]);
+    let id = n.host.txn(&mut n.core, TxnReq { g: G, op, wc: w1 }, now, wall);
+    n.host.poll(&mut n.core, now, wall);
+    let answered = n.host.take_replies();
+    assert!(answered.iter().any(|(r, a)| *r == id && a.is_ok()), "in the log: {answered:?}");
+    let before = n.host.views().get(G).expect("the view of a range this node leads");
+    assert!(before.holds(&before.begin()), "its transaction has not checked them yet");
+    let check = TxnOp::CheckIntents { txn: T1, keys: vec![B.to_vec()] };
+    assert!(matches!(n.txn(check), Ok(Reply::Intents { .. })));
+    assert!(!before.holds(&before.begin()), "published before the intents were applied");
+    let after = n.host.views().get(G).expect("the view of a range this node leads");
+    assert!(after.holds(&after.begin()));
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let read = after.scan(&mut cache, (A, END), part, || n.now, ReadConcern::Local, |_| false);
+    assert!(read.is_none(), "the intent sends the scan to the core: {read:?}");
+}
+
+/// A committed resolution of `keys` of transaction `txn` at mark `commit_ts`.
+fn committed(txn: TxnId, commit_ts: Hlc, keys: &[&[u8]]) -> TxnOp {
+    let keys = keys.iter().map(|k| k.to_vec()).collect();
+    TxnOp::ResolveIntents { txn, status: TxnStatus::Committed, commit_ts, keys }
+}
+
+/// A resolution takes the intent away and writes the committed version at the commit's mark,
+/// which is below the marks the range gives by then and may be above the mark of a view
+/// published before it (FR-005). That view would read below the commit without finding the
+/// intent: it serves no scan once the resolution starts to be applied, not even one that began
+/// before (005 FR-031): its transaction may have committed before the scan began. The view
+/// published after the resolution reads above the commit.
+#[test]
+fn a_view_published_before_a_resolution_serves_no_scan_after_it() {
+    let mut n = Node::new();
+    n.write(A, b"v1");
+    let at = intents_mark(n.txn(intents(T1, far(), &[(B, put(b"x"))])));
+    let before = n.host.views().get(G).expect("the view of a range this node leads");
+    let (then, begun) = (n.now, before.begin());
+    // Committed above the intent's mark, the view's: another range's intent was written later.
+    let commit = Hlc { physical: at.physical, logical: at.logical + 1 };
+    intents_mark(n.txn(committed(T1, commit, &[B])));
+    let part = Part { docs: 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let most = (part, &begun);
+    let read =
+        before.scan_begun(&mut cache, (A, END), most, || then, ReadConcern::Local, |_| false);
+    assert!(read.is_none(), "below the commit and without the intent: {read:?}");
+    let after = n.host.views().get(G).expect("the view of a range this node leads");
+    let read = after
+        .scan(&mut cache, (A, END), part, || n.now, ReadConcern::Local, |_| false)
+        .expect("served outside");
+    let docs = vec![(A.to_vec(), (DOC, b"v1".to_vec())), (B.to_vec(), (DOC, b"x".to_vec()))];
+    assert_eq!(read.rows, docs);
+}
+
+/// A scan outside the core reads the memtable the core writes to. A resolution applied while
+/// the scan runs retracts an intent ahead of it and writes a version the scan's mark may not
+/// reach: the scan that ends after a resolution began gives nothing and goes to the core (005
+/// FR-031).
+#[test]
+fn a_scan_outside_the_core_gives_nothing_when_a_resolution_was_applied_while_it_ran() {
+    let mut n = Node::new();
+    let docs = teseladb_range::view::MATCH_BATCH + 6;
+    for k in 0..docs {
+        n.write(format!("\x01k{k:03}").as_bytes(), b"v");
+    }
+    let last: &[u8] = b"\x01z";
+    let at = intents_mark(n.txn(intents(T1, far(), &[(last, put(b"x"))])));
+    let view = n.host.views().get(G).expect("the view of a range this node leads");
+    let (then, begun) = (n.now, view.begin());
+    let commit = Hlc { physical: at.physical, logical: at.logical + 1 };
+    let part = Part { docs: docs + 10, backward: false, blocks: 64 };
+    let mut cache = ViewCache::default();
+    let mut resolved = false;
+    let read = view.scan_begun_pausing(
+        &mut cache,
+        (START, END),
+        (part, &begun),
+        || then,
+        ReadConcern::Local,
+        |_| false,
+        || {
+            if !std::mem::replace(&mut resolved, true) {
+                intents_mark(n.txn(committed(T1, commit, &[last])));
+            }
+        },
+    );
+    assert!(resolved, "the scan paused");
+    assert!(read.is_none(), "it read past a key whose intent went meanwhile: {read:?}");
+}
+
 /// Before its commit a coordinator asks each range whether its intents were applied (FR-021,
 /// D-160): the keys holding them answer with their highest mark; a key without one of the
 /// transaction's intents (a change of leader lost it, or another transaction's is there) answers

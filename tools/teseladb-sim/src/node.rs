@@ -268,6 +268,13 @@ impl RangeState for NodeSm {
         }
     }
 
+    fn resolved(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        match self {
+            NodeSm::Range(sm) => sm.resolved(),
+            NodeSm::Group0(_) | NodeSm::Kv(_) | NodeSm::Registered(_) => std::sync::Arc::default(),
+        }
+    }
+
     fn txn_mark(&self) -> u64 {
         match self {
             NodeSm::Range(sm) => sm.txn_mark(),

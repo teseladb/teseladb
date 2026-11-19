@@ -1494,10 +1494,23 @@ impl Scan {
             took(Took::Decided, from);
             let c = &cursors[i];
             let kind = c.kind();
+            // A retraction met for the first time in a memtable: the resolution that left it
+            // may have written the key's version at the commit's mark, at or below the read's,
+            // after this cursor took its place there.
+            let resolved_since =
+                kind == Kind::Retract && matches!(c, Cursor::Mem(_)) && !st.retracted.contains(&ts);
             let seen = match see(ts, kind, || c.stored(), &mut st.retracted, &mut st.found) {
                 Ok(seen) => seen,
                 Err(e) => return ColumnStep::Step(Step::Failed(e)),
             };
+            if resolved_since {
+                // The cursor seeks the key again and walks the versions there are now: the
+                // committed one first, when the read sees it; otherwise this retraction again,
+                // which is passed over as any version it retracts.
+                took_one(Took::Retracted);
+                cursors[i].seek(entry::internal_key(&st.key, read));
+                continue;
+            }
             match seen {
                 Seen::Next => took_one(Took::Retracted),
                 Seen::Answer if kind == Kind::Delete => took_one(Took::Deleted),

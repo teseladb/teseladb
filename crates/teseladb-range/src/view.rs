@@ -98,6 +98,9 @@ pub struct RangeView {
     /// The highest entry of the range's log whose write was answered to its client, as its
     /// leader notes it before the answer leaves (FR-031).
     answered: Arc<AtomicU64>,
+    /// The last entry of the range that resolved intents, as its state machine notes it before
+    /// it writes the entry's versions (FR-031).
+    resolved: Arc<AtomicU64>,
     held: Arc<AtomicU32>,
     keys: Arc<KeySlots>,
     spans: Arc<SpanKeys>,
@@ -162,6 +165,7 @@ pub(crate) struct ViewParts {
     pub(crate) applied: Hlc,
     pub(crate) applied_index: u64,
     pub(crate) answered: Arc<AtomicU64>,
+    pub(crate) resolved: Arc<AtomicU64>,
     pub(crate) withdrawn: Arc<AtomicBool>,
 }
 
@@ -177,6 +181,7 @@ impl RangeView {
             applied: p.applied,
             applied_index: p.applied_index,
             answered: p.answered,
+            resolved: p.resolved,
             held: p.held,
             keys: p.keys,
             spans: p.spans,
@@ -306,7 +311,7 @@ impl RangeView {
 
 /// Why reads outside the core went back to it, since the process started, by [`Decline`].
 static DECLINES: [AtomicU64; DECLINE_REASONS] = [const { AtomicU64::new(0) }; DECLINE_REASONS];
-const DECLINE_REASONS: usize = 7;
+const DECLINE_REASONS: usize = 8;
 
 /// Why a read outside the core went back to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +332,10 @@ pub enum Decline {
     NoView,
     /// The node's routing table has no range for the key.
     Unrouted,
+    /// A scan of a view that has not applied a resolution of intents the range began to apply,
+    /// before the scan or while it ran: it may read below the commit without finding the
+    /// intent. A later view holds the resolution.
+    Resolved,
 }
 
 impl Decline {
@@ -339,6 +348,7 @@ impl Decline {
         Decline::Early,
         Decline::NoView,
         Decline::Unrouted,
+        Decline::Resolved,
     ];
 
     /// Its label in the metrics.
@@ -351,6 +361,7 @@ impl Decline {
             Decline::Early => "early",
             Decline::NoView => "no_view",
             Decline::Unrouted => "unrouted",
+            Decline::Resolved => "resolved",
         }
     }
 
@@ -609,7 +620,27 @@ impl RangeView {
                 }
             }
         }
-        Some(Scanned { ts, rows, next })
+        self.unless_resolved(Scanned { ts, rows, next })
+    }
+
+    /// Whether the range began to apply a resolution of intents the view has not applied
+    /// (FR-031). A resolution retracts an intent and writes its version at the commit's mark,
+    /// below the marks the range gives by then and maybe above the view's: read through this
+    /// view, the key would show neither, and its transaction may have committed before the scan
+    /// began. The state machine notes the entry before it writes, so a scan that reads any of
+    /// it finds the note when it ends.
+    fn lacks_resolution(&self) -> bool {
+        self.resolved.load(Ordering::SeqCst) > self.applied_index
+    }
+
+    /// What a scan of the view read, unless the range began to apply a resolution of intents
+    /// meanwhile: the scan then goes to the core.
+    fn unless_resolved<T>(&self, read: T) -> Option<T> {
+        if self.lacks_resolution() {
+            Decline::Resolved.count();
+            return None;
+        }
+        Some(read)
     }
 
     /// The mark a scan of `[start, end)` that began as `begun` reads at (FR-031), or `None` when
@@ -635,6 +666,10 @@ impl RangeView {
         // A write its client had the answer of before the scan began, which the view lacks.
         if !self.holds(begun) {
             Decline::Early.count();
+            return None;
+        }
+        if self.lacks_resolution() {
+            Decline::Resolved.count();
             return None;
         }
         let ts = self.applied;
@@ -719,7 +754,7 @@ impl RangeView {
                     // The scan goes on after the last document it examined.
                     let last = left_out.as_ref().or(out.rows.last().map(|(k, _)| k));
                     out.next = last.map(|k| [k.as_slice(), &[0]].concat());
-                    return Some(out);
+                    return self.unless_resolved(out);
                 }
                 SharedStep::Need(need) if !blocks.exhausted() && supply(&need) => blocks.read += 1,
                 SharedStep::Need(_) | SharedStep::Failed(_) => {
@@ -731,7 +766,7 @@ impl RangeView {
         if !batch.is_empty() {
             keep_batch(&mut batch, &mut keep, &mut out);
         }
-        Some(out)
+        self.unless_resolved(out)
     }
 
     /// As [`RangeView::scan_matching_begun`], for an aggregation's part that takes columns (010
@@ -808,7 +843,8 @@ impl RangeView {
                         Piece::Columns(c) => c.last.as_slice(),
                     }));
                     let next = last.map(|k| [k, &[0]].concat());
-                    return Some(Pieces { ts, pieces, examined: out.examined, next });
+                    let read = Pieces { ts, pieces, examined: out.examined, next };
+                    return self.unless_resolved(read);
                 }
                 SharedColumnStep::Step(SharedStep::Need(need))
                     if !blocks.exhausted() && supply(&need) =>
@@ -824,7 +860,7 @@ impl RangeView {
         if !batch.is_empty() {
             flush(&mut batch, &mut out, &mut pieces);
         }
-        Some(Pieces { ts, pieces, examined: out.examined, next: out.next })
+        self.unless_resolved(Pieces { ts, pieces, examined: out.examined, next: out.next })
     }
 
     /// Whether a write holds a key of `read` or a write with a key of it was released since the

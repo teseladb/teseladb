@@ -177,6 +177,9 @@ impl RangeSm {
         }
         // The counter never goes below zero: a delta the leader got wrong cannot wrap it.
         let live = self.live.saturating_add_signed(live_delta);
+        // Before the versions: a scan outside the core that reads any of them, or misses an
+        // intent they retract, finds the note when it ends (005 FR-031).
+        self.resolved.fetch_max(ctx.index, std::sync::atomic::Ordering::SeqCst);
         self.write_txn_entry(versions, (Some(live), docs), ctx)
     }
 }

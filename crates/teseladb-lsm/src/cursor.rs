@@ -34,7 +34,8 @@ pub(crate) enum Pos {
 /// to the next without searching it from the root, reading the key where it is (FR-038). It
 /// sees the versions the memtable had when it last sought, so the active memtable may take
 /// writes or be frozen while it is open: a version written after that has a mark above the
-/// read's.
+/// read's, but for the one a resolution writes at its commit's mark, and the scan seeks again
+/// when it meets the retraction the resolution leaves (008 FR-005).
 pub(crate) struct MemCursor {
     mem: Arc<Memtable>,
     place: MemPlace,

@@ -1653,6 +1653,7 @@ impl RangeHost {
                 applied: core.state_machine(*g).map_or(ZERO, RangeState::applied_mark),
                 applied_index: core.state_machine(*g).map_or(0, StateMachine::applied_index),
                 answered: Arc::clone(&l.answered),
+                resolved: core.state_machine(*g).map(RangeState::resolved).unwrap_or_default(),
                 withdrawn: l.standing.flag(),
             };
             let view = crate::view::RangeView::new(parts, shared.clone(), self.clock.clone());

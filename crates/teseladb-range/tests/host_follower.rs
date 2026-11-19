@@ -160,6 +160,9 @@ fn a_state_without_closed_marks_has_none() {
         fn applied_mark(&self) -> Hlc {
             Hlc { physical: 0, logical: 0 }
         }
+        fn resolved(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+            std::sync::Arc::default()
+        }
         fn checksum_request(&self) -> Option<(u64, Hlc)> {
             None
         }

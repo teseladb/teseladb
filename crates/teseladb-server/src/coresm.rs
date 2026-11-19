@@ -98,6 +98,10 @@ impl RangeState for CoreSm {
         self.range().map_or(ZERO, RangeState::applied_mark)
     }
 
+    fn resolved(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.range().map(RangeState::resolved).unwrap_or_default()
+    }
+
     fn counts_dirty(&self) -> bool {
         self.range().is_some_and(RangeState::counts_dirty)
     }

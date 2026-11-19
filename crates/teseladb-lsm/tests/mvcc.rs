@@ -167,6 +167,35 @@ fn intents_show_up_and_resolve() {
     assert_eq!(get(&mut lsm, &mut disk, &v, b"k", ts(61, 0)), None);
 }
 
+/// A resolution writes its version at the commit's mark, at or below the marks of the scans
+/// already open, and retracts the intent where it stands (008 FR-005). A scan that stopped
+/// before the key and goes on after the resolution gives the committed version: it does not
+/// take the retraction for the key's only version.
+#[test]
+fn a_scan_open_before_a_resolution_gives_the_version_it_wrote() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    for (i, key) in [b"a", b"b", b"c"].into_iter().enumerate() {
+        lsm.put(G, 1 + i as u64, key, ts(10, 0), b"v").unwrap();
+    }
+    lsm.put_intent(G, 4, b"d", ts(20, 0), b"txn").unwrap();
+    let v = lsm.view();
+    let mut s = v.scan(b"a", b"z", ts(50, 0));
+    let mut next = |lsm: &mut Lsm| match s.next(lsm) {
+        Step::Item(i) => Some((i.key, i.ts, i.kind)),
+        Step::Done => None,
+        Step::Miss(_) => panic!("everything is in the memtable"),
+        Step::Failed(e) => panic!("{e}"),
+    };
+    assert_eq!(next(&mut lsm), Some((b"a".to_vec(), ts(10, 0), Kind::Put)));
+    let commit = Commit { ts: ts(30, 0), kind: Kind::Put, value: b"done" };
+    lsm.resolve_intent(G, 5, b"d", ts(20, 0), Some(commit)).unwrap();
+    assert_eq!(next(&mut lsm), Some((b"b".to_vec(), ts(10, 0), Kind::Put)));
+    assert_eq!(next(&mut lsm), Some((b"c".to_vec(), ts(10, 0), Kind::Put)));
+    assert_eq!(next(&mut lsm), Some((b"d".to_vec(), ts(30, 0), Kind::Put)));
+    assert_eq!(next(&mut lsm), None);
+}
+
 #[test]
 fn a_range_tombstone_hides_what_it_covers() {
     let mut disk = MemDisk::new();

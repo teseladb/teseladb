@@ -598,6 +598,15 @@ impl RangeHost {
         }
         if let TxnOp::CheckIntents { txn, .. } = **op {
             let answer = held_intents(txn, &versions);
+            // Its transaction commits next, and a read that begins after the commit has to see
+            // it: from now on a scan outside the core reads a view that applied these intents
+            // (005 FR-031), where they send it to the core. The view of before reads at a mark
+            // below the commit's.
+            if answer.is_ok()
+                && let Some(applied) = core.state_machine(m.g).map(StateMachine::applied_index)
+            {
+                self.note_answered(m.g, m.term, applied);
+            }
             self.release(m.g, m.term, latch);
             self.reply(id, answer);
             return true;
