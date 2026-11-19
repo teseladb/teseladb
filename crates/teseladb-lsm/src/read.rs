@@ -852,13 +852,16 @@ fn goes_before(cursors: &[Cursor], a: usize, b: usize) -> bool {
 }
 
 /// Whether a filtered scan passes over data block `i` of `table` without reading it (FR-039):
-/// its zones exist and `prune` rules them out, and no source after it in the order of precedence
-/// may hold a key of the block. `older` are those sources' cursors, and `asleep(j)` says that the
+/// its zones exist and `prune` rules them out, and each source after it in the order of
+/// precedence either may hold no key of the block or has every block over the block's span
+/// ruled out by its zones too. `older` are those sources' cursors, and `asleep(j)` says that the
 /// `j`-th of them is a history file the read keeps closed, which counts only at or above its
 /// file's highest mark: below it, a version of the file above the read wakes that history file
 /// at its key (FR-031), and a block passed over would never wake it. A newer version elsewhere
 /// hides the block's versions anyway; an older one would show through once they are passed
-/// over, and could match where the block's newer version, or its deletion, does not.
+/// over, and could match where the block's newer version, or its deletion, does not. With the
+/// older source's blocks ruled out as well, no version of those keys matches there, and the one
+/// that shows through is refused all the same.
 fn skippable(
     table: &Table,
     i: usize,
@@ -874,7 +877,7 @@ fn skippable(
     older.iter().enumerate().all(|(j, c)| match c {
         Cursor::Table { table: t, data, .. } => {
             let closed = asleep(j) && data.as_ref().is_none_or(|f| read >= f.props.max_ts);
-            closed || !t.may_hold(lo, hi)
+            closed || !t.may_hold(lo, hi) || t.ruled_out_over(lo, hi, prune)
         }
         Cursor::Mem(_) => true,
     })
