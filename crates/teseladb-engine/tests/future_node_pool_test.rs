@@ -3,7 +3,7 @@
 //! allocator when the thread exits.
 //!
 //! A build with `--cfg engine_default_allocator` (the debug and sanitizer builds, as
-//! `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) allocates through the system allocator, which, unlike the
+//! the original's default-allocator build) allocates through the system allocator, which, unlike the
 //! engine's per-shard memory, outlives the thread: blocks still cached when a thread exits
 //! would leak (LeakSanitizer reported them after every engine that ran on a test thread).
 //! The test counts the live bytes of the system allocator around a thread that leaves many

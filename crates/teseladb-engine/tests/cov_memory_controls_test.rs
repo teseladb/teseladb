@@ -50,7 +50,7 @@ engine_thread_test_case!(byte_allocator_and_guards, {
 
     // With abort-on-failure on, a guard keeps a failed allocation from aborting. The system
     // allocator of a `--cfg engine_default_allocator` build never aborts and counts no
-    // failure (as with ANOTHERPRODUCT_DEFAULT_ALLOCATOR).
+    // failure (as with the original's default-allocator build).
     let engine_allocator = cfg!(not(engine_default_allocator));
     let was = is_abort_on_allocation_failure();
     #[allow(deprecated)]
@@ -229,7 +229,7 @@ engine_thread_test_case!(heap_profiling_tracks_every_kind_of_sampled_block, {
 
 // The page arithmetic and the direct large allocations belong to the engine's own allocator:
 // a build with `--cfg engine_default_allocator` (the debug and sanitizer builds, as
-// `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) has none of them.
+// the original's default-allocator build) has none of them.
 #[cfg(not(engine_default_allocator))]
 engine_thread_test_case!(page_arithmetic_and_large_allocations, {
     assert!(memory::is_page_aligned(0));

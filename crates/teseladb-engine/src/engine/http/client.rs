@@ -864,7 +864,7 @@ pub mod experimental {
             let f = me.set_maximum_connections_impl(nr);
             // A raised limit returns a ready future, as client::set_maximum_connections()
             // does: a continuation would make it pending wherever ready futures do not run
-            // their continuations inline (always under `engine_debug`, as ANOTHERPRODUCT_DEBUG).
+            // their continuations inline (always under `engine_debug`, as the original's debug build).
             if f.available() {
                 drop(pending);
                 return f;

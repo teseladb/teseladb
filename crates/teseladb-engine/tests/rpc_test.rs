@@ -1713,7 +1713,7 @@ teseladb::engine_test_case!(test_lz4_fragmented_compressor, {
     teseladb::engine::core::thread::async_(|| test_compressor(|| Box::new(Lz4FragmentedCompressor)))
 });
 
-/// The stack of an engine thread, where the RPC compressors run (`anotherproduct::thread`'s 128 KiB).
+/// The stack of an engine thread, where the RPC compressors run (the original thread's 128 KiB).
 const ENGINE_THREAD_STACK: usize = 128 * 1024;
 
 // The LZ4 block compressor, as the RPC frame compressor calls it, fits the stack of an engine

@@ -5,7 +5,7 @@
 # engine are Linux only (D-177), and io_uring above all runs here. The tests are built and run
 # inside a container for `<arch>-unknown-linux-gnu`, the target of the release binaries (023 R10):
 # the engine is tested and measured with glibc. The image (`TESELADB_LINUX_IMAGE`, by default
-# `anotherproduct-rs-bench:1.98.0`) has the pinned Rust toolchain, glibc and the libraries the engine's
+# `teseladb-linux-test:1.98.0`) has the pinned Rust toolchain, glibc and the libraries the engine's
 # battery links; the build goes to the volume `TESELADB_LINUX_VOLUME` (default
 # `teseladb-linux-target`) under `TESELADB_LINUX_TARGET_DIR`, and the crates come from the host's
 # Cargo registry (offline). `TESELADB_LINUX_CPUS` pins the container to a cpuset, and
@@ -59,7 +59,7 @@ case $(uname -m) in
   arm64 | aarch64) TARGET=aarch64-unknown-linux-gnu ;;
   *) TARGET=x86_64-unknown-linux-gnu ;;
 esac
-IMAGE=${TESELADB_LINUX_IMAGE:-anotherproduct-rs-bench:1.98.0}
+IMAGE=${TESELADB_LINUX_IMAGE:-teseladb-linux-test:1.98.0}
 VOLUME=${TESELADB_LINUX_VOLUME:-teseladb-linux-target}
 TARGET_DIR=${TESELADB_LINUX_TARGET_DIR:-/target/test-linux}
 # The room a build of tests wants on the volume's disk, in GiB: with less, the executables of

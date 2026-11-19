@@ -3,7 +3,7 @@
 //! epoll backend (where datagram sends and receives are system calls made at once): a UDP or
 //! TCP socket that cannot be created, a UDP send refused as it is made, UDP receives and TCP
 //! reads that fail. A local name server (a plain thread) answers `ok.test` with 10.1.2.3 over
-//! UDP and TCP. As in the reference (AnotherProduct 25.05.0, `src/net/dns.cc`: the socket callbacks
+//! UDP and TCP. As in the reference (the C++ original 25.05.0, `src/net/dns.cc`: the socket callbacks
 //! give c-ares `-1` with the call's errno), the lookup fails with a DNS error, and once the
 //! faults stop the same resolver answers.
 #![cfg(all(target_os = "linux", feature = "dns"))]

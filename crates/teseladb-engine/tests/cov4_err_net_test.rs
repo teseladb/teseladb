@@ -4,7 +4,7 @@
 //! `accept` running out of descriptors, `shutdown` failing when a connection's streams close,
 //! datagram sockets whose options cannot be set, datagram sends and receives that fail, and
 //! the route table that cannot be read when an IPv6 link-local address needs its scope. Each
-//! case checks the outcome of the reference engine (AnotherProduct 25.05.0, `src/net/posix-stack.cc`,
+//! case checks the outcome of the reference engine (the C++ original 25.05.0, `src/net/posix-stack.cc`,
 //! `src/core/reactor.cc`): the error the operation fails with, and that the stack goes on.
 //! The data path cases run on the epoll backend, where reads and writes are system calls (the
 //! io_uring backend hands them to its ring).

@@ -7,7 +7,7 @@
 //! timer set was not empty. A timer cancelled while it runs leaves the set empty but its
 //! "next timeout" set, so the set believes the descriptor is armed and does not arm it for
 //! the next timer, which then never fires. The fix of the upstream change "timer: Enable
-//! highres timer based on next timeout value" (anotherproduct#3013): re-arm from the next timeout.
+//! highres timer based on next timeout value" (issue 3013 of the original): re-arm from the next timeout.
 //! The test is the upstream regression test `test_highres_periodic_cancel_in_callback`.
 
 use std::cell::Cell;

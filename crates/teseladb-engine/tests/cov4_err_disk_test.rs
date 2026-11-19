@@ -6,7 +6,7 @@
 //! fail (`close` of read-only and read-write files, `ftruncate` when an append-challenged file
 //! trims to its logical size on flush and on close, `fallocate` without zero ranges, `lseek`),
 //! plus an output stream whose write fails. Each case checks the outcome the reference engine
-//! (AnotherProduct 25.05.0, `src/core/reactor_backend.cc`, `src/core/file.cc`, `src/core/fstream.cc`)
+//! (the C++ original 25.05.0, `src/core/reactor_backend.cc`, `src/core/file.cc`, `src/core/fstream.cc`)
 //! gives: the error each request completes with, the fallback to another backend, or the exit.
 #![cfg(target_os = "linux")]
 // The DMA reads and writes are unsafe engine interfaces, as are the matchers that read the

@@ -1660,7 +1660,7 @@ where
         let func = ManuallyDrop::new(func);
         let wrapper = ManuallyDrop::new(wrapper);
         let sg = current_scheduling_group();
-        // Built in place on the heap, field by field (as anotherproduct and async-task do), so the
+        // Built in place on the heap, field by field (as other task runtimes do), so the
         // function object is written once and not built on the stack and copied.
         let mut b = crate::engine::core::memory::new_uninit_box::<Self>();
         let c = b.as_mut_ptr();

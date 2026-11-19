@@ -6352,7 +6352,7 @@ impl Reactor {
                     // timer is queued: a timer cancelled while it ran leaves the set empty
                     // with its next timeout set, and the set would then take the descriptor
                     // for armed and not arm it for the next timer (upstream "timer: Enable
-                    // highres timer based on next timeout value", anotherproduct#3013).
+                    // highres timer based on next timeout value", issue 3013 of the original).
                     if !(*this)._timers.next_timeout_is_max() {
                         let next = (*this)._timers.get_next_timeout();
                         (*this).enable_timer(next);

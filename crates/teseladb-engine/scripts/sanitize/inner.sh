@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs inside anotherproduct-rs-bench:1.98.0. Usage: inner.sh MODE build|run [filter-regex]
+# Runs inside the Linux test image (teseladb-linux-test:1.98.0). Usage: inner.sh MODE build|run [filter-regex]
 #   MODE dev   : dev profile (debug assertions, overflow checks), default cfgs, stable 1.98
 #   MODE dbg   : dev profile + the C++ Debug-mode cfg set (engine_debug, default allocator, shuffle,
 #                debug shared_ptr/promise, stack guards, type-erase-more), stable 1.98

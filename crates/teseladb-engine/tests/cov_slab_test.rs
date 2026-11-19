@@ -314,7 +314,7 @@ engine_thread_test_case!(slab_metrics_count_operations_and_refuse_a_second_slab,
 });
 
 // The engine allocator reclaims under memory pressure; the system allocator of a
-// `--cfg engine_default_allocator` build has no reclaim (nor has ANOTHERPRODUCT_DEFAULT_ALLOCATOR).
+// `--cfg engine_default_allocator` build has no reclaim (nor has the original's default-allocator build).
 #[cfg(not(engine_default_allocator))]
 thread_local! {
     /// Asynchronous reclaim rounds handed to the test's reclaim hook.

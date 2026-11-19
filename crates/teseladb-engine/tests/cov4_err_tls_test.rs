@@ -2,7 +2,7 @@
 //! hold every kind gnutls reports (DNS name, e-mail, URI, IPv4 and IPv6 addresses, other name
 //! and directory name), read by the server with and without a filter of kinds, with the
 //! distinguished names of both ends. The certificates are made with openssl in a temporary
-//! directory. The values are those the reference engine (AnotherProduct 25.05.0, `src/net/tls.cc`,
+//! directory. The values are those the reference engine (the C++ original 25.05.0, `src/net/tls.cc`,
 //! `get_alt_name_information`) returns from the same gnutls calls: strings without their
 //! trailing NUL, addresses as `inet_address`, and the kinds gnutls does not name skipped.
 #![cfg(all(target_os = "linux", feature = "tls"))]

@@ -38,7 +38,7 @@ LINUX_CRATES=(teseladb-engine teseladb-sys teseladb-io teseladb-server teseladb-
 # The engine's package: its test binaries run once per reactor backend.
 ENGINE=teseladb
 ENGINE_BACKENDS=${TESELADB_COV_ENGINE_BACKENDS:-io_uring linux-aio epoll}
-LINUX_IMAGE=${TESELADB_LINUX_IMAGE:-anotherproduct-rs-bench:1.98.0}
+LINUX_IMAGE=${TESELADB_LINUX_IMAGE:-teseladb-linux-test:1.98.0}
 LINUX_VOLUME=${TESELADB_LINUX_VOLUME:-teseladb-linux-target}
 # The engine's reactors run linux-aio with many contexts (as its own coverage runs set it).
 AIO_MAX_NR=1048576

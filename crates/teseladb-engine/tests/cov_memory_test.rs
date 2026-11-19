@@ -4,7 +4,7 @@
 //! `malloc` family entry points, and cross-shard frees.
 //!
 //! They test the engine's own allocator, so a build with `--cfg engine_default_allocator`
-//! (the debug and sanitizer builds, as `ANOTHERPRODUCT_DEFAULT_ALLOCATOR`) leaves them out.
+//! (the debug and sanitizer builds, as the original's default-allocator build) leaves them out.
 #![cfg(all(target_os = "linux", not(engine_default_allocator)))]
 // This file calls unsafe engine interfaces directly; every `unsafe` block states why it is
 // sound in a `// SAFETY:` comment.
