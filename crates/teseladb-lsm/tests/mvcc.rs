@@ -196,6 +196,76 @@ fn a_scan_open_before_a_resolution_gives_the_version_it_wrote() {
     assert_eq!(next(&mut lsm), None);
 }
 
+/// Every item of `s` with its kind, and what the scan counted.
+fn drain(
+    mut s: teseladb_lsm::Scan,
+    lsm: &mut Lsm,
+    disk: &mut MemDisk,
+) -> (Vec<(Vec<u8>, Kind)>, teseladb_lsm::ScanCounts) {
+    let mut items = Vec::new();
+    loop {
+        match s.next(lsm) {
+            Step::Item(i) => items.push((i.key, i.kind)),
+            Step::Miss(_) => {
+                lsm.run_io(disk, Nanos::ZERO);
+            }
+            Step::Done => return (items, s.counts()),
+            Step::Failed(e) => panic!("{e}"),
+        }
+    }
+}
+
+/// A scan of documents asks its cursors to pass over the versions that only serve the history
+/// before they reach the merge (FR-046): a document's change meta and its older versions in
+/// the sources underneath cost a step of their cursor, and the scan counts them apart from the
+/// entries it merges. An intent on a meta's key still comes: its reader decides it.
+#[test]
+fn a_scan_that_passes_over_history_values_gives_the_documents_and_counts_the_rest() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let (doc, meta) = (teseladb_lsm::DOCUMENT_VALUE, teseladb_lsm::HISTORY_VALUE);
+    // `a` and its meta, written twice: once in a file and once in the memtable.
+    lsm.put(G, 1, b"a", ts(10, 0), &[doc, 1]).unwrap();
+    lsm.put(G, 2, b"a\0m", ts(10, 0), &[meta, 1]).unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    lsm.put(G, 3, b"a", ts(20, 0), &[doc, 2]).unwrap();
+    lsm.put(G, 4, b"a\0m", ts(20, 0), &[meta, 2]).unwrap();
+    lsm.put(G, 5, b"b", ts(20, 0), &[doc, 3]).unwrap();
+    lsm.put(G, 6, b"b\0m", ts(20, 0), &[meta, 3]).unwrap();
+    let keys = |items: &[(Vec<u8>, Kind)]| -> Vec<Vec<u8>> {
+        items.iter().map(|(k, _)| k.clone()).collect()
+    };
+    // Without the request a scan gives them, as a scan by time does: four items, six entries.
+    let v = lsm.view();
+    let (all, counted) = drain(v.scan(b"a", b"z", ts(50, 0)), &mut lsm, &mut disk);
+    let every: [&[u8]; 4] = [b"a", b"a\0m", b"b", b"b\0m"];
+    assert_eq!(keys(&all), every);
+    assert_eq!((counted.entries, counted.passed), (6, 0));
+    // With it: the documents, and the three versions of the metas passed over.
+    let s = v.scan(b"a", b"z", ts(50, 0)).passing_history();
+    let (docs, counted) = drain(s, &mut lsm, &mut disk);
+    let two: [&[u8]; 2] = [b"a", b"b"];
+    assert_eq!(keys(&docs), two);
+    assert_eq!((counted.entries, counted.items, counted.passed), (3, 2, 3));
+    // A scan that goes on right after `a` starts at its meta.
+    let s = v.scan(b"a\0", b"z", ts(50, 0)).passing_history();
+    let (rest, _) = drain(s, &mut lsm, &mut disk);
+    let one: [&[u8]; 1] = [b"b"];
+    assert_eq!(keys(&rest), one);
+    // A scan whose last entries are metas ends without them.
+    let s = v.scan(b"b\0", b"z", ts(50, 0)).passing_history();
+    assert!(drain(s, &mut lsm, &mut disk).0.is_empty());
+    // An intent on a meta's key is no history value yet: the scan gives it.
+    lsm.put_intent(G, 7, b"b\0m", ts(30, 0), b"txn").unwrap();
+    let s = lsm.view().scan(b"a", b"z", ts(50, 0)).passing_history();
+    let (with_intent, _) = drain(s, &mut lsm, &mut disk);
+    let kinds: Vec<Kind> = with_intent.iter().map(|(_, k)| *k).collect();
+    let three: [&[u8]; 3] = [b"a", b"b", b"b\0m"];
+    assert_eq!(keys(&with_intent), three);
+    assert_eq!(kinds, [Kind::Put, Kind::Put, Kind::Intent]);
+}
+
 #[test]
 fn a_range_tombstone_hides_what_it_covers() {
     let mut disk = MemDisk::new();

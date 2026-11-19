@@ -4,7 +4,9 @@
 //! description keeps a change meta next to it (014, D-114), and a scan of documents goes
 //! through both: the counts tell how much of a scan's work is documents (one-node load p59r:
 //! the parts of aggregations on the cores were 41.5 % of the node's CPU, and no count said what
-//! they read). Alone in its program: the counts are the process's.
+//! they read). The scan's cursors pass over the metas before the merge (004 FR-046): they are
+//! counted, and are no entries nor items of the scan. Alone in its program: the counts are the
+//! process's.
 
 mod txn_node;
 
@@ -62,6 +64,8 @@ fn the_scans_of_the_cores_count_the_documents_and_the_metas_they_go_through() {
         documents: after.documents - before.documents,
         metas: after.metas - before.metas,
     };
-    assert_eq!((took.documents, took.metas, took.items), (3, 2, 5), "{took:?}");
-    assert!(took.entries > took.items, "the older versions count as entries: {took:?}");
+    // The three versions of the two metas are passed over; the older version of the document
+    // written twice is an entry of the merge.
+    assert_eq!((took.documents, took.metas, took.items), (3, 3, 3), "{took:?}");
+    assert_eq!(took.entries, 4, "{took:?}");
 }

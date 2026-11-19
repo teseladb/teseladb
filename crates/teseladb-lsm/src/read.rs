@@ -836,6 +836,8 @@ impl View {
             want: None,
             entries: 0,
             items: 0,
+            pass_history: false,
+            passed: 0,
         }
     }
 }
@@ -958,6 +960,10 @@ pub struct Scan {
     finished: bool,
     /// Data blocks passed over by their zone maps (FR-039).
     skipped: u64,
+    /// Whether its cursors pass over the versions that only serve the history before they
+    /// reach the merge (FR-046), and how many they passed.
+    pass_history: bool,
+    passed: u32,
     /// The top-level fields whose columns the scan takes in place of whole data blocks (010
     /// FR-033), when it takes any.
     want: Option<Arc<[String]>>,
@@ -980,9 +986,13 @@ pub struct ScanCounts {
     pub items: u64,
     /// Data blocks passed over by their zone maps (FR-039).
     pub skipped: u64,
+    /// Versions that only serve the history passed over by the cursors, before the merge
+    /// (FR-046): they are no entries of the scan.
+    pub passed: u64,
 }
 
 static SCANS: AtomicU64 = AtomicU64::new(0);
+static SCAN_PASSED: AtomicU64 = AtomicU64::new(0);
 static SCAN_ENTRIES: AtomicU64 = AtomicU64::new(0);
 static SCAN_ITEMS: AtomicU64 = AtomicU64::new(0);
 static SCAN_SKIPPED: AtomicU64 = AtomicU64::new(0);
@@ -1088,6 +1098,7 @@ pub fn scan_totals() -> ScanCounts {
         entries: SCAN_ENTRIES.load(Ordering::Relaxed),
         items: SCAN_ITEMS.load(Ordering::Relaxed),
         skipped: SCAN_SKIPPED.load(Ordering::Relaxed),
+        passed: SCAN_PASSED.load(Ordering::Relaxed),
     }
 }
 
@@ -1099,6 +1110,9 @@ impl Drop for Scan {
         SCAN_ITEMS.fetch_add(u64::from(self.items), Ordering::Relaxed);
         if self.skipped != 0 {
             SCAN_SKIPPED.fetch_add(self.skipped, Ordering::Relaxed);
+        }
+        if self.passed != 0 {
+            SCAN_PASSED.fetch_add(u64::from(self.passed), Ordering::Relaxed);
         }
         let tallied = TOOK.with(|t| t.replace([0; TOOK_KINDS]));
         for (total, n) in TOOK_TOTALS.iter().zip(tallied) {
@@ -1225,6 +1239,16 @@ impl Scan {
         self
     }
 
+    /// The scan whose cursors pass over the versions that only serve the history
+    /// ([`crate::HISTORY_VALUE`]) before they reach the merge (FR-046): a scan of documents,
+    /// which would hand them over to leave them out. A key that holds such versions holds no
+    /// other value, so the scan gives what it gave; an intent or a retraction on it still comes.
+    #[must_use]
+    pub fn passing_history(mut self) -> Scan {
+        self.pass_history = true;
+        self
+    }
+
     /// The entries this scan took from its sources and the items it gave so far.
     pub fn counts(&self) -> ScanCounts {
         ScanCounts {
@@ -1232,6 +1256,7 @@ impl Scan {
             entries: u64::from(self.entries),
             items: u64::from(self.items),
             skipped: self.skipped,
+            passed: u64::from(self.passed),
         }
     }
 
@@ -1286,8 +1311,30 @@ impl Scan {
         step
     }
 
-    /// Makes cursor `at` ready, passing over the blocks `prune` lets it skip.
+    /// Makes cursor `at` ready, passing over the blocks `prune` lets it skip and, for a scan
+    /// [`Scan::passing_history`], the versions that only serve the history: the cursor moves
+    /// on from each of them before the merge sees it.
     fn ready_at<B: Blocks>(
+        &mut self,
+        at: usize,
+        r: &mut B,
+        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
+    ) -> Result<Option<ReadToken>, LsmError> {
+        loop {
+            if let Some(token) = self.ready_one(at, r, prune)? {
+                return Ok(Some(token));
+            }
+            let cursor = &mut self.cursors.as_mut().expect("opened")[at];
+            if !self.pass_history || !cursor.at_history() {
+                return Ok(None);
+            }
+            cursor.advance()?;
+            self.passed = self.passed.saturating_add(1);
+        }
+    }
+
+    /// Makes cursor `at` ready at its next entry, passing over the blocks `prune` lets it skip.
+    fn ready_one<B: Blocks>(
         &mut self,
         at: usize,
         r: &mut B,

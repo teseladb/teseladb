@@ -227,12 +227,16 @@ impl MainScan {
         }
     }
 
-    /// The entries the scan took from its sources and the items it gave so far; a scan from the
-    /// last key down looks each key up and counts none.
-    fn taken(&self) -> (u64, u64) {
+    /// The entries the scan took from its sources, the items it gave and the versions that only
+    /// serve the history its cursors passed over (004 FR-046), so far; a scan from the last key
+    /// down looks each key up and counts none.
+    fn taken(&self) -> (u64, u64, u64) {
         match self {
-            MainScan::Forward(s) => (s.counts().entries, s.counts().items),
-            MainScan::Backward(_) => (0, 0),
+            MainScan::Forward(s) => {
+                let c = s.counts();
+                (c.entries, c.items, c.passed)
+            }
+            MainScan::Backward(_) => (0, 0, 0),
         }
     }
 }
@@ -248,7 +252,8 @@ pub struct CoreScans {
     pub items: u64,
     /// Documents given to the readers, those of the column batches included.
     pub documents: u64,
-    /// Versions that only serve the history, passed over.
+    /// Versions that only serve the history, passed over: by the scans' cursors before the
+    /// merge (004 FR-046), or by the scan when one came out of it under an intent.
     pub metas: u64,
 }
 
@@ -326,8 +331,8 @@ pub struct ScanState {
 struct Tally {
     documents: u64,
     metas: u64,
-    /// The main scan's entries and items added so far.
-    added: (u64, u64),
+    /// The main scan's entries, items and versions passed over added so far.
+    added: (u64, u64, u64),
 }
 
 /// Whether a data block may hold a document the reader of a scan keeps, from the block's zone
@@ -374,7 +379,8 @@ impl ScanState {
         });
         let main = match backward {
             true => MainScan::Backward(v.scan_back(start, end, read_ts)),
-            false => MainScan::Forward(v.scan(start, end, read_ts)),
+            // A document's change meta is no document: the cursors pass over it (004 FR-046).
+            false => MainScan::Forward(v.scan(start, end, read_ts).passing_history()),
         };
         ScanState {
             main,
@@ -398,13 +404,14 @@ impl ScanState {
 
     /// Adds what the scan took since its last answer to the process's counts.
     fn count(&mut self) {
-        let (entries, items) = self.main.taken();
+        let (entries, items, passed) = self.main.taken();
         let t = std::mem::take(&mut self.tally);
-        let add = [entries - t.added.0, items - t.added.1, t.documents, t.metas];
+        let metas = t.metas + (passed - t.added.2);
+        let add = [entries - t.added.0, items - t.added.1, t.documents, metas];
         for (total, n) in CORE_SCANS.iter().zip(add) {
             total.fetch_add(n, Ordering::Relaxed);
         }
-        self.tally.added = (entries, items);
+        self.tally.added = (entries, items, passed);
     }
 
     /// Counts a version the main scan decided: a document for the reader, or one that only

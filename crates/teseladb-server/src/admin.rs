@@ -733,6 +733,11 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
             scans.skipped,
         ),
         ("teseladb_lsm_scan_items_total", "Items those scans gave.", scans.items),
+        (
+            "teseladb_lsm_scan_history_passed_total",
+            "Versions that only serve the history those scans' cursors passed over.",
+            scans.passed,
+        ),
         ("teseladb_lsm_scan_newer_total", "Scan entries above the read's mark.", took.newer),
         ("teseladb_lsm_scan_older_total", "Scan entries of keys already decided.", took.older),
         ("teseladb_lsm_scan_decided_total", "Scan entries that decided their key.", took.decided),
