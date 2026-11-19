@@ -19,6 +19,7 @@ use teseladb::engine::core::alien;
 use teseladb::engine::core::app_template::{AppTemplate, Config};
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::ExceptionPtr;
+use teseladb::engine::core::memory;
 use teseladb::engine::core::thread::async_ as in_thread;
 
 use super::core_loop::{CoreLogic, CoreSender};
@@ -264,6 +265,9 @@ impl NodeEngine {
         if !alien::internal::default_instance().is_null() {
             return Err(io::Error::other("an engine already runs in this process"));
         }
+        // A request a shard's memory cannot serve gets a block of the system's allocator
+        // instead of ending the process (023 FR-030).
+        memory::set_system_fallback(true);
         let args = cfg.args();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<io::Result<()>>(1);
         let thread = thread::Builder::new().name("engine".into()).spawn(move || {

@@ -721,7 +721,7 @@ pub fn from_range(e: &RangeError, ctx: RangeContext) -> CommandError {
             CommandError::new(
                 EXCEEDED_MEMORY_LIMIT,
                 format!(
-                    "the write needs about {} MiB of its range's core and {} MiB are free",
+                    "the write needs about {} MiB of its range's core, which has room for {} MiB",
                     needed >> 20,
                     free >> 20
                 ),

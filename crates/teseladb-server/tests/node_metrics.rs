@@ -117,6 +117,7 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         "teseladb_engine_reactor_tasks_processed counter",
         "teseladb_engine_memory_malloc_operations counter",
         "teseladb_engine_memory_foreign_frees counter",
+        "teseladb_engine_memory_system_allocations counter",
     ] {
         let help = format!("# TYPE {family}");
         assert_eq!(text.matches(&help).count(), 1, "{help} once in {text}");
@@ -125,6 +126,7 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
         "teseladb_engine_reactor_utilization{shard=\"0\"",
         "teseladb_engine_memory_malloc_operations{shard=\"0\"",
         "teseladb_engine_memory_foreign_frees{shard=\"0\"} ",
+        "teseladb_engine_memory_system_allocations{shard=\"0\"} ",
     ] {
         assert!(text.contains(series), "{series} in {text}");
     }

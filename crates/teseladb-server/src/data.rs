@@ -1017,9 +1017,7 @@ impl DataCore {
         (now, wall_ms): (Nanos, u64),
     ) {
         // A write the core's free memory cannot hold is refused before it starts.
-        if let Err(e) =
-            crate::write_admission::admit(&r, crate::write_admission::core_free_memory())
-        {
+        if let Err(e) = crate::write_admission::admit(&r, crate::write_admission::core_room()) {
             self.send_answer(core, client, Err(e), now);
             return;
         }

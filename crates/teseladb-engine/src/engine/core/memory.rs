@@ -449,8 +449,9 @@ impl Statistics {
     pub fn failed_allocations(&self) -> u64 {
         self._failed_allocs
     }
-    /// Number of allocations this thread made from libc's allocator (as a thread that is not a
-    /// shard).
+    /// Number of allocations this thread made from libc's allocator: as a thread that is not a
+    /// shard, or as a shard whose own memory could not serve them with
+    /// [`set_system_fallback`] on.
     pub fn foreign_mallocs(&self) -> u64 {
         self._foreign_mallocs
     }
@@ -670,6 +671,9 @@ const MAX_ALIGN_T_ALIGN: usize = 16;
 
 #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
 static ABORT_ON_ALLOCATION_FAILURE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(target_os = "linux", not(engine_default_allocator)))]
+static SYSTEM_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 #[cfg(all(target_os = "linux", not(engine_default_allocator)))]
 fn alloc_failure_kind_to_u8(kind: AllocFailureKind) -> u8 {
@@ -3585,6 +3589,11 @@ mod engine_allocator {
      */
     #[inline(always)]
     fn finish_allocation(ptr: *mut c_void, size: usize) -> *mut c_void {
+        if unlikely(ptr.is_null())
+            && let Some(ptr) = allocate_from_system(size)
+        {
+            return ptr;
+        }
         alloc_stats::increment_local(alloc_stats::Types::Allocs, 1);
         if unlikely(ptr.is_null()) {
             on_allocation_failure(size);
@@ -3596,6 +3605,45 @@ mod engine_allocator {
             };
         }
         ptr
+    }
+
+    /// A block of libc's for a request of `size` bytes that the shard's own memory cannot
+    /// serve, when [`set_system_fallback`] is on: all of the shard's memory is in use, or what
+    /// it holds leaves no run of free pages that long. The block is freed and reallocated as
+    /// any other of libc's (`do_foreign_free`, `realloc`) and counts as a foreign allocation,
+    /// not as a failure. `None` with the fallback off, before libc's functions are looked up,
+    /// or when libc has no memory either.
+    #[cold]
+    #[inline(never)]
+    fn allocate_from_system(size: usize) -> Option<*mut c_void> {
+        if !SYSTEM_FALLBACK.load(Ordering::Relaxed) {
+            return None;
+        }
+        let f = libc!(LIBC_MALLOC_FUNC, MallocFuncType)?;
+        // SAFETY: calling libc's malloc, found with dlsym(RTLD_NEXT).
+        let ptr = unsafe { f(size) };
+        if ptr.is_null() {
+            return None;
+        }
+        alloc_stats::increment(alloc_stats::Types::ForeignMallocs, 1);
+        Some(ptr)
+    }
+
+    /// [`allocate_from_system`] for a request aligned to `align`, with libc's `aligned_alloc`.
+    #[cold]
+    #[inline(never)]
+    fn allocate_aligned_from_system(align: usize, size: usize) -> Option<*mut c_void> {
+        if !SYSTEM_FALLBACK.load(Ordering::Relaxed) {
+            return None;
+        }
+        let f = libc!(LIBC_ALIGNED_ALLOC_FUNC, AlignedAllocType)?;
+        // SAFETY: calling libc's aligned_alloc, found with dlsym(RTLD_NEXT).
+        let ptr = unsafe { f(align, size) };
+        if ptr.is_null() {
+            return None;
+        }
+        alloc_stats::increment(alloc_stats::Types::ForeignMallocs, 1);
+        Some(ptr)
     }
 
     static DOUBLE_CHECKED: AtomicBool = AtomicBool::new(false);
@@ -3780,6 +3828,11 @@ mod engine_allocator {
             }
         } else {
             ptr = allocate_large_aligned(align, size, should_sample);
+        }
+        if unlikely(ptr.is_null())
+            && let Some(ptr) = allocate_aligned_from_system(align, size)
+        {
+            return ptr;
         }
         if ptr.is_null() {
             on_allocation_failure(size);
@@ -4279,6 +4332,27 @@ mod engine_allocator {
     /// suppression guard is alive on this thread).
     pub fn is_abort_on_allocation_failure() -> bool {
         ABORT_ON_ALLOCATION_FAILURE.load(Ordering::SeqCst)
+    }
+
+    /// Sets, for the whole process, whether an allocation that a shard's own memory cannot
+    /// serve is taken from libc's allocator instead of failing. Off by default: the allocation
+    /// fails as [`on_allocation_failure`] says.
+    ///
+    /// A shard's memory is one fixed range of pages. A program that keeps long-lived blocks of
+    /// many sizes in it (cache blocks, log entries) can leave much of it free with no run of
+    /// pages as long as one request, and a request the shard cannot serve fails however much
+    /// memory the system has. With the fallback on, such a request gets a block of libc's: the
+    /// process then grows past the memory given to its shards, and the blocks cost what libc's
+    /// allocator costs. Statistics count them as foreign allocations
+    /// ([`Statistics::foreign_mallocs`] on the shard), and the shard frees them as it frees
+    /// any block of libc's.
+    pub fn set_system_fallback(enabled: bool) {
+        SYSTEM_FALLBACK.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Returns the process-wide setting of [`set_system_fallback`].
+    pub fn is_system_fallback() -> bool {
+        SYSTEM_FALLBACK.load(Ordering::SeqCst)
     }
 
     /// Sets, for the whole process, which allocation failures log the diagnostics report at
@@ -5389,6 +5463,15 @@ mod default_allocator {
     /// Without the engine allocator: always false.
     pub fn is_abort_on_allocation_failure() -> bool {
         false
+    }
+
+    /// Without the engine allocator every block is the system allocator's already: nothing to
+    /// set.
+    pub fn set_system_fallback(_enabled: bool) {}
+
+    /// Without the engine allocator: always true, every block is the system allocator's.
+    pub fn is_system_fallback() -> bool {
+        true
     }
 
     impl Reclaimer {

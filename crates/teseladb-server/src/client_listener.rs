@@ -57,15 +57,17 @@ pub fn set_deep_stack() {
     teseladb_wire::commands::js::set_deep_stack(runner);
 }
 
-/// Bounds what each call of server-side JavaScript takes by the free memory of the shard that
-/// runs it (023 FR-014): the shard's memory is a pool of its own and an allocation it cannot
-/// serve ends the node, where a thread with the system's allocator had the whole machine. A
-/// thread outside the engine's pools (none set up, or the allocator that counts nothing when
-/// the engine's is not built) keeps the interpreter's limit.
+/// Bounds what each call of server-side JavaScript takes by the memory of the shard that runs
+/// it (023 FR-014, FR-030): the shard's memory is a pool of its own, and a call is kept within
+/// the size of its core ([`crate::write_admission::core_room`]) where a thread with the
+/// system's allocator had the whole machine. A thread outside the engine's pools (none set up,
+/// or the allocator that counts nothing when the engine's is not built) keeps the
+/// interpreter's limit.
 pub fn set_js_memory_room() {
     fn room() -> Option<usize> {
         let s = teseladb::engine::core::memory::stats();
-        (s.total_memory() > 0 && s.mallocs() > 0).then(|| s.free_memory())
+        let room = crate::write_admission::core_room()?;
+        (s.mallocs() > 0).then(|| usize::try_from(room).unwrap_or(usize::MAX))
     }
     teseladb_wire::commands::js::set_memory_room(room);
 }

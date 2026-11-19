@@ -132,8 +132,15 @@ mod cases {
         let (text, memories) = within(&answer, "the metrics in an engine thread");
         assert_eq!(memories, 2);
         assert!(text.contains("# TYPE teseladb_engine_memory_foreign_frees counter"), "{text}");
+        assert!(
+            text.contains("# TYPE teseladb_engine_memory_system_allocations counter"),
+            "{text}"
+        );
         for shard in ["shard=\"0\"", "shard=\"1\""] {
             assert!(text.contains(&format!("teseladb_engine_memory_foreign_frees{{{shard}}}")));
+            assert!(
+                text.contains(&format!("teseladb_engine_memory_system_allocations{{{shard}}}"))
+            );
         }
     }
 

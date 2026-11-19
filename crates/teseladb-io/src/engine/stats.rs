@@ -73,6 +73,8 @@ pub struct ShardMemory {
     pub failed: u64,
     /// Frees of memory no shard owns made by this shard (D-181).
     pub foreign_frees: u64,
+    /// Allocations the shard's memory could not serve, taken from the system's allocator.
+    pub system_allocations: u64,
     /// Bytes of the shard's pool handed out.
     pub allocated: u64,
     /// Bytes of the shard's pool.
@@ -89,6 +91,7 @@ impl ShardMemory {
             cross_cpu_frees: s.cross_cpu_frees(),
             failed: s.failed_allocations(),
             foreign_frees: s.foreign_frees().saturating_add(s.foreign_cross_frees()),
+            system_allocations: s.foreign_mallocs(),
             allocated: s.allocated_memory() as u64,
             total: s.total_memory() as u64,
         }
@@ -158,6 +161,13 @@ fn families_here(shard: u32) -> Vec<Family> {
         help: "Frees of memory no shard owns made on the shard (D-181).".to_owned(),
         kind: Kind::Counter,
         series: vec![(labels_text(shard, std::iter::empty()), m.foreign_frees as f64)],
+    });
+    out.push(Family {
+        name: "memory_system_allocations".to_owned(),
+        help: "Allocations the shard's memory could not serve, taken from the system's allocator."
+            .to_owned(),
+        kind: Kind::Counter,
+        series: vec![(labels_text(shard, std::iter::empty()), m.system_allocations as f64)],
     });
     out
 }

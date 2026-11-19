@@ -60,7 +60,7 @@ fn every_range_error_has_the_reference_code() {
         assert_eq!(c.code, code, "{e:?}");
         assert_eq!(c.labels.contains(&RETRYABLE_WRITE_ERROR), labelled, "{e:?}");
     }
-    // A write past the core's free memory says what it needs and what is free.
+    // A write past the room of its core says what it needs and the room there is.
     let c = from_range(&RangeError::ExceededMemory { needed: 900 << 20, free: 300 << 20 }, plain);
     assert!(c.errmsg.contains("900 MiB") && c.errmsg.contains("300 MiB"), "{}", c.errmsg);
 }

@@ -707,6 +707,70 @@ mod engine_allocator_tests {
         make_ready_future(())
     });
 
+    engine_test_case!(test_system_fallback_serves_what_the_shard_cannot, {
+        // More than the shard has free: its own memory cannot serve it, whatever its layout.
+        let size = memory::free_memory() + 4096;
+        let foreign = || {
+            let s = memory::stats();
+            (s.foreign_mallocs(), s.foreign_cross_frees())
+        };
+
+        // Off, as the engine starts: the allocation fails.
+        assert!(!memory::is_system_fallback());
+        let failed = memory::stats().failed_allocations();
+        let p = memory::operator_new_nothrow(size);
+        SINK.store(p, Ordering::Relaxed);
+        assert!(p.is_null(), "the allocation should have failed");
+        assert_eq!(memory::stats().failed_allocations(), failed + 1);
+
+        memory::set_system_fallback(true);
+        assert!(memory::is_system_fallback());
+        let (mallocs, frees) = foreign();
+        let failed = memory::stats().failed_allocations();
+
+        // On: libc's allocator serves it, and the block is used, grown and freed as any other.
+        // SAFETY: the blocks are live between their allocation and their free below, and the
+        // bytes written are inside them.
+        unsafe {
+            let p = malloc(size) as *mut u8;
+            assert!(!p.is_null(), "libc should have served the allocation");
+            assert!(!memory::is_engine_memory(p as *const c_void));
+            p.write(1);
+            p.add(size - 1).write(2);
+            let q = realloc(p as *mut c_void, size + 4096) as *mut u8;
+            assert!(!q.is_null());
+            assert_eq!((q.read(), q.add(size - 1).read()), (1, 2));
+            free(q as *mut c_void);
+
+            let a = aligned_alloc(4096, size) as *mut u8;
+            assert!(!a.is_null(), "libc should have served the aligned allocation");
+            assert!(!memory::is_engine_memory(a as *const c_void));
+            assert_eq!(a as usize % 4096, 0);
+            a.add(size - 1).write(3);
+            free(a as *mut c_void);
+        }
+        // The same through the Rust allocator: a vector the shard has no room for.
+        let mut v: Vec<u8> = Vec::new();
+        assert!(v.try_reserve_exact(size).is_ok());
+        v.push(7);
+        assert!(!memory::is_engine_memory(v.as_ptr() as *const c_void));
+        drop(v);
+
+        // Three blocks of libc's, counted as such and freed on the shard; no failure counted.
+        let (mallocs_after, frees_after) = foreign();
+        assert_eq!(mallocs_after - mallocs, 3);
+        assert!(frees_after - frees >= 3, "{frees} then {frees_after}");
+        assert_eq!(memory::stats().failed_allocations(), failed);
+
+        // What the shard can serve still comes from its own memory.
+        let small = memory::operator_new(64);
+        assert!(memory::is_engine_memory(small as *const c_void));
+        memory::operator_delete(small);
+
+        memory::set_system_fallback(false);
+        make_ready_future(())
+    });
+
     engine_test_case!(test_diagnostics_failures, {
         // test that an allocation failure is reflected in the diagnostics
         let stats = memory::stats();

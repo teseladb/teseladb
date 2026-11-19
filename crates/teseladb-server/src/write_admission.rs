@@ -1,10 +1,11 @@
 //! Admission of a write by the memory it takes on its range's core: a write whose keys and values
 //! the core would hold several times over (its request, its latches, its Raft entry, the memtable
-//! and the files it flushes to) is refused before it starts when that is more than the core's free
-//! memory, with the reference server's `ExceededMemoryLimit` (146), instead of running the core's
-//! memory pool out, which aborts the process. A document of up to 16 MiB with its index entries
-//! fits a core of the default size; one whose index entries take many times its size (dozens of
-//! indexes on one long string) may not.
+//! and the files it flushes to) is refused before it starts when that is more than the core's
+//! room, with the reference server's `ExceededMemoryLimit` (146). The room is the core's memory:
+//! what its pool cannot serve comes from the system's allocator (023 FR-030), so a single write
+//! is kept within the size of its core, whatever the pool has free at the time. A document of up
+//! to 16 MiB with its index entries fits a core of the default size; one whose index entries
+//! take many times its size (dozens of indexes on one long string) may not.
 
 use teseladb_range::host::RangeError;
 use teseladb_range::host::TxnOp;
@@ -45,12 +46,12 @@ pub fn write_bytes(r: &RemoteReq) -> Option<u64> {
     }
 }
 
-/// Whether request `r` may run on a core with `free` bytes of free memory (`None`: the core's
-/// memory is not known, as off the engine's shards).
+/// Whether request `r` may run on a core with room for `free` bytes (`None`: the core's memory
+/// is not known, as off the engine's shards).
 ///
 /// # Errors
 ///
-/// [`RangeError::ExceededMemory`] with the bytes it would take and those free.
+/// [`RangeError::ExceededMemory`] with the bytes it would take and the room there is.
 pub fn admit(r: &RemoteReq, free: Option<u64>) -> Result<(), RangeError> {
     let (Some(bytes), Some(free)) = (write_bytes(r), free) else { return Ok(()) };
     let needed = bytes.saturating_mul(FOOTPRINT_FACTOR);
@@ -60,10 +61,16 @@ pub fn admit(r: &RemoteReq, free: Option<u64>) -> Result<(), RangeError> {
     Ok(())
 }
 
-/// The free memory of the calling core's pool, when it runs on one of the engine's shards.
-pub fn core_free_memory() -> Option<u64> {
-    let s = teseladb::engine::core::memory::stats();
-    (s.total_memory() > 0).then(|| s.free_memory() as u64)
+/// The room a single call has in the calling core's memory, when it runs on one of the engine's
+/// shards: all of the core's memory while the allocator takes from the system what the core's
+/// pool cannot serve (023 FR-030), since what the pool has free then says nothing of whether
+/// the call fits. Without that fallback an allocation the pool cannot serve ends the process,
+/// and the room is what the pool has free.
+pub fn core_room() -> Option<u64> {
+    use teseladb::engine::core::memory;
+    let s = memory::stats();
+    let room = if memory::is_system_fallback() { s.total_memory() } else { s.free_memory() };
+    (s.total_memory() > 0).then_some(room as u64)
 }
 
 #[cfg(test)]
@@ -107,11 +114,11 @@ mod tests {
         assert_eq!(write_bytes(&RemoteReq::Live), None);
     }
 
-    /// A write that would take more than the core's free memory is refused with what it needs and
-    /// what is free; one that fits, a request that writes nothing and a core of unknown memory
+    /// A write that would take more than the core's room is refused with what it needs and the
+    /// room there is; one that fits, a request that writes nothing and a core of unknown memory
     /// go on.
     #[test]
-    fn a_write_past_the_free_memory_is_refused_and_one_that_fits_goes_on() {
+    fn a_write_past_the_room_of_its_core_is_refused_and_one_that_fits_goes_on() {
         let r = intents(&[1 << 20]);
         let needed = ((1 << 20) + 8) * FOOTPRINT_FACTOR;
         assert_eq!(admit(&r, Some(needed)), Ok(()));

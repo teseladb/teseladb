@@ -168,12 +168,12 @@ pub enum RangeError {
     /// The leader of a barrier does not hold one of its entries with its term (FR-036): the
     /// statement is in doubt, as after a change of leader.
     EntryLost,
-    /// The write would take more memory on the range's core than the core has free: it is refused
-    /// before it starts (the reference server's `ExceededMemoryLimit`, 146).
+    /// The write would take more memory on the range's core than the core has room for: it is
+    /// refused before it starts (the reference server's `ExceededMemoryLimit`, 146).
     ExceededMemory {
         /// Bytes it would take, estimated.
         needed: u64,
-        /// Bytes free on the core.
+        /// Bytes the core has room for.
         free: u64,
     },
 }
