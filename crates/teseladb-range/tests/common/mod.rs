@@ -138,6 +138,12 @@ impl Cluster {
                     moved |= node.host.on_done(&mut node.core, op, r);
                 }
                 moved |= node.host.poll(&mut node.core, now, wall);
+                // A block a request asked for in this round is read in the next one, and its
+                // return wakes the request, as the embedder's completion does.
+                if !self.slow.contains(&n) {
+                    let lsm = node.host.lsm().borrow();
+                    moved |= !lsm.block_reads_back(lsm.block_reads_asked());
+                }
                 let replies = node.host.take_replies();
                 moved |= !replies.is_empty();
                 node.replies.extend(replies);
