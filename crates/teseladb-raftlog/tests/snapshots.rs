@@ -257,6 +257,37 @@ fn release_floor_holds_back_the_wal() {
 }
 
 #[test]
+fn the_store_names_the_groups_that_hold_the_most_of_its_log_in_memory() {
+    let cfg = small_cfg();
+    let mut disk = MemDisk::new();
+    let mut s = recover(&cfg, &mut disk);
+    let mut now = Nanos::ZERO;
+    let (small, large, empty) = (GroupId(1), GroupId(2), GroupId(3));
+    for g in [small, large, empty] {
+        s.create_group(g, Bytes::new(), Durability::Strict).expect("create_group succeeds");
+    }
+    for round in 1..=10u64 {
+        s.append_raft(small, &[e(round, 1_000)], None, Durability::Strict)
+            .expect("append_raft succeeds");
+        s.append_raft(large, &[e(round, 30_000)], None, Durability::Strict)
+            .expect("append_raft succeeds");
+        settle(&mut s, &mut disk, &mut now);
+    }
+    assert_eq!(s.entries_bytes(), 310_000);
+    // Everything fits: nobody to name. Past what fits, the largest first, and only as many
+    // as it takes; a group without entries is never named.
+    assert_eq!(s.memory_holders(310_000), Vec::<GroupId>::new());
+    assert_eq!(s.memory_holders(100_000), vec![large]);
+    assert_eq!(s.memory_holders(5_000), vec![large, small]);
+    assert_eq!(s.memory_holders(0), vec![large, small]);
+    // A snapshot lets the entries of the group it covers go, with its segment still there.
+    s.save_snapshot(large, snap(10), Bytes::new()).expect("save_snapshot succeeds");
+    settle(&mut s, &mut disk, &mut now);
+    assert_eq!(s.entries_bytes(), 10_000);
+    assert_eq!(s.memory_holders(5_000), vec![small]);
+}
+
+#[test]
 fn crash_during_snapshot_write_keeps_old_or_new_complete() {
     let cfg: StorageConfig = small_cfg();
     for seed in 0..200 {

@@ -854,6 +854,28 @@ impl CoreStore {
         self.groups.values().map(GroupLog::bytes).sum()
     }
 
+    /// The groups that hold the most of the log in memory, largest first: as many as it takes
+    /// for the entries of the others to fit in `keep` bytes. A consumer that wants less of the
+    /// log in memory flushes what their release floors wait for and takes their snapshots,
+    /// which let the entries they cover go.
+    #[must_use]
+    pub fn memory_holders(&self, keep: u64) -> Vec<GroupId> {
+        let mut held: Vec<(u64, GroupId)> =
+            self.groups.iter().map(|(g, log)| (log.bytes(), *g)).filter(|(b, _)| *b > 0).collect();
+        // The largest first, and among equals the lowest group, so the answer is one.
+        held.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut left: u64 = held.iter().map(|(b, _)| b).sum();
+        let mut holders = Vec::new();
+        for (bytes, g) in held {
+            if left <= keep {
+                break;
+            }
+            holders.push(g);
+            left -= bytes;
+        }
+        holders
+    }
+
     /// What holds back the oldest WAL segment, when there is one besides the active one: each
     /// group with entries in it past its snapshot or past its release floor. A consumer that
     /// wants the WAL shorter flushes what the floor waits for and takes the snapshot.

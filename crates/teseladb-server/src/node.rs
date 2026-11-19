@@ -1098,7 +1098,14 @@ impl Node {
         let memtables = memory.map_or(u64::MAX, |m| {
             m.part(crate::memory::Component::Memtables).saturating_mul(u64::from(cores))
         });
-        let pressure = Arc::new(NodePressure::new(cores, cfg.storage.wal_segment_size, memtables));
+        // The entries of a core's log live in its memory (023 FR-028).
+        let core_memory = memory.map_or(u64::MAX, |m| m.per_core());
+        let pressure = Arc::new(NodePressure::new(
+            cores,
+            cfg.storage.wal_segment_size,
+            memtables,
+            core_memory,
+        ));
         // Where each core runs (012 FR-006): shard k on the k-th CPU of the engine's cpuset.
         let cpus: Vec<Option<usize>> = match engine_cfg.cpus.is_empty() {
             true => vec![None; usize::from(cores)],

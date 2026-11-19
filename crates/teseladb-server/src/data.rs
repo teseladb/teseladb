@@ -1716,7 +1716,8 @@ impl DataCore {
 
     /// Counts the core's memtables and its log with the node's, and does what the node asks of
     /// it: its memtable flushed, and the snapshots of the groups that hold its log's oldest
-    /// segment (a snapshot the release floor holds back gets its flush from `flush_idle`).
+    /// segment or the most of its log in memory (a snapshot the release floor holds back gets
+    /// its flush from `flush_idle`).
     fn relieve(&mut self, core: &mut MultiRaftCore<CoreSm>, now: Nanos) {
         let Some((pressure, at)) = self.pressure.as_mut() else { return };
         if now < *at {
@@ -1724,13 +1725,21 @@ impl DataCore {
         }
         *at = Nanos(now.0.saturating_add(PRESSURE_EVERY.0));
         let memtables = self.lsm.borrow().memtables_bytes();
-        let relief = pressure.step(memtables, core.store().wal_disk_bytes(), now);
+        let log = (core.store().wal_disk_bytes(), core.store().entries_bytes());
+        let relief = pressure.step(memtables, log, now);
+        // Half its part of the memory is what the log keeps: the next entries have room.
+        let keep = pressure.log_memory_cap() / 2;
         if relief.flush {
             self.lsm.borrow_mut().flush();
         }
         if relief.snapshots {
             for holder in core.store().wal_holders() {
                 core.snapshot_now(holder.group);
+            }
+        }
+        if relief.entries {
+            for group in core.store().memory_holders(keep) {
+                core.snapshot_now(group);
             }
         }
     }
@@ -2575,7 +2584,7 @@ mod tests {
         d.poll(&mut core, (now, 0));
         assert!(d.lsm.borrow().memtables_bytes().1 > 0);
         // A node with a byte for its memtables is over it: the core, above its share, flushes.
-        let node = Arc::new(NodePressure::new(1, 8 << 20, 1));
+        let node = Arc::new(NodePressure::new(1, 8 << 20, 1, u64::MAX));
         let mut d = d.with_pressure(node.clone());
         d.poll(&mut core, (now, 0));
         assert_eq!(d.lsm.borrow().memtables_bytes().1, 0, "the active memtable was frozen");
@@ -2583,11 +2592,60 @@ mod tests {
         run_io(&mut core, &mut d, &mut disk, now);
         // A log past its cap flushes too, with the node well under its memory: a segment of
         // this core's log is larger than the cap of a node of many cores without segments kept.
-        let node = Arc::new(NodePressure::new(u16::MAX, 0, u64::MAX));
+        let node = Arc::new(NodePressure::new(u16::MAX, 0, u64::MAX, u64::MAX));
         assert!(core.store().wal_disk_bytes() > node.log_cap());
         let mut d = d.with_pressure(node);
         put(&d, 2);
         d.poll(&mut core, (now + Nanos::from_secs(2), 0));
         assert_eq!(d.lsm.borrow().memtables_bytes().1, 0);
+    }
+
+    #[test]
+    fn a_core_whose_log_holds_more_than_its_part_of_its_memory_lets_the_entries_go() {
+        use teseladb_raftlog::Disk;
+        // Twenty writes of 4 KiB through the log of a core alone and three seconds more, under
+        // `node` if any: the bytes of entries its log holds in memory at the end.
+        let held_after = |node: Option<Arc<NodePressure>>| {
+            let (mut core, d, mut disk) = setup_disk(&[1]);
+            let mut d = match node {
+                Some(node) => d.with_pressure(node),
+                None => d,
+            };
+            let mut now = lead_alone(&mut core, &mut d, &mut disk);
+            let mut turn = |core: &mut MultiRaftCore<CoreSm>, d: &mut DataCore, by: Nanos| {
+                now = now + by;
+                core.on_tick(now, 0);
+                while let Some(op) = core.poll_io(now) {
+                    let done = disk.execute(op);
+                    core.on_io_done(done, now);
+                }
+                let _ = core.drain_actions();
+                d.poll(core, (now, 0));
+                run_io(core, d, &mut disk, now);
+                now
+            };
+            for k in 0..20u8 {
+                let (tx, _rx) = channel();
+                let wc = WriteConcern { w: W::Nodes(1), j: false };
+                let put = DataReq::Put { key: vec![1, k], value: vec![k; 4096], wc };
+                let at = turn(&mut core, &mut d, Nanos::from_millis(10));
+                d.request(&mut core, put, tx, (at, 0));
+                for _ in 0..3 {
+                    turn(&mut core, &mut d, Nanos::from_millis(10));
+                }
+            }
+            for _ in 0..10 {
+                turn(&mut core, &mut d, Nanos::from_millis(300));
+            }
+            core.store().entries_bytes()
+        };
+        // Left alone, the core still holds every entry: no snapshot is due yet.
+        let alone = held_after(None);
+        assert!(alone > 20 * 4096, "the log holds {alone} bytes of entries");
+        // A core with 32 KiB of memory: its log may hold 4 KiB of entries. It flushes what
+        // holds the log back and takes the snapshots that cover them.
+        let small = Arc::new(NodePressure::new(1, 8 << 20, u64::MAX, 8 * 4096));
+        let left = held_after(Some(small));
+        assert!(left <= 4096, "the log still holds {left} bytes of entries");
     }
 }
