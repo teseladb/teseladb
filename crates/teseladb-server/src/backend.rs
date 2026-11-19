@@ -240,6 +240,36 @@ impl ServerBackend {
         b
     }
 
+    /// Sends the write `op` with its evaluation `prepared` to the core of its first key's range:
+    /// its route and where its answer comes, or `None` when no range holds the key or the core
+    /// is gone, and the write goes the usual way.
+    fn send_write(
+        &self,
+        op: &WriteOp,
+        prepared: Ahead,
+        deadline: u64,
+    ) -> Option<(RouteEntry, mpsc::Receiver<Result<DataReply, RangeError>>)> {
+        let entry = self.h.routes.lookup(op.keys.first()?)?;
+        let dedup = op.dedup.map(|k| DedupKey {
+            lsid: k.lsid,
+            txn_number: k.txn_number,
+            stmt_id: k.stmt_id,
+        });
+        let req = RemoteReq::Write {
+            keys: op.keys.clone(),
+            mutation: op.mutation.clone(),
+            dedup,
+            wc: op.wc,
+            deadline: Some(deadline),
+            prepared,
+        };
+        let (tx, rx) = mpsc::channel();
+        let msg = NodeMsg::Data(DataReq::Remote(entry.group, req), tx);
+        let core = self.cores.get(usize::from(entry.core))?;
+        core.send(CoreInput::App(msg)).ok()?;
+        Some((entry, rx))
+    }
+
     fn yield_between_reads(&self) {
         use teseladb::engine::core::thread::Thread;
         if self.yield_reads && Thread::running_in_thread() {
@@ -1345,33 +1375,19 @@ impl Backend for ServerBackend {
         let deadline = self.deadline_of(until);
         // Each part's evaluation on the versions this thread sees, as a single write's (005
         // FR-035): its core only checks them and proposes, instead of evaluating every part.
-        let prepared: Vec<Ahead> =
-            ops.iter().map(|op| Ahead(self.prepare_outside(op).map(Box::new))).collect();
         // Every write goes to its range's core before any answer is awaited (D-186): the parts
-        // of an unordered insert in a collection's partitions run on their cores at once.
+        // of an unordered insert in a collection's partitions run on their cores at once. Each
+        // part goes as soon as it is prepared, so its core works on it while this thread
+        // prepares the next, and the shard gets its other tasks between two parts once the
+        // engine asks: the parts of a multi update of hundreds of documents, prepared in one
+        // go, held the shard for milliseconds (002 run p68s: three stall reports in four).
         let sent: Vec<_> = ops
             .iter()
-            .zip(prepared)
-            .map(|(op, prepared)| {
-                let entry = self.h.routes.lookup(op.keys.first()?)?;
-                let dedup = op.dedup.map(|k| DedupKey {
-                    lsid: k.lsid,
-                    txn_number: k.txn_number,
-                    stmt_id: k.stmt_id,
-                });
-                let req = RemoteReq::Write {
-                    keys: op.keys.clone(),
-                    mutation: op.mutation.clone(),
-                    dedup,
-                    wc: op.wc,
-                    deadline: Some(deadline),
-                    prepared,
-                };
-                let (tx, rx) = mpsc::channel();
-                let msg = NodeMsg::Data(DataReq::Remote(entry.group, req), tx);
-                let core = self.cores.get(usize::from(entry.core))?;
-                core.send(CoreInput::App(msg)).ok()?;
-                Some((entry, rx))
+            .map(|op| {
+                let prepared = Ahead(self.prepare_outside(op).map(Box::new));
+                let sent = self.send_write(op, prepared, deadline);
+                wait::yield_if_asked();
+                sent
             })
             .collect();
         ops.into_iter()
