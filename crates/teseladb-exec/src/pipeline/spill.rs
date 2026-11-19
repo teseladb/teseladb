@@ -39,18 +39,24 @@ const READ_BYTES: usize = 64 * 1024;
 /// The fewest bytes a merge reads from a run at a time, when many runs share the limit.
 const MIN_READ_BYTES: usize = 1024;
 
+/// The most bytes of a piece of a run, short of a document longer than that: the store takes
+/// each piece as one buffer, and a shard's memory may have no free span as long as a stage's
+/// limit, which grows with the node's memory.
+const PIECE_BYTES: usize = 1 << 20;
+
 /// The node's temporary store for what stages write to disk; sans-I/O, the server gives one
 /// over its files.
 pub trait SpillStore: Debug {
-    /// Writes `bytes` as a new run; its number.
+    /// Writes `bytes` as a new run of one piece, which the store counts; its number.
     fn write(&self, bytes: &[u8]) -> Result<u64, MqlError>;
     /// Up to `len` bytes of run `run` from `offset` (fewer at its end).
     fn read(&self, run: u64, offset: u64, len: usize) -> Result<Vec<u8>, MqlError>;
     /// Drops run `run`.
     fn remove(&self, run: u64);
 
-    /// Writes `bytes` as a new run that a stage may still drop without having used it: what a
-    /// store reports counts it only after [`SpillStore::count`]. By default, as
+    /// Writes `bytes` as a piece of a run the store does not count: a stage may still drop the
+    /// run without having used it, and a run has as many pieces as it takes to keep each short.
+    /// What a store reports counts the run after [`SpillStore::count`]. By default, as
     /// [`SpillStore::write`], for stores that report nothing.
     fn write_unseen(&self, bytes: &[u8]) -> Result<u64, MqlError> {
         self.write(bytes)
@@ -132,35 +138,69 @@ impl Drop for Runs<'_> {
     }
 }
 
-/// Writes `docs`, sorted by `cmp` over their keys `keys`, as one run; with `unseen`, as a run
-/// the store does not count yet, whose figures it adds there.
+/// Writes `docs`, sorted by `cmp` over their keys `keys`, as one run: its pieces, of at most
+/// [`PIECE_BYTES`] each, in order. With `unseen`, as a run the store does not count yet, whose
+/// figures it adds there; without it the store counts the run once it holds all its pieces. A
+/// run that fails leaves none of its pieces.
 fn write_run<K>(
     docs: Vec<Document>,
     keys: &dyn Fn(&Document) -> Result<K, MqlError>,
     cmp: &dyn Fn(&K, &K) -> Result<Ordering, MqlError>,
     (store, unseen): (&dyn SpillStore, Option<&mut SpillStats>),
-) -> Result<u64, MqlError> {
-    let records = u64::try_from(docs.len()).unwrap_or(u64::MAX);
+) -> Result<Vec<u64>, MqlError> {
     let mut keyed = Vec::with_capacity(docs.len());
     for d in docs {
         keyed.push((keys(&d)?, d));
     }
     crate::expr::try_sort_by(&mut keyed, |(a, _), (b, _)| cmp(a, b))?;
-    let mut bytes = Vec::new();
-    for (_, d) in keyed {
-        let b = d.to_bytes().map_err(|e| errors::error(codes::INTERNAL_ERROR, e.to_string()))?;
-        bytes.extend_from_slice(&b);
-    }
-    let Some(unseen) = unseen else {
-        let id = store.write(&bytes)?;
-        WRITTEN.with(|w| w.set(w.get() + 1));
-        return Ok(id);
+    let mut pieces = Vec::new();
+    let written = write_pieces(keyed.into_iter().map(|(_, d)| d), store, &mut pieces);
+    let stats = match written {
+        Ok(stats) => stats,
+        Err(e) => {
+            for id in pieces {
+                store.remove(id);
+            }
+            return Err(e);
+        }
     };
-    let id = store.write_unseen(&bytes)?;
-    unseen.spills += 1;
-    unseen.records += records;
-    unseen.bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    Ok(id)
+    match unseen {
+        Some(unseen) => {
+            unseen.spills += stats.spills;
+            unseen.records += stats.records;
+            unseen.bytes += stats.bytes;
+        }
+        None => {
+            store.count(stats);
+            WRITTEN.with(|w| w.set(w.get() + 1));
+        }
+    }
+    Ok(pieces)
+}
+
+/// Writes `docs` in their order as the pieces of one run, their numbers added to `pieces` as
+/// each is written; what the run adds up to. The store counts none of them.
+fn write_pieces(
+    docs: impl Iterator<Item = Document>,
+    store: &dyn SpillStore,
+    pieces: &mut Vec<u64>,
+) -> Result<SpillStats, MqlError> {
+    let mut stats = SpillStats { spills: 1, records: 0, bytes: 0 };
+    let mut bytes = Vec::new();
+    for d in docs {
+        let b = d.to_bytes().map_err(|e| errors::error(codes::INTERNAL_ERROR, e.to_string()))?;
+        if !bytes.is_empty() && bytes.len() + b.len() > PIECE_BYTES {
+            pieces.push(store.write_unseen(&bytes)?);
+            bytes.clear();
+        }
+        bytes.extend_from_slice(&b);
+        stats.records += 1;
+        stats.bytes += u64::try_from(b.len()).unwrap_or(u64::MAX);
+    }
+    if !bytes.is_empty() {
+        pieces.push(store.write_unseen(&bytes)?);
+    }
+    Ok(stats)
 }
 
 /// How a [`Sorter`] reads the key of a document.
@@ -243,8 +283,9 @@ impl<'s, K> Sorter<'s, K> {
     /// Writes the documents waiting as a run.
     fn write_waiting(&mut self) -> Result<(), MqlError> {
         let run = std::mem::take(&mut self.run);
-        let id = write_run(run, &self.keys, &self.cmp, (self.runs.store, self.unseen.as_mut()))?;
-        self.runs.ids.push(vec![id]);
+        let pieces =
+            write_run(run, &self.keys, &self.cmp, (self.runs.store, self.unseen.as_mut()))?;
+        self.runs.ids.push(pieces);
         self.held = 0;
         Ok(())
     }
@@ -298,11 +339,12 @@ impl<'s, K> Sorter<'s, K> {
         Ok(())
     }
 
-    /// Merges `runs` into `pieces` of at most a quarter of the limit, written in order. What a
-    /// store reports leaves them out: they hold documents the stage already wrote.
+    /// Merges `runs` into `pieces` of at most a quarter of the limit and never more than
+    /// [`PIECE_BYTES`], written in order. What a store reports leaves them out: they hold
+    /// documents the stage already wrote.
     fn merge_into_pieces(&self, runs: &[Vec<u64>], pieces: &mut Vec<u64>) -> Result<(), MqlError> {
         let store = self.runs.store;
-        let piece = (self.limit / 4).max(1);
+        let piece = (self.limit / 4).clamp(1, PIECE_BYTES);
         let mut bytes = Vec::new();
         let mut flush = |bytes: &mut Vec<u8>| -> Result<(), MqlError> {
             pieces.push(store.write_unseen(bytes)?);
@@ -679,6 +721,113 @@ mod tests {
         assert_eq!(stats.records, 5, "{stats:?}");
         assert!(stats.spills >= 4 && runs_written() >= before + stats.spills, "{stats:?}");
         assert!(store.is_empty());
+    }
+
+    /// A store that remembers the longest buffer it was given.
+    #[derive(Debug, Default)]
+    struct Longest(MemorySpill, std::sync::atomic::AtomicUsize);
+
+    impl Longest {
+        fn longest(&self) -> usize {
+            self.1.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl SpillStore for Longest {
+        fn write(&self, bytes: &[u8]) -> Result<u64, MqlError> {
+            self.1.fetch_max(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+            self.0.write(bytes)
+        }
+        fn read(&self, run: u64, offset: u64, len: usize) -> Result<Vec<u8>, MqlError> {
+            self.0.read(run, offset, len)
+        }
+        fn remove(&self, run: u64) {
+            self.0.remove(run);
+        }
+    }
+
+    /// `n` documents of about a kibibyte each, their keys out of order.
+    fn kibibyte_docs(n: i32) -> Vec<Document> {
+        (0..n)
+            .map(|i| Document::new().with("k", (i * 7919) % 1000).with("s", "x".repeat(1000)))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_reaches_the_store_in_pieces_however_long_the_limit() {
+        // Three mebibytes of documents under a limit of 64: one run, which a store would take
+        // as one buffer as long as the run. A shard's memory may have no span that long free.
+        let docs = kibibyte_docs(3_000);
+        let s = spec(r#"{"k":1}"#);
+        let expected = s.sort(docs.clone(), None).expect("sorted");
+        let store = Longest::default();
+        let counted = Counting::new(&store);
+        let out = sort_runs(&s, docs, None, 64 << 20, &counted).expect("sorted");
+        assert_eq!(out, expected);
+        assert!(store.longest() <= PIECE_BYTES, "a piece of {} bytes", store.longest());
+        assert!(store.0.written() >= 3, "{} pieces", store.0.written());
+        // The run counts once, with all its documents, whatever its pieces.
+        let stats = counted.stats();
+        assert_eq!((stats.spills, stats.records), (1, 3_000));
+        assert!(stats.bytes > 3_000_000, "{stats:?}");
+        assert!(store.0.is_empty());
+    }
+
+    #[test]
+    fn the_pieces_of_a_merge_pass_stay_short_under_a_long_limit() {
+        // A run for each document, more than a merge under 8 MiB holds open at once: a pass
+        // merges them first into runs of more than a mebibyte.
+        let docs = kibibyte_docs(1_500);
+        let s = spec(r#"{"k":1}"#);
+        let expected = s.sort(docs.clone(), None).expect("sorted");
+        let store = Longest::default();
+        let (by, cmp) = (s.clone(), s.clone());
+        let mut sorter = Sorter::new(
+            Box::new(move |d: &Document| by.key(d, None)),
+            Box::new(move |a: &Vec<Value>, b: &Vec<Value>| cmp.compare(a, b, None)),
+            (8 << 20, &store as &dyn SpillStore),
+        );
+        for d in docs {
+            sorter.push_within(d, 1).expect("taken");
+        }
+        let mut out = Vec::new();
+        sorter
+            .finish(|_, d| {
+                out.push(d);
+                Ok(())
+            })
+            .expect("merged");
+        assert_eq!(out, expected);
+        assert!(store.0.written() > 1_500, "a pass wrote runs: {}", store.0.written());
+        assert!(store.longest() <= PIECE_BYTES, "a piece of {} bytes", store.longest());
+        assert!(store.0.is_empty());
+    }
+
+    #[test]
+    fn a_run_whose_store_fails_midway_leaves_none_of_its_pieces() {
+        /// A store that takes two buffers and fails the third.
+        #[derive(Debug, Default)]
+        struct Third(MemorySpill);
+        impl SpillStore for Third {
+            fn write(&self, bytes: &[u8]) -> Result<u64, MqlError> {
+                if self.0.written() == 2 {
+                    return Err(errors::error(codes::INTERNAL_ERROR, "no room"));
+                }
+                self.0.write(bytes)
+            }
+            fn read(&self, run: u64, offset: u64, len: usize) -> Result<Vec<u8>, MqlError> {
+                self.0.read(run, offset, len)
+            }
+            fn remove(&self, run: u64) {
+                self.0.remove(run);
+            }
+        }
+        let store = Third::default();
+        let e = sort_runs(&spec(r#"{"k":1}"#), kibibyte_docs(3_000), None, 64 << 20, &store)
+            .expect_err("the store failed");
+        assert_eq!(e.message, "no room");
+        assert_eq!(store.0.written(), 2);
+        assert!(store.0.is_empty(), "{} pieces left", store.0.len());
     }
 
     #[test]
