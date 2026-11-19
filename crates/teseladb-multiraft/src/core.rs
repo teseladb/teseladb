@@ -1545,7 +1545,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
                     // The snapshot is durable: the commit of its `Ready` may go to disk now.
                     (grp.installing, grp.commit_cap) = (false, None);
                     let (index, (node, total)) = (d.index, d.from);
-                    if self.persist(group, d.number, d.entries, d.hs, d.after) {
+                    if self.persist(group, d.number, d.entries, d.hs, d.after, false) {
                         let ack = PeerFrame::SnapshotAck { group, index, offset: total, ok: true };
                         self.frames.push((node, ack));
                     }
@@ -1845,6 +1845,9 @@ impl<S: StateMachine> MultiRaftCore<S> {
             self.groups.get_mut(&g).expect("group").commit_cap.get_or_insert(on_disk);
         }
         let after = rd.messages_after_persist;
+        // A configuration change is applied as its entry is committed: the commit that covers
+        // it goes to disk now (`persist`).
+        let conf_changes = rd.committed.iter().any(|e| e.kind == EntryKind::ConfChange);
         let ok = match rd.snapshot_to_apply {
             // A snapshot from the leader: the state is restored now and the rest of the `Ready`
             // is persisted once the snapshot is durable.
@@ -1858,7 +1861,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
             // group may close (H-047 of the native tests).
             None => {
                 self.installing_from.remove(&g);
-                self.persist(g, rd.number, entries, hs, after)
+                self.persist(g, rd.number, entries, hs, after, conf_changes)
             }
         };
         if !ok {
@@ -1995,7 +1998,8 @@ impl<S: StateMachine> MultiRaftCore<S> {
     }
 
     /// Persists a `Ready`'s entries and hard state; `after` leaves once they are durable. `false`
-    /// if the store refused them (the group stops).
+    /// if the store refused them (the group stops). `sync_commit`: the `Ready` applied a
+    /// configuration change, and the commit that covers it is synced with it.
     fn persist(
         &mut self,
         g: GroupId,
@@ -2003,6 +2007,7 @@ impl<S: StateMachine> MultiRaftCore<S> {
         entries: Vec<LogEntry>,
         hs: Option<teseladb_raftlog::HardState>,
         after: Vec<Message>,
+        sync_commit: bool,
     ) -> bool {
         // Faulty variant (005 T033): the entries another leader's log replaces leave no record.
         #[cfg(not(teseladb_bug = "rollback_unrecorded"))]
@@ -2014,14 +2019,21 @@ impl<S: StateMachine> MultiRaftCore<S> {
         // sync of its own (H-008 of the native tests: the next write waited for that sync, and
         // with the load spread over many ranges each commit took one). The term, the vote and the
         // entries are synced before anything that depends on them leaves.
+        // The commit of a configuration change is the exception. A replica opens with the
+        // configuration of its last snapshot and the changes up to the commit it has on disk:
+        // with the commit of a change left in memory, a group that went quiet after it opened,
+        // on every replica that restarted, with the configuration of before, and when that one
+        // had no majority among them the group had no leader (005 FR-040).
         let on_disk = self.store.hard_state(g);
         let grp = self.groups.get_mut(&g).expect("group");
         let latest = grp.unwritten_hs.or(on_disk);
-        let commit_only = entries.is_empty()
+        let commit_only = !sync_commit
+            && entries.is_empty()
             && hs.is_some_and(|h| latest.is_some_and(|d| d.term == h.term && d.vote == h.vote));
-        // A batch with entries carries the commit left out of the log.
+        // A batch with entries carries the commit left out of the log, and so does the batch of
+        // a configuration change.
         let hs = match hs {
-            None if !entries.is_empty() => grp.unwritten_hs,
+            None if !entries.is_empty() || sync_commit => grp.unwritten_hs,
             hs => hs,
         };
         let hs = match grp.commit_cap {
