@@ -1,7 +1,9 @@
 //! What a document's version keeps for its event (014 FR-002, FR-005, FR-009, D-114): the
 //! description of an update by operators, the transaction that wrote it (`lsid`, `txnNumber`), its
 //! position in the write or the transaction and, inside a transaction, the type of each write and
-//! the document it left. It is stored next to the document, at key `document · 00 · position` and
+//! the document it left. It is stored next to the document, at key `document · 00 · order` (the
+//! order of the write among those its entry makes to the document, or its position in its
+//! transaction: FR-020) and
 //! at the same mark, as a version that only serves the history (`teseladb_lsm::HISTORY_VALUE`):
 //! written in the same entry or the same intents as the document, it goes wherever the document
 //! goes, and the GC drops it once it leaves the retention window. A transaction that writes a
@@ -22,6 +24,8 @@
 //! 9.0.4 gives one `update` (or `replace`) event for it, keyed by the document before the change
 //! (measured on 02-11-2026): the meta at the new key says where it came from, and the meta of the
 //! deletion at the old key that it gives no event.
+
+use std::collections::BTreeMap;
 
 use teseladb_bson::{BsonError, Document, RawDoc, Value};
 use teseladb_hlc::Hlc;
@@ -295,9 +299,9 @@ impl ChangeMeta {
     }
 }
 
-/// The key of the meta of the write at position `op` of the document at `doc`: right after the
-/// document, before any other document, because the encoding of a document's key is
-/// self-delimiting.
+/// The key of the meta of the write of order `op` among those of an entry to the document at
+/// `doc` (FR-020; the position in its transaction, inside one): right after the document,
+/// before any other document, because the encoding of a document's key is self-delimiting.
 pub fn meta_key(doc: &[u8], op: u32) -> Vec<u8> {
     let mut k = Vec::with_capacity(doc.len() + META_KEY_TAIL);
     k.extend_from_slice(doc);
@@ -345,12 +349,26 @@ pub fn history_with(
 ) -> Vec<(Vec<u8>, ChangeMeta)> {
     let first = txn.map_or(0, |(_, n)| n);
     let retry = if txn.is_some() { None } else { retry };
-    let mut out = Vec::new();
+    let mut out: Vec<(Vec<u8>, ChangeMeta)> = Vec::new();
+    // The metas each document has so far, when the write has several: the order in its key.
+    let mut metas_of: BTreeMap<&[u8], u32> = BTreeMap::new();
     for (op, w) in (first..).zip(writes) {
         let bare = w.update.is_none() && !w.replace && w.moved.is_none();
         if txn.is_none() && retry.is_none() && op == 0 && bare {
             continue;
         }
+        // A transaction's writes share its mark, whatever their statement: their keys keep the
+        // position in it. Outside one the mark is the entry's, and the key has the order of the
+        // write among those the entry makes to its document (FR-020).
+        let order = match (txn.is_some(), writes.len()) {
+            (true, _) => op,
+            (false, 1) => 0,
+            (false, _) => {
+                let n = metas_of.entry(w.key.as_slice()).or_default();
+                *n += 1;
+                *n - 1
+            }
+        };
         let meta = ChangeMeta {
             txn: txn.map(|(t, _)| t.clone()),
             retry: retry.copied(),
@@ -361,7 +379,7 @@ pub fn history_with(
             doc: w.doc.clone(),
             moved: w.moved.clone(),
         };
-        out.push((meta_key(&w.key, op), meta));
+        out.push((meta_key(&w.key, order), meta));
     }
     out
 }

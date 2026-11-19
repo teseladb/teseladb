@@ -1287,7 +1287,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
             },
         ),
         (
-            meta_key(&key(2), 1),
+            meta_key(&key(2), 0),
             ChangeMeta {
                 txn: None,
                 retry: None,
@@ -1310,7 +1310,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
     assert_eq!(
         history(&out),
         vec![(
-            meta_key(&key(2), 1),
+            meta_key(&key(2), 0),
             ChangeMeta {
                 txn: None,
                 retry: None,
@@ -1352,7 +1352,7 @@ fn a_write_keeps_the_history_of_its_documents_next_to_them() {
     assert_eq!(
         history(&out),
         vec![(
-            meta_key(&key(2), 1),
+            meta_key(&key(2), 0),
             ChangeMeta {
                 txn: None,
                 retry: None,

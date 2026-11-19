@@ -93,10 +93,11 @@ fn a_write_keeps_a_meta_only_for_the_documents_it_says_something_of() {
     let c = DocWrite { update: Some(desc()), ..write(b"\x01c") };
     let writes = [write(b"\x01a"), write(b"\x01b"), c];
     // Alone, the first document of a write needs nothing; the others keep their position, and
-    // the updated one its description.
+    // the updated one its description. The position goes in the meta: the key has the order of
+    // the write among those of its document, the first one here (014 FR-020).
     let want = vec![
-        (meta_key(b"\x01b", 1), m(None, 1, None, false)),
-        (meta_key(b"\x01c", 2), m(None, 2, Some(desc()), false)),
+        (meta_key(b"\x01b", 0), m(None, 1, None, false)),
+        (meta_key(b"\x01c", 0), m(None, 2, Some(desc()), false)),
     ];
     assert_eq!(history(&writes, None), want);
     assert!(history(&writes[..1], None).is_empty());
@@ -165,6 +166,30 @@ fn a_retryable_write_keeps_its_session() {
     image[last] = 9;
     assert_eq!(ChangeMeta::decode(&image), Err(MetaError::Flags(9)));
     assert_eq!(ChangeMeta::decode(&image[..20]), Err(MetaError::Truncated));
+}
+
+/// A document a command writes at one position and another command at another keeps both metas
+/// at one key, each at its write's mark: a key for each position stayed next to the document
+/// until the retention window passed, and every scan of documents went through them (014
+/// FR-020). Two writes of one entry to the same document still have a key each.
+#[test]
+fn the_key_of_a_meta_has_the_order_of_the_write_among_those_of_its_document() {
+    let upd = |key: &[u8]| DocWrite { update: Some(desc()), ..write(key) };
+    let third = history(&[upd(b"\x01x"), upd(b"\x01y"), upd(b"\x01a")], None);
+    let first = history(&[upd(b"\x01a"), upd(b"\x01x")], None);
+    let keys = |metas: &[(Vec<u8>, ChangeMeta)], doc: &[u8]| -> Vec<(Vec<u8>, u32)> {
+        let of_doc = metas.iter().filter(|(k, _)| doc_of_meta(k) == Some(doc));
+        of_doc.map(|(k, meta)| (k.clone(), meta.op)).collect()
+    };
+    assert_eq!(keys(&third, b"\x01a"), [(meta_key(b"\x01a", 0), 2)]);
+    assert_eq!(keys(&first, b"\x01a"), [(meta_key(b"\x01a", 0), 0)]);
+    let twice = history(&[upd(b"\x01x"), upd(b"\x01a"), upd(b"\x01y"), upd(b"\x01a")], None);
+    let both = [(meta_key(b"\x01a", 0), 1), (meta_key(b"\x01a", 1), 3)];
+    assert_eq!(keys(&twice, b"\x01a"), both);
+    // A transaction's writes are confirmed at one mark, whatever their statement: their keys
+    // keep the position in the transaction.
+    let in_txn = history(&[upd(b"\x01x"), upd(b"\x01a")], Some((&txn(), 4)));
+    assert_eq!(keys(&in_txn, b"\x01a"), [(meta_key(b"\x01a", 5), 5)]);
 }
 
 /// Every document of a retryable write has a meta, the first insert too; inside a transaction the
