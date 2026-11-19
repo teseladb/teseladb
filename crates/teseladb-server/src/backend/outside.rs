@@ -192,6 +192,8 @@ pub(super) struct Outside {
     /// The range whose view this worker waited for in vain, and until when it does not wait for
     /// it again (005 FR-034).
     gave_up: Option<(GroupId, Instant)>,
+    /// The documents of a filter's batch it runs before its shard's other work (023 FR-044).
+    pub(super) pace: super::pace::FilterPace,
 }
 
 impl Outside {
@@ -503,7 +505,7 @@ impl ServerBackend {
             Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
         };
         let dir = self.h.data_dir.clone();
-        let Outside { caches, files, .. } = &mut self.outside;
+        let Outside { caches, files, pace, .. } = &mut self.outside;
         let supply = |need: &BlockNeed| {
             let Some(dir) = dir.as_deref() else { return false };
             wait::yield_if_asked();
@@ -511,10 +513,7 @@ impl ServerBackend {
         };
         // The shard's other work runs between two batches once the task quota is used up: the
         // core's turns and the device log's writer do not wait for the whole part.
-        let keep = |batch: &[&[u8]]| {
-            wait::yield_if_asked();
-            keep(batch)
-        };
+        let keep = |batch: &[&[u8]]| pace.run(batch, keep);
         let span = (start, hi.as_slice());
         let most = (examine, MAX_SCAN_BLOCKS, &begun);
         let cache = &mut caches[core];
@@ -568,16 +567,13 @@ impl ServerBackend {
             Nanos(u64::try_from(since.as_nanos()).unwrap_or(u64::MAX))
         };
         let dir = self.h.data_dir.clone();
-        let Outside { caches, files, .. } = &mut self.outside;
+        let Outside { caches, files, pace, .. } = &mut self.outside;
         let supply = |need: &BlockNeed| {
             let Some(dir) = dir.as_deref() else { return false };
             wait::yield_if_asked();
             block(files, dir, need).is_some_and(|b| view.lsm().supply(need, &b).is_ok())
         };
-        let keep = |batch: &[&[u8]]| {
-            wait::yield_if_asked();
-            keep(batch)
-        };
+        let keep = |batch: &[&[u8]]| pace.run(batch, keep);
         let span = (start, hi.as_slice());
         let most = (examine, MAX_SCAN_BLOCKS, &begun);
         let cache = &mut caches[core];

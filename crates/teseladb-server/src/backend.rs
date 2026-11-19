@@ -10,6 +10,7 @@ mod barrier;
 mod intent_wait;
 mod lookups;
 mod outside;
+mod pace;
 mod pushed_scan;
 mod scatter;
 mod span;
@@ -1501,7 +1502,20 @@ impl Backend for ServerBackend {
                 return Ok(found);
             }
         }
-        teseladb_wire::commands::matching_by_scan(self, (start, end), examine, concern, keep)
+        // The plain scan filters on this thread too, at the pace that lets the shard's other
+        // work run (023 FR-044): it held the shard for the whole part, and the `killOp` sent to
+        // stop a filter that costs each document a script waited for the read's end.
+        let mut pace = self.outside.pace;
+        let mut paced = |batch: &[&[u8]]| pace.run(batch, keep);
+        let found = teseladb_wire::commands::matching_by_scan(
+            self,
+            (start, end),
+            examine,
+            concern,
+            &mut paced,
+        );
+        self.outside.pace = pace;
+        found
     }
 
     fn scatter_groups(
