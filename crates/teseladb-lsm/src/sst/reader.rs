@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use teseladb_crypto::at_rest::{FileKey, KeyRing};
-use teseladb_keys::zone::Zones;
 use teseladb_types::Bytes;
 
 use super::block::{Block, BlockCursor, unframe_with, unpack};
@@ -324,24 +323,6 @@ impl Table {
             None => false,
             Some(k) => self.block_span(k).0 <= hi,
         }
-    }
-
-    /// Whether the zones of every data block that may hold a version of a logical key in
-    /// `[lo, hi]` rule it out for a filter (FR-039): `may_match` says of a block's zones whether
-    /// a document the filter accepts may be in it. `true` is certain: no version of such a key
-    /// in the file matches. A block that was not summarised, and a file without zones, rule
-    /// nothing out.
-    pub(crate) fn ruled_out_over(
-        &self,
-        lo: &[u8],
-        hi: &[u8],
-        may_match: &dyn Fn(&dyn Zones) -> bool,
-    ) -> bool {
-        let Some(zones) = self.zones.as_ref() else { return false };
-        let Some(first) = self.find_block(&entry::first_version(lo)) else { return true };
-        (first..self.blocks())
-            .take_while(|&k| self.block_span(k).0 <= hi)
-            .all(|k| zones.block(k).is_some_and(|z| !may_match(&z)))
     }
 
     /// Where block `i` is.
