@@ -170,9 +170,9 @@ pub struct ServerBackend {
     /// with its own node number, which in the same millisecond and sequence sorts below another
     /// node's, so the cluster time this backend reads at is never below it (017 SC-002).
     committed: Hlc,
-    /// The mark of the last transaction across ranges the session committed: the ranges of its
-    /// writes did not answer it, so a view of one of them below it may lack it (D-186).
-    pub(crate) across_committed: Hlc,
+    /// The marks the views of the ranges of the session's transactions have to reach before it
+    /// reads them outside the cores (005 FR-028).
+    pub(crate) across: outside::AcrossMarks,
     /// What its reads served without the cores keep (005 FR-028).
     outside: outside::Outside,
     /// The entries of the statements of the running command, which wait for one barrier
@@ -215,7 +215,7 @@ impl ServerBackend {
             selection: None,
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
-            across_committed: Hlc { physical: 0, logical: 0 },
+            across: outside::AcrossMarks::default(),
             outside: outside::Outside::default(),
             statements: None,
             ahead: pushed_scan::ReadAhead::default(),
@@ -1803,7 +1803,10 @@ impl Backend for ServerBackend {
         if let Some(ts) = committed_mark(&reply) {
             self.h.clock.0.update(ts);
             self.committed = self.committed.max(ts);
-            self.across_committed = self.across_committed.max(ts);
+            match &reply {
+                teseladb_range::host::Reply::Record(_) => self.across.committed(g, ts),
+                _ => self.across.wrote(g, ts),
+            }
         }
         Ok(reply)
     }

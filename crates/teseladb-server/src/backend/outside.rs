@@ -177,6 +177,90 @@ fn look_until<T>(
     Some((seen, true))
 }
 
+/// The marks the views of some ranges have to reach before the session reads them outside the
+/// cores: those where its transactions wrote or resolved intents, and those of their records.
+/// A transaction across ranges is answered by the range of its record, so a view of one of its
+/// other ranges may be from before its intents and lack the commit. A range none of them wrote
+/// in has no mark: any view of it serves the session. One mark for every range sent the reads of
+/// all of them to their cores after each commit and after each write split among the
+/// partitions of a collection (002 run p67: 1.67 million reads in 300 s, and almost no part of
+/// an aggregation folded from the views).
+#[derive(Debug, Default)]
+pub(crate) struct AcrossMarks(Vec<(GroupId, Hlc)>);
+
+impl AcrossMarks {
+    /// An entry of range `g` at `ts` was answered to the session: intents written or resolved
+    /// there. Its views below `ts` lack it.
+    pub(crate) fn wrote(&mut self, g: GroupId, ts: Hlc) {
+        match self.0.iter_mut().find(|(r, _)| *r == g) {
+            Some((_, mark)) => *mark = (*mark).max(ts),
+            None => self.0.push((g, ts)),
+        }
+    }
+
+    /// A transaction committed at `ts` with its record in range `g`: the ranges the session
+    /// still waits for may hold its intents, and their views below `ts` may lack the commit.
+    pub(crate) fn committed(&mut self, g: GroupId, ts: Hlc) {
+        for (_, mark) in &mut self.0 {
+            *mark = (*mark).max(ts);
+        }
+        self.wrote(g, ts);
+    }
+
+    /// Whether a view of range `g` that applied up to `applied` holds what the session wrote
+    /// there. Once one does, every later view of the range does: the range is waited for no
+    /// more.
+    pub(crate) fn holds(&mut self, g: GroupId, applied: Hlc) -> bool {
+        match self.0.iter().position(|(r, _)| *r == g) {
+            Some(i) if applied < self.0[i].1 => false,
+            Some(i) => {
+                self.0.swap_remove(i);
+                true
+            }
+            None => true,
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage, coverage(off))]
+mod across_marks {
+    use super::*;
+
+    fn at(n: u64) -> Hlc {
+        Hlc { physical: n, logical: 0 }
+    }
+
+    #[test]
+    fn a_range_the_session_s_transactions_did_not_write_in_is_read_from_any_view() {
+        let mut marks = AcrossMarks::default();
+        marks.wrote(GroupId(1), at(50));
+        marks.committed(GroupId(2), at(60));
+        // Range 3 took no intent and holds no record: a view from before the commit serves it.
+        assert!(marks.holds(GroupId(3), at(10)));
+        // The ranges of the transaction wait for a view at or above its commit.
+        assert!(!marks.holds(GroupId(1), at(55)));
+        assert!(!marks.holds(GroupId(2), at(59)));
+        assert!(marks.holds(GroupId(1), at(60)));
+        assert!(marks.holds(GroupId(2), at(61)));
+    }
+
+    #[test]
+    fn a_range_whose_view_held_the_writes_is_waited_for_no_more() {
+        let mut marks = AcrossMarks::default();
+        marks.wrote(GroupId(1), at(50));
+        assert!(!marks.holds(GroupId(1), at(49)));
+        assert!(marks.holds(GroupId(1), at(50)));
+        // A later commit elsewhere does not bring the range back: it took no intent since.
+        marks.committed(GroupId(2), at(90));
+        assert!(marks.holds(GroupId(1), at(51)));
+        // The newest of two entries of a range is the one its view has to hold.
+        marks.wrote(GroupId(4), at(70));
+        marks.wrote(GroupId(4), at(65));
+        assert!(!marks.holds(GroupId(4), at(69)));
+    }
+}
+
 /// What a worker keeps for its reads outside the cores.
 #[derive(Debug, Default)]
 pub(super) struct Outside {
@@ -246,9 +330,10 @@ impl ServerBackend {
         if waited && !view.holds(&begun) {
             self.outside.gave_up = Some((g, Instant::now() + VIEW_WAIT));
         }
-        // A view below the session's last commit may lack it: a transaction across ranges is
-        // answered by the range of its record, not by this one; the scan goes to the core.
-        if view.applied_mark() < self.across_committed {
+        // A view below what the session's transactions wrote in this range may lack it: a
+        // transaction across ranges is answered by the range of its record, not by this one;
+        // the scan goes to the core.
+        if !self.across.holds(g, view.applied_mark()) {
             Decline::Across.count();
             return None;
         }
@@ -265,9 +350,10 @@ impl ServerBackend {
         let (g, core) = unrouted(self.h.routes.route_of(&mut self.outside.routes, key))?;
         let core = usize::from(core);
         let view = unviewed(self.h.views.get(core).and_then(|v| v.get(g)))?;
-        // A view below the session's last commit may lack it: a transaction across ranges is
-        // answered by the range of its record, not by this one (D-186).
-        if view.applied_mark() < self.across_committed {
+        // A view below what the session's transactions wrote in this range may lack it: a
+        // transaction across ranges is answered by the range of its record, not by this one
+        // (D-186).
+        if !self.across.holds(g, view.applied_mark()) {
             Decline::Across.count();
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
