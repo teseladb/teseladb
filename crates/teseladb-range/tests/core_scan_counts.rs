@@ -20,6 +20,8 @@ use teseladb_range::mutate::Outcome;
 use teseladb_range::push::{
     CoreScans, SCAN_STEP_DOCUMENTS, SCAN_STEP_ENTRIES, ScanState, TxnView, core_scan_totals,
 };
+use teseladb_range::read::ReadConcern;
+use teseladb_range::view::{MATCH_BATCH, Part};
 use txn_node::*;
 
 /// Writes a document and, next to it, the meta of the write.
@@ -119,4 +121,44 @@ fn a_step_of_a_scan_stops_at_the_entries_it_takes_from_its_sources() {
     let (read, stops) = to_the_end(&n, &mut scan);
     assert_eq!(read, docs, "every document");
     assert!(stops >= 1, "the step stops at the entries it took, with documents left to give");
+}
+
+/// A part read from the range's view lets its shard run its other work once every
+/// [`MATCH_BATCH`] entries its scan takes from its sources (023 FR-044). Counted in the documents
+/// it gave, a part over documents rewritten with their metas read several times the entries
+/// between two pauses, and the device log's writer waited longer for its shard (one-node load
+/// p63b to p64b: a sync waited 0.15 to 0.18 ms in its queue, 0.11 to 0.13 before).
+#[test]
+fn a_part_read_from_the_view_pauses_at_the_entries_it_takes() {
+    let mut n = Node::new();
+    let docs = MATCH_BATCH - 4;
+    let key = |i: usize| [b"\x01f".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
+    // Fewer documents than a pause, each written four times with its meta.
+    for _ in 0..4 {
+        for i in 0..docs {
+            write_with_meta(&mut n, &key(i), MAJORITY);
+        }
+    }
+    n.settle();
+    let view = n.host.views().get(G).expect("the view");
+    let begun = view.begin();
+    let span: (&[u8], &[u8]) = (b"\x01f", b"\x01g");
+    let part = Part { docs: 1_000, backward: false, blocks: 64 };
+    let (mut cache, now) = (teseladb_lsm::ViewCache::default(), n.now);
+    let mut pauses = 0;
+    let read = view
+        .scan_begun_pausing(
+            &mut cache,
+            span,
+            (part, &begun),
+            || now,
+            ReadConcern::Local,
+            |_| false,
+            || pauses += 1,
+        )
+        .expect("served outside");
+    assert_eq!(read.rows.len(), docs, "every document");
+    // Two entries of each document go through the merge and four versions of its meta are
+    // passed over: six times its documents, several pauses' worth.
+    assert!(pauses >= 4, "{pauses} pauses for {docs} documents rewritten");
 }

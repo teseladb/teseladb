@@ -562,9 +562,10 @@ impl RangeView {
         self.scan_begun_pausing(cache, span, part, now, concern, supply, || {})
     }
 
-    /// As [`RangeView::scan_begun`], calling `pause` once every [`MATCH_BATCH`] documents read:
-    /// a caller on a shard lets it run its other work there, as the filtered scans do between
-    /// their batches, instead of holding it for the whole part.
+    /// As [`RangeView::scan_begun`], calling `pause` once every [`MATCH_BATCH`] entries the scan
+    /// takes from its sources, the versions under each document and the ones passed over among
+    /// them (023 FR-044): a caller on a shard lets it run its other work there, as the filtered
+    /// scans do between their batches, instead of holding it for the whole part.
     #[allow(clippy::too_many_arguments)]
     pub fn scan_begun_pausing(
         &self,
@@ -585,8 +586,8 @@ impl RangeView {
         let mut rows: Vec<crate::push::Row> = Vec::new();
         let mut blocks = Blocks::new(part.blocks);
         let mut next = None;
-        // The entries the scan gave, for the pauses.
-        let mut stepped = 0usize;
+        // The items the scan gave, and the entries it had taken at its last pause.
+        let (mut given, mut paused_at) = (0u64, 0u64);
         while rows.len() < part.docs {
             match scan.next(&self.lsm) {
                 SharedStep::Item(i) if i.kind == Kind::Intent => {
@@ -594,8 +595,10 @@ impl RangeView {
                     return None;
                 }
                 SharedStep::Item(i) => {
-                    stepped += 1;
-                    if stepped.is_multiple_of(MATCH_BATCH) {
+                    given += 1;
+                    let taken = scan.taken(given);
+                    if taken - paused_at >= MATCH_BATCH as u64 {
+                        paused_at = taken;
                         pause();
                     }
                     if let Some((t, v)) = split_value(&i.value)
@@ -1060,6 +1063,15 @@ impl Either {
         match self {
             Either::Forward(s) => s.next(lsm),
             Either::Backward(s) => s.next(lsm),
+        }
+    }
+
+    /// The entries the scan took from its sources so far; one from the last key down looks
+    /// each key up and counts the `given` items.
+    fn taken(&self, given: u64) -> u64 {
+        match self {
+            Either::Forward(s) => s.taken(),
+            Either::Backward(_) => given,
         }
     }
 }
