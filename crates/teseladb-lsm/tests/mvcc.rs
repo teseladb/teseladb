@@ -242,12 +242,12 @@ fn a_scan_that_passes_over_history_values_gives_the_documents_and_counts_the_res
     let every: [&[u8]; 4] = [b"a", b"a\0m", b"b", b"b\0m"];
     assert_eq!(keys(&all), every);
     assert_eq!((counted.entries, counted.passed), (6, 0));
-    // With it: the documents, and the three versions of the metas passed over.
+    // With it: the documents; the three versions of the metas are entries it walked past.
     let s = v.scan(b"a", b"z", ts(50, 0)).passing_history();
     let (docs, counted) = drain(s, &mut lsm, &mut disk);
     let two: [&[u8]; 2] = [b"a", b"b"];
     assert_eq!(keys(&docs), two);
-    assert_eq!((counted.entries, counted.items, counted.passed), (3, 2, 3));
+    assert_eq!((counted.entries, counted.items, counted.passed), (6, 2, 3));
     // A scan that goes on right after `a` starts at its meta.
     let s = v.scan(b"a\0", b"z", ts(50, 0)).passing_history();
     let (rest, _) = drain(s, &mut lsm, &mut disk);
@@ -264,6 +264,38 @@ fn a_scan_that_passes_over_history_values_gives_the_documents_and_counts_the_res
     let three: [&[u8]; 3] = [b"a", b"b", b"b\0m"];
     assert_eq!(keys(&with_intent), three);
     assert_eq!(kinds, [Kind::Put, Kind::Put, Kind::Intent]);
+}
+
+/// A transaction may commit at the mark of its intents: each commit is then written over its
+/// intent's key and hides, by being in a newer source, the intent an older file still holds
+/// (FR-007). A scan that walks past the versions that only serve the history (FR-046) must go on
+/// hiding it: with the commit of a document's change meta passed over before the merge, the
+/// intent of a transaction that had ended came out of the file, and a reader that waits for an
+/// intent's transaction would wait for one that is over.
+#[test]
+fn a_commit_at_its_intent_s_mark_hides_the_intent_from_a_scan_that_passes_history_values() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    let (doc, meta) = (teseladb_lsm::DOCUMENT_VALUE, teseladb_lsm::HISTORY_VALUE);
+    lsm.put(G, 1, b"a", ts(5, 0), &[doc, 1]).unwrap();
+    // The transaction writes `a` and its meta, and its intents reach a file before it ends.
+    lsm.put_intent(G, 2, b"a", ts(10, 0), b"txn").unwrap();
+    lsm.put_intent(G, 3, b"a\0m", ts(10, 0), b"txn").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let commit = |value: &'static [u8]| Some(Commit { ts: ts(10, 0), kind: Kind::Put, value });
+    lsm.resolve_intent(G, 4, b"a", ts(10, 0), commit(&[1, 2])).unwrap();
+    lsm.resolve_intent(G, 5, b"a\0m", ts(10, 0), commit(&[5, 2])).unwrap();
+    assert_eq!((doc, meta), (1, 5), "the values the commits wrote");
+    let v = lsm.view();
+    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)).passing_history(), &mut lsm, &mut disk);
+    assert_eq!(given, [(b"a".to_vec(), Kind::Put)], "the document, and no intent");
+    // The same once the commits reach a file of their own.
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let v = lsm.view();
+    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)).passing_history(), &mut lsm, &mut disk);
+    assert_eq!(given, [(b"a".to_vec(), Kind::Put)], "the document, and no intent");
 }
 
 #[test]

@@ -158,7 +158,7 @@ impl Cursor {
 
     /// Whether the cursor stands at a value that only serves the history
     /// ([`crate::HISTORY_VALUE`]): one stored with its key, as they all are (FR-034). A cursor
-    /// at no entry stands at none.
+    /// at no entry stands at none. A scan of documents walks past it in its merge (FR-046).
     pub(crate) fn at_history(&self) -> bool {
         let history = |kind: Kind, value: &[u8]| {
             kind == Kind::Put && value.first() == Some(&crate::HISTORY_VALUE)

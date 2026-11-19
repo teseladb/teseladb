@@ -178,6 +178,9 @@ fn rounds(seed: u64, readers: usize) {
                 while done_rx.try_recv().is_ok() {
                     finished += 1;
                 }
+                // A reader ends when it is told to: one that ended here stopped on an
+                // assertion, and waiting for its answer would never end.
+                assert!(workers.iter().all(|w| !w.is_finished()), "a reader stopped: see above");
                 thread::yield_now();
             }
         }

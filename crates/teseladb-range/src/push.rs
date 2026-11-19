@@ -240,10 +240,10 @@ impl MainScan {
         }
     }
 
-    /// The entries the scan took from its sources so far, those passed over among them.
+    /// The entries the scan took from its sources so far, the versions it walked past among
+    /// them.
     fn took(&self) -> u64 {
-        let (entries, _, passed) = self.taken();
-        entries + passed
+        self.taken().0
     }
 }
 
@@ -355,14 +355,12 @@ pub type BlockFilter = std::rc::Rc<dyn Fn(&dyn teseladb_keys::zone::Zones) -> bo
 /// load p60, 012 FR-030).
 pub const SCAN_STEP_DOCUMENTS: usize = 128;
 
-/// The most entries of its sources one step of a scan in the core takes, the versions its
-/// cursors pass over among them (004 FR-046): what holds the core's turn is what a step reads,
-/// not what it gives (023 FR-044), and a version passed over costs four fifths of one that
-/// goes through the merge, since most of either is reading the entry (profile of run p63). A
-/// step of [`SCAN_STEP_DOCUMENTS`] took 385 entries in the one-node load while every version
-/// went through the merge; with the change metas passed over it took 870 for its 128
-/// documents, the messages to the core waited a fifth longer and the core's ticks came half as
-/// late again (run p63b).
+/// The most entries of its sources one step of a scan in the core takes, the versions it walks
+/// past among them (004 FR-046): what holds the core's turn is what a step reads, not what it
+/// gives (023 FR-044), since most of an entry's cost is reading it (profile of run p63). A step
+/// of [`SCAN_STEP_DOCUMENTS`] took 385 entries in the one-node load while a scan gave the change
+/// metas as items; once it stopped giving them it took 870 for its 128 documents, the messages
+/// to the core waited a fifth longer and the core's ticks came half as late again (run p63b).
 pub const SCAN_STEP_ENTRIES: u64 = 384;
 
 impl ScanState {
@@ -396,7 +394,7 @@ impl ScanState {
         });
         let main = match backward {
             true => MainScan::Backward(v.scan_back(start, end, read_ts)),
-            // A document's change meta is no document: the cursors pass over it (004 FR-046).
+            // A document's change meta is no document: the scan walks past it (004 FR-046).
             false => MainScan::Forward(v.scan(start, end, read_ts).passing_history()),
         };
         ScanState {

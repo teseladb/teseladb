@@ -419,15 +419,13 @@ impl SharedScan {
         self.scan.skipped_blocks()
     }
 
-    /// The entries the scan took from its sources so far, the versions its cursors passed over
-    /// among them (FR-046): what it read, whatever it gave.
+    /// The entries the scan took from its sources so far: what it read, whatever it gave.
     pub fn taken(&self) -> u64 {
-        let c = self.scan.counts();
-        c.entries + c.passed
+        self.scan.counts().entries
     }
 
-    /// The scan whose cursors pass over the versions that only serve the history before the
-    /// merge (FR-046), as the core's [`Scan::passing_history`].
+    /// The scan that walks past the versions that only serve the history (FR-046), as the
+    /// core's [`Scan::passing_history`].
     #[must_use]
     pub fn passing_history(self) -> SharedScan {
         SharedScan { scan: self.scan.passing_history() }

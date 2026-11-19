@@ -69,10 +69,10 @@ fn the_scans_of_the_cores_count_the_documents_and_the_metas_they_go_through() {
         documents: after.documents - before.documents,
         metas: after.metas - before.metas,
     };
-    // The three versions of the two metas are passed over; the older version of the document
-    // written twice is an entry of the merge.
+    // The scan walks past the three versions of the two metas; they and the older version of
+    // the document written twice are entries it took.
     assert_eq!((took.documents, took.metas, took.items), (3, 3, 3), "{took:?}");
-    assert_eq!(took.entries, 4, "{took:?}");
+    assert_eq!(took.entries, 7, "{took:?}");
 }
 
 /// Steps `scan` to its end: its documents and how many times it stopped at its step.

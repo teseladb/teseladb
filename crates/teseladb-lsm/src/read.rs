@@ -960,8 +960,8 @@ pub struct Scan {
     finished: bool,
     /// Data blocks passed over by their zone maps (FR-039).
     skipped: u64,
-    /// Whether its cursors pass over the versions that only serve the history before they
-    /// reach the merge (FR-046), and how many they passed.
+    /// Whether it walks past the versions that only serve the history (FR-046), and how many
+    /// it walked past: entries it took and gave no one.
     pass_history: bool,
     passed: u32,
     /// The top-level fields whose columns the scan takes in place of whole data blocks (010
@@ -986,8 +986,8 @@ pub struct ScanCounts {
     pub items: u64,
     /// Data blocks passed over by their zone maps (FR-039).
     pub skipped: u64,
-    /// Versions that only serve the history passed over by the cursors, before the merge
-    /// (FR-046): they are no entries of the scan.
+    /// Versions that only serve the history among those entries (FR-046): the scan walked past
+    /// them and gave none.
     pub passed: u64,
 }
 
@@ -1239,10 +1239,11 @@ impl Scan {
         self
     }
 
-    /// The scan whose cursors pass over the versions that only serve the history
-    /// ([`crate::HISTORY_VALUE`]) before they reach the merge (FR-046): a scan of documents,
-    /// which would hand them over to leave them out. A key that holds such versions holds no
-    /// other value, so the scan gives what it gave; an intent or a retraction on it still comes.
+    /// The scan that walks past the versions that only serve the history
+    /// ([`crate::HISTORY_VALUE`], FR-046): a scan of documents, which would hand them over to
+    /// leave them out. Each is walked past as a `Retract` of its own mark. A key that holds
+    /// such versions holds no other value, so the scan gives what it gave; an intent or a
+    /// retraction on it still comes.
     #[must_use]
     pub fn passing_history(mut self) -> Scan {
         self.pass_history = true;
@@ -1311,30 +1312,8 @@ impl Scan {
         step
     }
 
-    /// Makes cursor `at` ready, passing over the blocks `prune` lets it skip and, for a scan
-    /// [`Scan::passing_history`], the versions that only serve the history: the cursor moves
-    /// on from each of them before the merge sees it.
+    /// Makes cursor `at` ready, passing over the blocks `prune` lets it skip.
     fn ready_at<B: Blocks>(
-        &mut self,
-        at: usize,
-        r: &mut B,
-        prune: Option<&dyn Fn(&dyn Zones) -> bool>,
-    ) -> Result<Option<ReadToken>, LsmError> {
-        loop {
-            if let Some(token) = self.ready_one(at, r, prune)? {
-                return Ok(Some(token));
-            }
-            let cursor = &mut self.cursors.as_mut().expect("opened")[at];
-            if !self.pass_history || !cursor.at_history() {
-                return Ok(None);
-            }
-            cursor.advance()?;
-            self.passed = self.passed.saturating_add(1);
-        }
-    }
-
-    /// Makes cursor `at` ready at its next entry, passing over the blocks `prune` lets it skip.
-    fn ready_one<B: Blocks>(
         &mut self,
         at: usize,
         r: &mut B,
@@ -1538,6 +1517,20 @@ impl Scan {
             took(Took::Decided, from);
             let c = &cursors[i];
             let kind = c.kind();
+            // A scan of documents walks past a version that only serves the history (FR-046),
+            // as past a `Retract` of its own mark: it hides what an older source holds at that
+            // mark, the intent whose commit it is, and the key holds no other value. Passed
+            // over before the merge, it let that intent out.
+            if self.pass_history && c.at_history() {
+                if !st.retracted.contains(&ts) {
+                    st.retracted.push(ts);
+                }
+                self.passed = self.passed.saturating_add(1);
+                if let Err(e) = cursors[i].advance() {
+                    return ColumnStep::Step(Step::Failed(e));
+                }
+                continue;
+            }
             // A retraction met for the first time in a memtable: the resolution that left it
             // may have written the key's version at the commit's mark, at or below the read's,
             // after this cursor took its place there.
