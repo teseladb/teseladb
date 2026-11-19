@@ -716,7 +716,11 @@ fn an_export_writes_the_values_of_value_files_with_their_keys() {
     let cfg = LsmConfig { compaction_bytes_per_sec: 1 << 40, ..small() };
     let mut disk = MemDisk::new();
     let mut a = open(&cfg, &mut disk);
-    let doc = |i: u64| vec![(i % 251) as u8; 6_000 + i as usize * 100];
+    let doc = |i: u64| {
+        let mut d = vec![(i % 251) as u8; 6_000 + i as usize * 100];
+        d[0] = teseladb_lsm::DOCUMENT_VALUE;
+        d
+    };
     for i in 0..40 {
         a.put(G, i + 1, &key(i), ts(10, 0), &doc(i)).unwrap();
     }

@@ -114,13 +114,16 @@ pub(crate) struct Candidate {
     pub(crate) shadowed: bool,
     /// A value that only serves the history ([`crate::HISTORY_VALUE`]).
     pub(crate) history: bool,
+    /// Such a value read from a file, not from a history file: it may stand over an intent of
+    /// its mark in an older source (FR-047).
+    pub(crate) over: bool,
 }
 
 impl Candidate {
-    /// A version of kind `kind` at `ts` with stored value `value`.
-    pub(crate) fn new(ts: Hlc, kind: Kind, value: &[u8]) -> Candidate {
-        let history = kind == Kind::Put && value.first() == Some(&crate::HISTORY_VALUE);
-        Candidate { ts, kind, shadowed: false, history }
+    /// A version of kind `kind` at `ts` with stored value `value`, of logical key `key`.
+    pub(crate) fn new(key: &[u8], ts: Hlc, kind: Kind, value: &[u8]) -> Candidate {
+        let history = crate::serves_history(key, kind, value);
+        Candidate { ts, kind, shadowed: false, history, over: false }
     }
 }
 
@@ -179,7 +182,7 @@ mod tests {
     }
 
     fn c(p: u64, kind: Kind) -> Candidate {
-        Candidate { ts: ts(p), kind, shadowed: false, history: false }
+        Candidate { ts: ts(p), kind, shadowed: false, history: false, over: false }
     }
 
     #[test]

@@ -42,6 +42,23 @@ impl Lsm {
         self.counters.user_bytes += (key.len() + value.len()) as u64;
     }
 
+    /// As [`Lsm::insert`], for a version that may stand over one an older source holds at the
+    /// same key and mark: what an entry of 008 writes, the resolution of an intent above all
+    /// (FR-007). A flush keeps it in its file whatever its value (FR-047).
+    fn insert_over(
+        &mut self,
+        range: GroupId,
+        index: u64,
+        key: &[u8],
+        ts: Hlc,
+        kind: Kind,
+        value: &[u8],
+    ) {
+        self.note_pressure();
+        self.version.memtables[0].insert_over(range, index, key, ts, kind, value);
+        self.counters.user_bytes += (key.len() + value.len()) as u64;
+    }
+
     fn freeze_if_full(&mut self) {
         if self.version.memtables[0].bytes() >= self.cfg.memtable_bytes {
             self.freeze();
@@ -110,7 +127,7 @@ impl Lsm {
     ) -> Result<(), LsmError> {
         self.writable()?;
         for v in versions {
-            self.insert(range, index, v.key, v.ts, v.kind, v.value);
+            self.insert_over(range, index, v.key, v.ts, v.kind, v.value);
         }
         self.freeze_if_full();
         Ok(())
@@ -145,13 +162,16 @@ impl Lsm {
                 "a commit writes a value or a deletion"
             );
             if c.ts == intent_ts {
-                return self.write(range, index, key, c.ts, c.kind, c.value);
+                self.writable()?;
+                self.insert_over(range, index, key, c.ts, c.kind, c.value);
+                self.freeze_if_full();
+                return Ok(());
             }
         }
         self.writable()?;
-        self.insert(range, index, key, intent_ts, Kind::Retract, &[]);
+        self.insert_over(range, index, key, intent_ts, Kind::Retract, &[]);
         if let Some(c) = commit {
-            self.insert(range, index, key, c.ts, c.kind, c.value);
+            self.insert_over(range, index, key, c.ts, c.kind, c.value);
         }
         self.freeze_if_full();
         Ok(())

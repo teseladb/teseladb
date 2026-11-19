@@ -156,22 +156,6 @@ impl Cursor {
         }
     }
 
-    /// Whether the cursor stands at a value that only serves the history
-    /// ([`crate::HISTORY_VALUE`]): one stored with its key, as they all are (FR-034). A cursor
-    /// at no entry stands at none. A scan of documents walks past it in its merge (FR-046).
-    pub(crate) fn at_history(&self) -> bool {
-        let history = |kind: Kind, value: &[u8]| {
-            kind == Kind::Put && value.first() == Some(&crate::HISTORY_VALUE)
-        };
-        match self {
-            Cursor::Mem(m) => m.slot.as_ref().is_some_and(|s| history(s.kind, &s.value)),
-            Cursor::Table { pos: Pos::Ready(_, c), .. } => {
-                !c.is_ref() && c.pending().is_none() && history(c.kind(), c.value_slice())
-            }
-            Cursor::Table { .. } => false,
-        }
-    }
-
     /// Moves past the current entry (only a cursor at an entry advances).
     pub(crate) fn advance(&mut self) -> Result<(), LsmError> {
         match self {

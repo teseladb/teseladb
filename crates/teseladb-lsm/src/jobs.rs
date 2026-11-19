@@ -15,7 +15,7 @@ use teseladb_raftlog::IoOp;
 use teseladb_types::{Bytes, GroupId};
 
 use crate::config::LsmConfig;
-use crate::entry::Kind;
+use crate::entry::{self, Kind};
 use crate::manifest::{self, Edit, FileMeta};
 use crate::memtable::Memtable;
 use crate::recovery::switch_current;
@@ -324,14 +324,19 @@ impl FlushJob {
 
     /// Adds a version to the file or to its history file (FR-031), which starts with its first
     /// one.
-    fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8]) {
+    /// `over`: the version may stand over one an older source holds at its key and mark, so it
+    /// stays in the file whatever its value (FR-047).
+    fn add(&mut self, ikey: &[u8], kind: Kind, value: &[u8], over: bool) {
         let apart = self.values.wants(kind, value);
         if apart && !self.values.started() {
             let w = new_writer(&self.format);
             self.values.start(self.values_number, w, &self.dir, &mut self.queued);
         }
         let stored = apart.then(|| self.values.put(ikey, value));
-        let newer = std::mem::take(&mut self.newer);
+        // A delta is against the version above it of the same key (FR-035): a value that only
+        // serves the history may be the first of its key in the history file.
+        let newer = std::mem::take(&mut self.newer)
+            .filter(|(nkey, _)| entry::logical(nkey) == entry::logical(ikey));
         if stored.is_none() && kind == Kind::Put {
             self.newer = Some((ikey.to_vec(), value.to_vec()));
         }
@@ -340,9 +345,21 @@ impl FlushJob {
             (None, Some((nkey, nvalue))) if old => w.add_old(ikey, kind, value, (nkey, nvalue)),
             (None, _) => w.add(ikey, kind, value),
         };
-        if !self.split.sets_apart(ikey, kind) {
+        // A value that only serves the history goes to the history file, and the file takes
+        // its bounds: no read by key and no scan in key order gives it. One that may stand over
+        // an intent of its mark in an older source stays, since there it hides that intent
+        // (FR-047). Neither counts among the versions of its key that the split sees.
+        let history = stored.is_none() && crate::serves_history(entry::logical(ikey), kind, value);
+        let aside = match history {
+            true => !over,
+            false => self.split.sets_apart(ikey, kind),
+        };
+        if !aside {
             to(self.writer.as_mut().expect("a flush with data has a writer"), false);
             return;
+        }
+        if history {
+            self.writer.as_mut().expect("a flush with data has a writer").span(ikey);
         }
         if self.history.is_none() {
             self.queued.push_back(IoOp::Create {
@@ -376,7 +393,7 @@ impl FlushJob {
             && taken < STEP_BYTES
             && let Some((k, s)) = entries.next()
         {
-            self.add(k, s.kind, &s.value);
+            self.add(k, s.kind, &s.value, s.over);
             taken += k.len() + s.value.len();
             last = Some(k);
         }

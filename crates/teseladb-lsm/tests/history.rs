@@ -16,8 +16,12 @@ fn key(i: u64) -> Vec<u8> {
     format!("k{i:04}").into_bytes()
 }
 
+/// A value of `version`: its first byte says what it is, a document (FR-047), and the rest
+/// its version.
 fn value(version: u64) -> Vec<u8> {
-    vec![version as u8; 300]
+    let mut v = vec![version as u8; 300];
+    v[0] = teseladb_lsm::DOCUMENT_VALUE;
+    v
 }
 
 /// Versions `from..=to` of every key, each version at the mark of its number, flushed at the end.
@@ -305,6 +309,7 @@ fn random_histories_read_as_the_model_after_their_files_are_compacted() {
 /// A document of about 300 bytes at `version`: each version changes two fields of a few bytes.
 fn document(i: u64, version: u64) -> Vec<u8> {
     let mut doc: Vec<u8> = (0..300u64).map(|b| ((b * 7 + i) % 251) as u8).collect();
+    doc[0] = teseladb_lsm::DOCUMENT_VALUE;
     doc[40..48].copy_from_slice(&version.to_le_bytes());
     doc[200..208].copy_from_slice(&(version * 31).to_le_bytes());
     doc

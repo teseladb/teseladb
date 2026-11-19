@@ -424,13 +424,6 @@ impl SharedScan {
         self.scan.counts().entries
     }
 
-    /// The scan that walks past the versions that only serve the history (FR-046), as the
-    /// core's [`Scan::passing_history`].
-    #[must_use]
-    pub fn passing_history(self) -> SharedScan {
-        SharedScan { scan: self.scan.passing_history() }
-    }
-
     /// The scan taking each data block it may as its column block, with the columns of the
     /// top-level fields `want` (010 FR-033), as the core's [`Scan::with_columns`]:
     /// [`SharedScan::next_columns`] gives those batches in key order among the other documents.

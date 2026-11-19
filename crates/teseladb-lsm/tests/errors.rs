@@ -142,7 +142,7 @@ fn a_bad_block_met_by_a_compaction_marks_the_core_corrupt() {
     let mut disk = SimDisk::default();
     let mut lsm = open(&cfg, &mut disk);
     for i in 0..4u64 {
-        lsm.put(G, i + 1, format!("k{i}").as_bytes(), ts(1, 0), &[5; 200]).unwrap();
+        lsm.put(G, i + 1, format!("k{i}").as_bytes(), ts(1, 0), &[7; 200]).unwrap();
         lsm.flush();
         lsm.run_io(&mut disk, Nanos::ZERO);
         if i == 0 {

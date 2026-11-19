@@ -6,7 +6,7 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use teseladb_keys::Hlc;
-use teseladb_lsm::{Kind, RangeTombstone};
+use teseladb_lsm::{HISTORY_VALUE, Kind, RAW_KEYS, RangeTombstone};
 
 /// A version as reads return it: key, timestamp, kind and value.
 pub type Row = (Vec<u8>, Hlc, Kind, Vec<u8>);
@@ -49,11 +49,20 @@ impl Model {
     }
 
     /// What a read of `key` at `ts` sees: its newest version up to `ts`, unless that is a
-    /// deletion or a range tombstone hides it.
+    /// deletion or a range tombstone hides it. A value that only serves the history is as if it
+    /// were not there (FR-047): only the scans by time give it ([`Model::between`]).
     pub fn get(&self, key: &[u8], ts: Hlc) -> Option<Row> {
         let from = (key.to_vec(), Reverse(ts));
-        let ((k, Reverse(vts)), (kind, value)) = self.versions.range(from..).next()?;
-        if k != key || *kind == Kind::Delete {
+        // Under the keys of the embedder's own records a value's first byte is no type.
+        let history = |kind: Kind, v: &[u8]| {
+            kind == Kind::Put && v.first() == Some(&HISTORY_VALUE) && key.first() != Some(&RAW_KEYS)
+        };
+        let ((k, Reverse(vts)), (kind, value)) = self
+            .versions
+            .range(from..)
+            .take_while(|((k, _), _)| k == key)
+            .find(|(_, (kind, value))| !history(*kind, value))?;
+        if *kind == Kind::Delete {
             return None;
         }
         if self.tombstones.iter().any(|t| t.hides(key, *vts, ts)) {

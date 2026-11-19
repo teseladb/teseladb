@@ -153,11 +153,21 @@ impl Model {
         }
     }
 
+    /// The version a read of `key` at `ts` shows. A value that only serves the history is as if
+    /// it were not there (004 FR-047): only the scans by time give it.
     fn get(&self, key: &[u8], ts: Hlc) -> Option<(Hlc, Kind, Vec<u8>)> {
-        let ((k, Reverse(vts)), (kind, value)) =
-            self.versions.range((key.to_vec(), Reverse(ts))..).next()?;
+        let history = |kind: Kind, v: &[u8]| {
+            kind == Kind::Put
+                && v.first() == Some(&teseladb_lsm::HISTORY_VALUE)
+                && key.first() != Some(&teseladb_lsm::RAW_KEYS)
+        };
+        let ((_, Reverse(vts)), (kind, value)) = self
+            .versions
+            .range((key.to_vec(), Reverse(ts))..)
+            .take_while(|((k, _), _)| k == key)
+            .find(|(_, (kind, value))| !history(*kind, value))?;
         let hidden = self.tombstones.iter().any(|t| t.hides(key, *vts, ts));
-        (k == key && *kind != Kind::Delete && !hidden).then(|| (*vts, *kind, value.clone()))
+        (*kind != Kind::Delete && !hidden).then(|| (*vts, *kind, value.clone()))
     }
 
     fn intents(&self) -> Vec<(Vec<u8>, Hlc)> {

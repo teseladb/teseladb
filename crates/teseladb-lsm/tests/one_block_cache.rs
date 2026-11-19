@@ -17,10 +17,17 @@ fn key(k: u32) -> Vec<u8> {
     format!("k{k:05}").into_bytes()
 }
 
+/// The value of key `k`: its first byte says what it is, a document (FR-047).
+fn value(k: u32) -> Vec<u8> {
+    let mut v = vec![k as u8; 200];
+    v[0] = teseladb_lsm::DOCUMENT_VALUE;
+    v
+}
+
 fn written(cfg: &LsmConfig, disk: &mut MemDisk) -> Lsm {
     let mut lsm = open(cfg, disk);
     for k in 0..KEYS {
-        lsm.put(G, u64::from(k) + 1, &key(k), ts(1, 0), &[k as u8; 200]).unwrap();
+        lsm.put(G, u64::from(k) + 1, &key(k), ts(1, 0), &value(k)).unwrap();
     }
     lsm.flush();
     lsm.run_io(disk, Nanos::ZERO);
@@ -45,7 +52,7 @@ fn a_block_the_core_read_is_cached_once_for_every_reader() {
     let other = shared.view();
     for k in 0..KEYS {
         match other.get(&shared, &key(k), ts(5, 0)) {
-            SharedRead::Hit(f) => assert_eq!(f.value.to_vec(), vec![k as u8; 200]),
+            SharedRead::Hit(f) => assert_eq!(f.value.to_vec(), value(k)),
             r => panic!("{k}: {r:?}, not a hit"),
         }
     }

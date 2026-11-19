@@ -27,8 +27,9 @@ use crate::fence::Span;
 
 mod txn;
 
-/// Prefix of the local key space.
-const LOCAL: u8 = 0x00;
+/// Prefix of the local key space: the keys under which the storage takes the values as raw
+/// bytes, with no type in their first byte (004 FR-047).
+const LOCAL: u8 = teseladb_lsm::RAW_KEYS;
 /// Local key of the GC threshold.
 const GC_THRESHOLD: u8 = 0x01;
 /// Local keys of the idempotence table.

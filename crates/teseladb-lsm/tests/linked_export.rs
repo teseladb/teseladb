@@ -293,7 +293,11 @@ fn linked_groups_of_level_zero_keep_their_order() {
 fn linked_files_bring_their_value_files() {
     let mut disk = MemDisk::new();
     let mut a = open(&cfg(0), &mut core(&mut disk, 0));
-    let doc = |i: u64, round: u64| vec![(i * 7 + round) as u8; 5_000 + (i as usize % 7) * 1_000];
+    let doc = |i: u64, round: u64| {
+        let mut d = vec![(i * 7 + round) as u8; 5_000 + (i as usize % 7) * 1_000];
+        d[0] = teseladb_lsm::DOCUMENT_VALUE;
+        d
+    };
     let mut index = 0;
     for round in 0..2u64 {
         for i in 0..60u64 {
@@ -335,7 +339,10 @@ fn a_linked_file_without_its_value_files_is_refused_and_one_named_twice_is_linke
     let mut disk = MemDisk::new();
     let mut a = open(&cfg(0), &mut core(&mut disk, 0));
     for i in 0..60u64 {
-        a.put(G, i + 1, &key(i), ts(10, 0), &vec![i as u8; 6_000]).unwrap();
+        // The first byte of a value says what it is (FR-047): a document.
+        let mut doc = vec![i as u8; 6_000];
+        doc[0] = teseladb_lsm::DOCUMENT_VALUE;
+        a.put(G, i + 1, &key(i), ts(10, 0), &doc).unwrap();
     }
     settle(&mut a, &mut disk, 0);
     compact(&mut a, &mut disk, 0);

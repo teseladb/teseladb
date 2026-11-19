@@ -321,17 +321,23 @@ pub(crate) fn split_links(
 
 /// The GC description of a version of `kind` at `ts` with `value`: a reference is never a
 /// value that only serves the history, which stays with its key (FR-034).
-fn candidate(ts: Hlc, kind: Kind, value: &Val) -> Candidate {
-    match value {
-        Val::Inline(v) => Candidate::new(ts, kind, v),
-        Val::Ref(..) => Candidate::new(ts, kind, &[]),
-    }
+/// `apart`: the version was read from a history file.
+fn candidate(key: &[u8], ts: Hlc, kind: Kind, value: &Val, apart: bool) -> Candidate {
+    let c = match value {
+        Val::Inline(v) => Candidate::new(key, ts, kind, v),
+        Val::Ref(..) => Candidate::new(key, ts, kind, &[]),
+    };
+    // A value that only serves the history and was kept in a file may stand there over an
+    // intent of its mark in an older source (FR-047).
+    Candidate { over: c.history && !apart, ..c }
 }
 
 /// One input read in order.
 #[derive(Debug)]
 struct Lane {
     table: Arc<Table>,
+    /// Whether the table is the history file of an input.
+    history: bool,
     next_block: usize,
     blocks: VecDeque<Block>,
     cur: Option<BlockCursor>,
@@ -540,8 +546,16 @@ impl CompactJob {
         let lanes = plan
             .inputs
             .iter()
-            .flat_map(|(_, t)| std::iter::once(t).chain(t.history.as_ref()))
-            .map(|t| Lane { table: t.clone(), next_block: 0, blocks: VecDeque::new(), cur: None })
+            .flat_map(|(_, t)| {
+                std::iter::once((t, false)).chain(t.history.as_ref().map(|h| (h, true)))
+            })
+            .map(|(t, history)| Lane {
+                table: t.clone(),
+                history,
+                next_block: 0,
+                blocks: VecDeque::new(),
+                cur: None,
+            })
             .collect();
         CompactJob {
             plan,
@@ -796,6 +810,8 @@ impl CompactJob {
                 .is_some_and(|((c, _), _)| c.kind == Kind::Delete)
             && self.plan.nothing_below(&key);
         let mut first = true;
+        // Whether nothing below the output holds the key, once a version asks.
+        let mut below: Option<bool> = None;
         // The version written just before, when it is a `Put` with its value in line: the base
         // of the next one's delta in the history file (FR-035).
         let mut newer: Option<(Vec<u8>, Bytes)> = None;
@@ -818,7 +834,20 @@ impl CompactJob {
                 self.out.as_mut().expect("started above").writer.cover(&ikey);
             }
             // An export writes every version to its files: they are ingested as they are.
-            let apart = whole || (self.export.is_none() && self.split.sets_apart(&ikey, c.kind));
+            // A value that only serves the history goes to the history file, and the file
+            // takes its bounds; one that a file kept, for the intent of its mark an older
+            // source may hold, stays until nothing below the output holds its key (FR-047).
+            // Neither counts among the versions of its key that the split sees.
+            let split = !whole
+                && self.export.is_none()
+                && match c.history {
+                    true => !c.over || *below.get_or_insert_with(|| self.plan.nothing_below(&key)),
+                    false => self.split.sets_apart(&ikey, c.kind),
+                };
+            if split && c.history {
+                self.out.as_mut().expect("started above").writer.span(&ikey);
+            }
+            let apart = whole || split;
             if apart && self.out.as_ref().is_some_and(|o| o.history.is_none()) {
                 self.start_history(next_file);
             }
@@ -1047,11 +1076,15 @@ impl CompactJob {
                 // Faulty variant (004 T032): the intent survives the `Retract` that resolved it.
                 #[cfg(teseladb_bug = "resolved_intent_reappears")]
                 Some((last, v)) if last.ts == ts && last.kind == Kind::Retract => {
-                    (*last, *v) = (candidate(ts, kind, &value), value);
+                    let apart = self.lanes[i].history;
+                    (*last, *v) =
+                        (candidate(entry::logical(&ikey), ts, kind, &value, apart), value);
                 }
                 Some((last, _)) if last.ts == ts => last.shadowed = true,
                 _ => {
-                    self.versions.push((candidate(ts, kind, &value), value));
+                    let apart = self.lanes[i].history;
+                    let c = candidate(entry::logical(&ikey), ts, kind, &value, apart);
+                    self.versions.push((c, value));
                     self.fetch_if_rewritten(ikey);
                 }
             }

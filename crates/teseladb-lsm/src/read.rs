@@ -628,10 +628,13 @@ fn note_tombstones<'a>(
 enum Seen {
     Next,
     Answer,
+    /// A value that only serves the history: walked past as a retraction of its own mark.
+    Passed,
 }
 
-/// Takes a version of the key in the order the source gives them.
+/// Takes a version of `key` in the order the source gives them.
 fn see(
+    key: &[u8],
     ts: Hlc,
     kind: Kind,
     value: impl FnOnce() -> Result<(Bytes, Option<Box<Deferred>>), LsmError>,
@@ -647,6 +650,14 @@ fn see(
     }
     if best.as_ref().is_none_or(|b| ts > b.ts) {
         let (value, deferred) = value()?;
+        // A value that only serves the history is no answer of a read (FR-047): the versions
+        // under it are read as if it were not there.
+        // As a `Retract` of its own mark: it hides what an older source holds at that mark
+        // (the intent whose commit it is) and the read goes on under it.
+        if deferred.is_none() && crate::serves_history(key, kind, &value) {
+            retracted.push(ts);
+            return Ok(Seen::Passed);
+        }
         *best = Some(Cand { ts, kind, value, deferred });
     }
     Ok(Seen::Answer)
@@ -666,7 +677,7 @@ fn get_in_memtable(
             return;
         }
         let inline = || Ok((slot.value.clone(), None));
-        if let Ok(Seen::Answer) = see(ts, slot.kind, inline, retracted, best) {
+        if let Ok(Seen::Answer) = see(key, ts, slot.kind, inline, retracted, best) {
             return;
         }
         at = m.next_after(pos, k);
@@ -704,7 +715,8 @@ fn get_in_table<B: Blocks>(
             if logical != key {
                 return Ok(None);
             }
-            if let Seen::Answer = see(ts, c.kind(), || stored(t, data, i, &c), retracted, best)? {
+            let value = || stored(t, data, i, &c);
+            if let Seen::Answer = see(key, ts, c.kind(), value, retracted, best)? {
                 return Ok(None);
             }
             // A version passed over: what the read wants is under it.
@@ -836,7 +848,6 @@ impl View {
             want: None,
             entries: 0,
             items: 0,
-            pass_history: false,
             passed: 0,
         }
     }
@@ -960,9 +971,8 @@ pub struct Scan {
     finished: bool,
     /// Data blocks passed over by their zone maps (FR-039).
     skipped: u64,
-    /// Whether it walks past the versions that only serve the history (FR-046), and how many
-    /// it walked past: entries it took and gave no one.
-    pass_history: bool,
+    /// The versions that only serve the history it walked past (FR-046): entries it took and
+    /// gave no one.
     passed: u32,
     /// The top-level fields whose columns the scan takes in place of whole data blocks (010
     /// FR-033), when it takes any.
@@ -1239,17 +1249,6 @@ impl Scan {
         self
     }
 
-    /// The scan that walks past the versions that only serve the history
-    /// ([`crate::HISTORY_VALUE`], FR-046): a scan of documents, which would hand them over to
-    /// leave them out. Each is walked past as a `Retract` of its own mark. A key that holds
-    /// such versions holds no other value, so the scan gives what it gave; an intent or a
-    /// retraction on it still comes.
-    #[must_use]
-    pub fn passing_history(mut self) -> Scan {
-        self.pass_history = true;
-        self
-    }
-
     /// The entries this scan took from its sources and the items it gave so far.
     pub fn counts(&self) -> ScanCounts {
         ScanCounts {
@@ -1517,26 +1516,13 @@ impl Scan {
             took(Took::Decided, from);
             let c = &cursors[i];
             let kind = c.kind();
-            // A scan of documents walks past a version that only serves the history (FR-046),
-            // as past a `Retract` of its own mark: it hides what an older source holds at that
-            // mark, the intent whose commit it is, and the key holds no other value. Passed
-            // over before the merge, it let that intent out.
-            if self.pass_history && c.at_history() {
-                if !st.retracted.contains(&ts) {
-                    st.retracted.push(ts);
-                }
-                self.passed = self.passed.saturating_add(1);
-                if let Err(e) = cursors[i].advance() {
-                    return ColumnStep::Step(Step::Failed(e));
-                }
-                continue;
-            }
             // A retraction met for the first time in a memtable: the resolution that left it
             // may have written the key's version at the commit's mark, at or below the read's,
             // after this cursor took its place there.
             let resolved_since =
                 kind == Kind::Retract && matches!(c, Cursor::Mem(_)) && !st.retracted.contains(&ts);
-            let seen = match see(ts, kind, || c.stored(), &mut st.retracted, &mut st.found) {
+            let stored = || c.stored();
+            let seen = match see(&st.key, ts, kind, stored, &mut st.retracted, &mut st.found) {
                 Ok(seen) => seen,
                 Err(e) => return ColumnStep::Step(Step::Failed(e)),
             };
@@ -1550,6 +1536,7 @@ impl Scan {
             }
             match seen {
                 Seen::Next => took_one(Took::Retracted),
+                Seen::Passed => self.passed = self.passed.saturating_add(1),
                 Seen::Answer if kind == Kind::Delete => took_one(Took::Deleted),
                 Seen::Answer => {}
             }

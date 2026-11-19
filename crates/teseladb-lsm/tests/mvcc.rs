@@ -215,20 +215,18 @@ fn drain(
     }
 }
 
-/// A scan of documents asks its cursors to pass over the versions that only serve the history
-/// before they reach the merge (FR-046): a document's change meta and its older versions in
-/// the sources underneath cost a step of their cursor, and the scan counts them apart from the
-/// entries it merges. An intent on a meta's key still comes: its reader decides it.
+/// No scan in key order gives the versions that only serve the history (FR-046, FR-047): it
+/// walks past a document's change meta and its older versions and counts them among the entries
+/// it takes. An intent on a meta's key still comes: its reader decides it. A read by key shows
+/// what is under such a version.
 #[test]
-fn a_scan_that_passes_over_history_values_gives_the_documents_and_counts_the_rest() {
+fn a_scan_passes_over_history_values_and_counts_them() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&small(), &mut disk);
     let (doc, meta) = (teseladb_lsm::DOCUMENT_VALUE, teseladb_lsm::HISTORY_VALUE);
-    // `a` and its meta, written twice: once in a file and once in the memtable.
+    // `a` and its meta written twice, and `b` and its meta once: all in the memtable.
     lsm.put(G, 1, b"a", ts(10, 0), &[doc, 1]).unwrap();
     lsm.put(G, 2, b"a\0m", ts(10, 0), &[meta, 1]).unwrap();
-    lsm.flush();
-    lsm.run_io(&mut disk, Nanos::ZERO);
     lsm.put(G, 3, b"a", ts(20, 0), &[doc, 2]).unwrap();
     lsm.put(G, 4, b"a\0m", ts(20, 0), &[meta, 2]).unwrap();
     lsm.put(G, 5, b"b", ts(20, 0), &[doc, 3]).unwrap();
@@ -236,30 +234,34 @@ fn a_scan_that_passes_over_history_values_gives_the_documents_and_counts_the_res
     let keys = |items: &[(Vec<u8>, Kind)]| -> Vec<Vec<u8>> {
         items.iter().map(|(k, _)| k.clone()).collect()
     };
-    // Without the request a scan gives them, as a scan by time does: four items, six entries.
+    // The documents, and the three versions of the metas passed over.
     let v = lsm.view();
-    let (all, counted) = drain(v.scan(b"a", b"z", ts(50, 0)), &mut lsm, &mut disk);
-    let every: [&[u8]; 4] = [b"a", b"a\0m", b"b", b"b\0m"];
-    assert_eq!(keys(&all), every);
-    assert_eq!((counted.entries, counted.passed), (6, 0));
-    // With it: the documents; the three versions of the metas are entries it walked past.
-    let s = v.scan(b"a", b"z", ts(50, 0)).passing_history();
-    let (docs, counted) = drain(s, &mut lsm, &mut disk);
+    let (docs, counted) = drain(v.scan(b"a", b"z", ts(50, 0)), &mut lsm, &mut disk);
     let two: [&[u8]; 2] = [b"a", b"b"];
     assert_eq!(keys(&docs), two);
     assert_eq!((counted.entries, counted.items, counted.passed), (6, 2, 3));
     // A scan that goes on right after `a` starts at its meta.
-    let s = v.scan(b"a\0", b"z", ts(50, 0)).passing_history();
-    let (rest, _) = drain(s, &mut lsm, &mut disk);
+    let (rest, _) = drain(v.scan(b"a\0", b"z", ts(50, 0)), &mut lsm, &mut disk);
     let one: [&[u8]; 1] = [b"b"];
     assert_eq!(keys(&rest), one);
     // A scan whose last entries are metas ends without them.
-    let s = v.scan(b"b\0", b"z", ts(50, 0)).passing_history();
-    assert!(drain(s, &mut lsm, &mut disk).0.is_empty());
+    assert!(drain(v.scan(b"b\0", b"z", ts(50, 0)), &mut lsm, &mut disk).0.is_empty());
+    // A read by key does not show one, in the memtable or once flushed.
+    assert_eq!(get(&mut lsm, &mut disk, &v, b"a\0m", ts(50, 0)), None);
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let v = lsm.view();
+    assert_eq!(get(&mut lsm, &mut disk, &v, b"a\0m", ts(50, 0)), None);
+    assert!(get(&mut lsm, &mut disk, &v, b"a", ts(50, 0)).is_some());
+    // A value written under the same key shows through the history value above it.
+    lsm.put(G, 7, b"c", ts(30, 0), &[doc, 4]).unwrap();
+    lsm.put(G, 8, b"c", ts(40, 0), &[meta, 5]).unwrap();
+    let v = lsm.view();
+    let under = get(&mut lsm, &mut disk, &v, b"c", ts(50, 0)).expect("the value under it");
+    assert_eq!((under.1, under.3), (ts(30, 0), vec![doc, 4]));
     // An intent on a meta's key is no history value yet: the scan gives it.
-    lsm.put_intent(G, 7, b"b\0m", ts(30, 0), b"txn").unwrap();
-    let s = lsm.view().scan(b"a", b"z", ts(50, 0)).passing_history();
-    let (with_intent, _) = drain(s, &mut lsm, &mut disk);
+    lsm.put_intent(G, 9, b"b\0m", ts(45, 0), b"txn").unwrap();
+    let (with_intent, _) = drain(lsm.view().scan(b"a", b"c", ts(50, 0)), &mut lsm, &mut disk);
     let kinds: Vec<Kind> = with_intent.iter().map(|(_, k)| *k).collect();
     let three: [&[u8]; 3] = [b"a", b"b", b"b\0m"];
     assert_eq!(keys(&with_intent), three);
@@ -288,13 +290,13 @@ fn a_commit_at_its_intent_s_mark_hides_the_intent_from_a_scan_that_passes_histor
     lsm.resolve_intent(G, 5, b"a\0m", ts(10, 0), commit(&[5, 2])).unwrap();
     assert_eq!((doc, meta), (1, 5), "the values the commits wrote");
     let v = lsm.view();
-    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)).passing_history(), &mut lsm, &mut disk);
+    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)), &mut lsm, &mut disk);
     assert_eq!(given, [(b"a".to_vec(), Kind::Put)], "the document, and no intent");
     // The same once the commits reach a file of their own.
     lsm.flush();
     lsm.run_io(&mut disk, Nanos::ZERO);
     let v = lsm.view();
-    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)).passing_history(), &mut lsm, &mut disk);
+    let (given, _) = drain(v.scan(b"a", b"z", ts(50, 0)), &mut lsm, &mut disk);
     assert_eq!(given, [(b"a".to_vec(), Kind::Put)], "the document, and no intent");
 }
 
@@ -587,8 +589,14 @@ fn a_key_with_many_versions_among_many_files_reads_each_version() {
         put(&mut lsm, format!("a{i:04}").as_bytes(), 1, &[1; 300]);
     }
     // Each version of `m` 1 KiB: 120 KiB, more than one file of 64 KiB.
+    // The first byte of a value says what it is (FR-047), a document, and the rest its version.
+    let value = |v: u64| {
+        let mut bytes = vec![u8::try_from(v).unwrap(); 1024];
+        bytes[0] = teseladb_lsm::DOCUMENT_VALUE;
+        bytes
+    };
     for v in 1..=VERSIONS {
-        put(&mut lsm, b"m", 10 + v, &[u8::try_from(v).unwrap(); 1024]);
+        put(&mut lsm, b"m", 10 + v, &value(v));
     }
     for i in 0..800u32 {
         put(&mut lsm, format!("z{i:04}").as_bytes(), 2, &[2; 300]);
@@ -606,7 +614,7 @@ fn a_key_with_many_versions_among_many_files_reads_each_version() {
     let view = lsm.view();
     for v in 1..=VERSIONS {
         let row = get(&mut lsm, &mut disk, &view, b"m", ts(10 + v, 0)).expect("a version");
-        assert_eq!(row.3, vec![u8::try_from(v).unwrap(); 1024], "version {v}");
+        assert_eq!(row.3, value(v), "version {v}");
     }
     assert_eq!(get(&mut lsm, &mut disk, &view, b"m", ts(5, 0)), None, "none before the first");
     assert!(get(&mut lsm, &mut disk, &view, b"a0399", ts(3, 0)).is_some());
@@ -727,6 +735,13 @@ fn a_scan_passes_old_versions_wherever_they_end_in_their_blocks() {
     const KEYS: u64 = 200;
     let key = |i: u64| format!("k{i:04}").into_bytes();
     let versions = |i: u64| 1 + (i * 7) % 30;
+    // A value of version `v`: its first byte says what it is, a document, and the rest its
+    // version.
+    let value = |v: u64| {
+        let mut bytes = [v as u8; 300];
+        bytes[0] = teseladb_lsm::DOCUMENT_VALUE;
+        bytes
+    };
     for flushes in [1u64, 3] {
         let mut disk = MemDisk::new();
         let cfg = LsmConfig { memtable_bytes: 4 << 20, ..small() };
@@ -737,7 +752,7 @@ fn a_scan_passes_old_versions_wherever_they_end_in_their_blocks() {
             for version in (1..=30u64).filter(|v| v % flushes == part) {
                 for i in (0..KEYS).filter(|i| version <= versions(*i)) {
                     index += 1;
-                    lsm.put(G, index, &key(i), ts(version, 0), &[version as u8; 300]).unwrap();
+                    lsm.put(G, index, &key(i), ts(version, 0), &value(version)).unwrap();
                 }
             }
             lsm.flush();
@@ -751,7 +766,7 @@ fn a_scan_passes_old_versions_wherever_they_end_in_their_blocks() {
                 let shown = at.min(versions(i as u64));
                 assert_eq!(
                     (&r.0, r.1, r.3.as_slice()),
-                    (&key(i as u64), ts(shown, 0), &[shown as u8; 300][..]),
+                    (&key(i as u64), ts(shown, 0), &value(shown)[..]),
                     "at {at} with {flushes} files"
                 );
             }

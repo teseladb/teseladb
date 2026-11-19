@@ -240,8 +240,7 @@ impl MainScan {
         }
     }
 
-    /// The entries the scan took from its sources so far, the versions it walked past among
-    /// them.
+    /// The entries the scan took from its sources so far.
     fn took(&self) -> u64 {
         self.taken().0
     }
@@ -394,8 +393,7 @@ impl ScanState {
         });
         let main = match backward {
             true => MainScan::Backward(v.scan_back(start, end, read_ts)),
-            // A document's change meta is no document: the scan walks past it (004 FR-046).
-            false => MainScan::Forward(v.scan(start, end, read_ts).passing_history()),
+            false => MainScan::Forward(v.scan(start, end, read_ts)),
         };
         ScanState {
             main,

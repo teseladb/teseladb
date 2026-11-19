@@ -53,6 +53,10 @@ pub(crate) fn version_bytes(key_len: usize, value_len: usize) -> u64 {
 pub(crate) struct Slot {
     pub(crate) kind: Kind,
     pub(crate) value: Bytes,
+    /// Written where an older source may hold a version of the same key and mark, an intent it
+    /// resolves ([`Memtable::insert_over`]): a flush keeps it in its file whatever its value
+    /// (FR-047).
+    pub(crate) over: bool,
 }
 
 /// A place among the versions of a memtable ([`Memtable::place`]), which is the only memtable
@@ -225,16 +229,37 @@ impl Memtable {
         kind: Kind,
         value: &[u8],
     ) {
+        let slot = Slot { kind, value: Bytes::copy_from_slice(value), over: false };
+        self.place_slot(range, index, entry::internal_key(key, ts), slot);
+    }
+
+    /// Adds a version that may stand over one an older source holds at the same key and mark:
+    /// what resolves an intent (FR-007). One already there at the same internal key is replaced.
+    pub(crate) fn insert_over(
+        &self,
+        range: GroupId,
+        index: u64,
+        key: &[u8],
+        ts: Hlc,
+        kind: Kind,
+        value: &[u8],
+    ) {
+        let slot = Slot { kind, value: Bytes::copy_from_slice(value), over: true };
+        self.place_slot(range, index, entry::internal_key(key, ts), slot);
+    }
+
+    fn place_slot(&self, range: GroupId, index: u64, ikey: Vec<u8>, slot: Slot) {
         debug_assert!(!self.frozen.load(Ordering::Relaxed), "a frozen memtable takes no writes");
-        let ikey = entry::internal_key(key, ts).into_boxed_slice();
-        let slot = Slot { kind, value: Bytes::copy_from_slice(value) };
+        let ts = entry::split(&ikey).1;
+        let value_len = slot.value.len();
+        let ikey = ikey.into_boxed_slice();
         self.meta.with(|m| {
             // The time first: a reader that finds the version also finds the memtable may hold
             // it.
             self.note(m, range, index, ts);
             // A replaced version stays until the memtable drops: its bytes stay counted.
             self.versions.insert_owned(ikey, slot);
-            m.bytes += value_heap(value.len());
+            m.bytes += value_heap(value_len);
         });
     }
 
@@ -471,7 +496,10 @@ mod tests {
                 };
                 let (logical, ts) = entry::split(&k);
                 m.insert(GroupId(1), step, logical, ts, kind, &value);
-                list.insert(k.clone(), Slot { kind, value: Bytes::copy_from_slice(&value) });
+                list.insert(
+                    k.clone(),
+                    Slot { kind, value: Bytes::copy_from_slice(&value), over: false },
+                );
                 let probe = random_probe(&mut rng);
                 let ours = m.seek(&probe).map(|(_, k, s)| (k.to_vec(), s.kind));
                 let theirs = list.seek(&probe).map(|e| (e.key().to_vec(), e.value().kind));

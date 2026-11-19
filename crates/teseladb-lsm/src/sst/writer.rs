@@ -49,7 +49,10 @@ enum Ending {
 /// Which of a file and its history file each version of an output goes to (FR-031): the newest
 /// version of a key goes to the file, and the older ones to the history file when that newest
 /// one is a value or a deletion. Under an intent or a `Retract` they stay in the file: a read
-/// that passes one of those needs what is below it.
+/// that passes one of those needs what is below it. A value that only serves the history is no
+/// version of its key here: the other versions are split as if it were not there, and it goes
+/// to the history file unless it may stand over a version of its mark in an older source
+/// (FR-047). Only the scans by time read it, and they read the history file.
 #[derive(Debug, Default)]
 pub(crate) struct Split {
     /// The logical key of the last version taken.
@@ -62,7 +65,8 @@ pub(crate) struct Split {
 
 impl Split {
     /// Whether the version of internal key `ikey` and kind `kind`, taken in the order of the
-    /// output, goes to the history file.
+    /// output, goes to the history file. A value that only serves the history is not asked
+    /// about: its output decides where it goes (FR-047).
     pub(crate) fn sets_apart(&mut self, ikey: &[u8], kind: Kind) -> bool {
         let logical = entry::logical(ikey);
         if self.any && self.key == logical {
@@ -105,6 +109,10 @@ pub(crate) struct TableWriter {
     hashes: Vec<(u32, u32)>,
     last_logical: Option<Vec<u8>>,
     first_logical: Option<Vec<u8>>,
+    /// The lowest and the highest key of the values that only serve the history sent to the
+    /// history file alone ([`TableWriter::span`]): bounds of the file apart from the keys it
+    /// holds, since a version of one of those keys may come to the file after them.
+    spanned: Option<(Vec<u8>, Vec<u8>)>,
     min_ts: Option<Hlc>,
     max_ts: Option<Hlc>,
     /// The highest mark of the deletions [`TableWriter::cover`] took in.
@@ -148,6 +156,7 @@ impl TableWriter {
             hashes: Vec::new(),
             last_logical: None,
             first_logical: None,
+            spanned: None,
             min_ts: None,
             max_ts: None,
             apart: None,
@@ -401,6 +410,23 @@ impl TableWriter {
         self.apart = Some(self.apart.map_or(ts, |m| m.max(ts)));
     }
 
+    /// Takes in the bounds and marks of the file the version `ikey` that goes to its history file
+    /// alone, a value that only serves the history (FR-047): an output whose only versions are
+    /// such values still has its file. Its key stays out of the filter, and it is no deletion
+    /// set apart: no read opens the history file for it.
+    pub(crate) fn span(&mut self, ikey: &[u8]) {
+        let (logical, ts) = entry::split(ikey);
+        // Apart from the last key the file holds: the versions of this key that are no such
+        // value come to the file after it, and their key goes into its filter then.
+        match &mut self.spanned {
+            Some((_, hi)) if hi.as_slice() < logical => *hi = logical.to_vec(),
+            Some(_) => {}
+            None => self.spanned = Some((logical.to_vec(), logical.to_vec())),
+        }
+        self.min_ts = Some(self.min_ts.map_or(ts, |m| m.min(ts)));
+        self.max_ts = Some(self.max_ts.map_or(ts, |m| m.max(ts)));
+    }
+
     /// Counts a version just added: its key in the filter and the bounds.
     fn note(&mut self, ikey: &[u8]) {
         let (logical, ts) = entry::split(ikey);
@@ -578,6 +604,14 @@ impl TableWriter {
         tombstones.sort_by(|a, b| (&a.start, &a.end, a.ts).cmp(&(&b.start, &b.end, b.ts)));
         let mut lo = self.first_logical.take();
         let mut hi = self.last_logical.take();
+        if let Some((first, last)) = self.spanned.take() {
+            if lo.as_ref().is_none_or(|l| *l > first) {
+                lo = Some(first);
+            }
+            if hi.as_ref().is_none_or(|h| *h < last) {
+                hi = Some(last);
+            }
+        }
         let (mut min_ts, mut max_ts) = (self.min_ts, self.max_ts);
         for t in &tombstones {
             lo = Some(lo.map_or(t.start.clone(), |l| l.min(t.start.clone())));

@@ -89,7 +89,11 @@ fn a_scan_over_cached_blocks_allocates_at_most_once_per_version() {
     let mut disk = MemDisk::new();
     let mut lsm = open(&cfg, &mut disk);
     for i in 0..KEYS {
-        let value = vec![u8::try_from(i % 251).expect("a byte"); 150 + (i % 200) as usize];
+        // The first byte of a value is its type: none of these is one that only serves the
+        // history, which no scan in key order gives.
+        let fill = u8::try_from(i % 251).expect("a byte");
+        let mut value = vec![fill; 150 + (i % 200) as usize];
+        value[0] = 2;
         lsm.put(GroupId(1), u64::from(i) + 1, &key(i), ts(10, 0), &value).unwrap();
     }
     lsm.flush();

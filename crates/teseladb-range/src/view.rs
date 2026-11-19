@@ -580,7 +580,7 @@ impl RangeView {
         let ts = self.applied_for((start, end), (part.docs, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
         let mut scan = match part.backward {
-            false => Either::Forward(view.scan(start, end, ts).passing_history()),
+            false => Either::Forward(view.scan(start, end, ts)),
             true => Either::Backward(view.scan_back(start, end, ts)),
         };
         let mut rows: Vec<crate::push::Row> = Vec::new();
@@ -722,7 +722,7 @@ impl RangeView {
     ) -> Option<Matched> {
         let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
-        let mut scan = view.scan(start, end, ts).passing_history();
+        let mut scan = view.scan(start, end, ts);
         let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
         let mut blocks = Blocks::new(blocks);
         // The documents examined that `keep` has not seen yet, with their keys.
@@ -790,7 +790,7 @@ impl RangeView {
     ) -> Option<Pieces> {
         let ts = self.applied_for((start, end), (examine, begun), now, concern)?;
         let view = self.lsm.view_cached(cache);
-        let mut scan = view.scan(start, end, ts).passing_history().with_columns(want);
+        let mut scan = view.scan(start, end, ts).with_columns(want);
         let mut out = Matched { ts, rows: Vec::new(), seen: Vec::new(), examined: 0, next: None };
         let mut pieces: Vec<Piece> = Vec::new();
         let mut blocks = Blocks::new(blocks);

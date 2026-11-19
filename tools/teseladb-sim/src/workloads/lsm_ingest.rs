@@ -159,6 +159,8 @@ impl Source {
         for n in 0..SOURCE_KEYS {
             let mut value = vec![0u8; SOURCE_VALUE];
             w.rng.fill(&mut value);
+            // The first byte of a value says what it is (004 FR-047): a document.
+            value[0] = teseladb_lsm::DOCUMENT_VALUE;
             let key = interval_key(i, n);
             lsm.put(GroupId(1), n + 1, &key, at(n + 1), &value).expect("an LSM in memory");
             if n % 512 == 0 || n == SOURCE_KEYS - 1 {
@@ -254,6 +256,8 @@ impl LsmIngest {
             for side in 0..SIDES.len() {
                 let mut value = vec![0u8; w.rng.range(VALUE.0, VALUE.1) as usize];
                 w.rng.fill(&mut value);
+                // The first byte of a value says what it is (004 FR-047): a document.
+                value[0] = teseladb_lsm::DOCUMENT_VALUE;
                 index += 1;
                 lsm.put(
                     SEEDED,
@@ -516,6 +520,8 @@ impl Workload for LsmIngest {
             cl.clock += 1;
             let mut value = vec![0u8; w.rng.range(VALUE.0, VALUE.1) as usize];
             w.rng.fill(&mut value);
+            // The first byte of a value says what it is (004 FR-047): a document.
+            value[0] = teseladb_lsm::DOCUMENT_VALUE;
             let key =
                 side_key(w.rng.range(0, SIDES.len() as u64) as usize, w.rng.range(0, CLIENT_KEYS));
             cl.queue.push_back(Write { arrived: w.now(), key, value, ts: at(cl.clock) });

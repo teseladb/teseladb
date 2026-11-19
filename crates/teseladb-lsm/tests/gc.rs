@@ -8,7 +8,7 @@
 mod common;
 
 use common::{get, open, small, ts};
-use teseladb_lsm::{Commit, GcTable, Kind, Lsm, LsmConfig};
+use teseladb_lsm::{Commit, GcTable, Kind, Lsm, LsmConfig, Step};
 use teseladb_raftlog::MemDisk;
 use teseladb_types::{GroupId, Nanos};
 
@@ -146,8 +146,8 @@ fn a_range_threshold_replaces_its_intervals_and_leaves_the_rest() {
 }
 
 /// A version that only serves the history (014 FR-007, the change description a document's
-/// version carries) is read at its own mark and never below the threshold: at or below it, every
-/// one goes, also the newest.
+/// version carries) is read by the scans by time at its own mark and never below the threshold:
+/// at or below it, every one goes, also the newest. No read by key shows one (FR-047).
 #[test]
 fn history_versions_at_or_below_the_threshold_all_go() {
     let mut disk = MemDisk::new();
@@ -159,8 +159,21 @@ fn history_versions_at_or_below_the_threshold_all_go() {
     lsm.put(G, 4, b"k", ts(5, 0), b"\x01doc").unwrap();
     lsm.set_gc_thresholds(GcTable::new(vec![(b"a".to_vec(), b"z".to_vec(), ts(10, 0))]));
     compact(&mut lsm, &mut disk);
-    assert_eq!(value(&mut lsm, &mut disk, b"h", 9), None, "h@8 went too");
-    assert_eq!(value(&mut lsm, &mut disk, b"h", 12), Some(history("h12")));
+    let view = lsm.view();
+    let mut s = view.scan_time(b"h", b"i", ts(0, 0), ts(20, 0));
+    let mut left = Vec::new();
+    loop {
+        match s.next(&mut lsm) {
+            Step::Item(i) => left.push((i.ts, i.value.to_vec())),
+            Step::Miss(_) => {
+                lsm.run_io(&mut disk, Nanos::ZERO);
+            }
+            Step::Done => break,
+            Step::Failed(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(left, [(ts(12, 0), history("h12"))], "h@5 and h@8 went, the newest below too");
+    assert_eq!(value(&mut lsm, &mut disk, b"h", 12), None, "no read by key shows one");
     assert_eq!(value(&mut lsm, &mut disk, b"k", 9), Some(b"\x01doc".to_vec()), "a document stays");
 }
 

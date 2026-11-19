@@ -22,6 +22,8 @@ fn key(i: u64) -> Vec<u8> {
 fn value(i: u64) -> Vec<u8> {
     let mut v = vec![0; 700];
     Rng::new(i + 1).fill(&mut v);
+    // The first byte of a value says what it is (FR-047): a document.
+    v[0] = teseladb_lsm::DOCUMENT_VALUE;
     v
 }
 

@@ -105,8 +105,21 @@ pub fn lz4_decompress_block_into(block: &[u8], size: usize, out: &mut Vec<u8>) -
 
 /// First byte of the stored value of a version that only serves the history of its key (the
 /// change description of 014 next to each document): it is read at its own mark, never below the
-/// GC threshold, so at or below the threshold every such version goes, also the newest.
+/// GC threshold, so at or below the threshold every such version goes, also the newest. Only the
+/// scans by time give it: a read by key and a scan in key order read as if it were not there,
+/// and flushes and compactions keep it in the history files (FR-047).
 pub const HISTORY_VALUE: u8 = 5;
+/// First byte of the keys whose values are raw bytes of whoever embeds the LSM (a range's own
+/// records): only under the other keys is the first byte of a stored value its type.
+pub const RAW_KEYS: u8 = 0;
+
+/// Whether the version of kind `kind` with stored value `value` under logical key `key` only
+/// serves the history ([`HISTORY_VALUE`]).
+pub(crate) fn serves_history(key: &[u8], kind: entry::Kind, value: &[u8]) -> bool {
+    kind == entry::Kind::Put
+        && value.first() == Some(&HISTORY_VALUE)
+        && key.first() != Some(&RAW_KEYS)
+}
 /// First byte of the stored value of a document of a collection (and the type of a change
 /// stream's document, 014): what the zone maps summarise (FR-039).
 pub const DOCUMENT_VALUE: u8 = 1;
