@@ -291,11 +291,11 @@ pub type BlockFilter = std::rc::Rc<dyn Fn(&dyn teseladb_keys::zone::Zones) -> bo
 
 /// The most entries one step of a scan in the core looks at: a part of thousands of documents
 /// held its shard for milliseconds in one turn (stall reports of the one-node load p25). A step
-/// that reaches it stops with what it has, [`ScanState::paused`], and the next turn goes on. At
-/// 128 a step took some 230 µs and a third of the messages to a core waited longer than 256 µs
-/// (one-node load p58): at 32 the core takes what arrived every 60 µs or so, and a turn with
-/// nothing waiting chains the steps as before (012 FR-030).
-pub const SCAN_STEP_ENTRIES: usize = 32;
+/// that reaches it stops with what it has, [`ScanState::paused`], and the next turn goes on.
+/// A step is also the scan's share of its core's turn: at 32 the messages to the core waited a
+/// fifth less, and the parts of aggregations took 63 to 77 % longer with the same CPU (one-node
+/// load p60, 012 FR-030).
+pub const SCAN_STEP_ENTRIES: usize = 128;
 
 impl ScanState {
     /// The scan's mark.

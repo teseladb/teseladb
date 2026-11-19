@@ -1257,37 +1257,6 @@ fn a_view_from_before_an_answered_write_was_applied_does_not_serve_a_scan_that_b
 }
 
 #[test]
-fn a_scan_of_200_documents_gives_the_core_back_at_least_six_times() {
-    // A step of 128 documents held the core some 230 µs, and a third of the messages to a core
-    // waited longer than 256 µs for it (one-node load p58, 012 FR-030): a step is short enough
-    // for the core to take what arrived between two of them.
-    use teseladb_range::push::{ScanState, TxnView};
-    let mut n = Node::new();
-    let docs = 200;
-    let key = |i: usize| [b"\x01b".as_slice(), &u16::try_from(i).unwrap().to_be_bytes()].concat();
-    for i in 0..docs {
-        n.mutate(&key(i), Box::new(SetKey(key(i), Some(1))), MAJORITY);
-    }
-    n.settle();
-    let lsm = n.host.lsm();
-    let (view, mark) = (TxnView::default(), Hlc { physical: u64::MAX >> 1, logical: 0 });
-    let mut scan = ScanState::new(lsm, (b"\x01a", b"\x01z"), (mark, None), &view, false);
-    let mut stops = 0;
-    let rows = loop {
-        match scan.step(lsm, &view, 10_000) {
-            Some(rows) => break rows.expect("read"),
-            None => {
-                assert!(scan.paused(), "everything is in memory: it stops only at its entries");
-                stops += 1;
-            }
-        }
-    };
-    assert!(stops >= 6, "the scan stopped {stops} times");
-    let keys: Vec<_> = rows.iter().map(|(k, _)| k.clone()).collect();
-    assert_eq!(keys, (0..docs).map(key).collect::<Vec<_>>(), "every document, in order");
-}
-
-#[test]
 fn a_long_scan_in_the_core_stops_after_its_entries_and_goes_on_in_the_next_turns() {
     // A scan the core serves ran to its limit in one turn: parts of aggregations and range scans
     // held their shard 2-11 ms (stall reports of the one-node load p25, 66 % of the quota
