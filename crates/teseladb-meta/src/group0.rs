@@ -319,6 +319,27 @@ impl IndexChanges {
 }
 
 impl Group0Sm {
+    /// What makes a change of the replicas of range `g` asked at `epoch` come back
+    /// [`Group0Error::RangeBusy`] now, cause by cause as the change looks at them: for the log
+    /// of the node whose balancer sent the order, which has only the error (007 FR-010). None
+    /// for a range that is free, or that Group 0 does not hold.
+    pub fn busy_causes(&self, g: GroupId, epoch: u64) -> Vec<String> {
+        let Some(r) = self.ranges.get(&g) else { return Vec::new() };
+        let merging = self.merges.contains_key(&g)
+            || crate::descriptors::merging_in(&self.merges, g).is_some();
+        let causes = [
+            merging.then(|| "it merges with another range".to_owned()),
+            self.relocations.get(&g).map(|(core, _)| format!("it moves to core {core}")),
+            r.settling.then(|| "a change of its replicas has not settled".to_owned()),
+            (r.replica_epoch != epoch).then(|| {
+                let at = r.replica_epoch;
+                format!("its replicas are at epoch {at} and the order names {epoch}")
+            }),
+            r.pending_split.is_some().then(|| "it waits for its cut".to_owned()),
+        ];
+        causes.into_iter().flatten().collect()
+    }
+
     /// Whether the cluster exists.
     pub fn bootstrapped(&self) -> bool {
         self.cluster_id != [0; 16]

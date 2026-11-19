@@ -27,6 +27,8 @@ const TOLD_EVERY: u32 = 30;
 pub struct Refusals {
     /// The kind of the order sent and the range it changes, if it changes one.
     order: Option<(u16, Option<GroupId>)>,
+    /// The epoch a change of replicas sent names.
+    epoch: Option<u64>,
     /// The orders refused in a row.
     times: u32,
 }
@@ -35,16 +37,30 @@ impl Refusals {
     /// The balancer sends `cmd`.
     pub fn sent(&mut self, cmd: &Group0Command) {
         self.order = Some((cmd.kind(), range_of(cmd)));
+        self.epoch = match cmd {
+            Group0Command::SetReplicas { epoch, .. } => Some(*epoch),
+            _ => None,
+        };
+    }
+
+    /// The range and the epoch of the change of replicas in flight, if the order is one: what
+    /// Group 0's state is asked about when the change comes back refused.
+    pub fn replicas_order(&self) -> Option<(GroupId, u64)> {
+        let (_, range) = self.order?;
+        range.zip(self.epoch)
     }
 
     /// The order sent ended with `result`: the line for the node's log when Group 0 refused it,
     /// or it did not get there, for the first time, the fifth in a row or one of every thirty
-    /// after it.
+    /// after it. `busy` is what keeps the order's range busy, as Group 0's state tells it
+    /// ([`teseladb_meta::group0::Group0Sm::busy_causes`]).
     pub fn answered(
         &mut self,
         result: &Result<Done<CoreOutput>, OpError>,
+        busy: &[String],
     ) -> Option<(Level, Pending)> {
         let order = self.order.take();
+        self.epoch = None;
         let error = match result {
             Ok(Done::Applied(CoreOutput::Group0(Group0Result::Err(e)))) => format!("{e:?}"),
             Err(e) => format!("{e:?}"),
@@ -62,8 +78,13 @@ impl Refusals {
             _ => return None,
         };
         let range = range.map_or_else(|| "null".to_owned(), |g| g.0.to_string());
+        let causes: Vec<String> = busy.iter().map(|c| format!("\"{c}\"")).collect();
+        let busy = match causes.is_empty() {
+            true => String::new(),
+            false => format!(",\"busy\":[{}]", causes.join(",")),
+        };
         let attr = format!(
-            "{{\"kind\":{kind},\"range\":{range},\"error\":\"{error}\",\"times\":{times}}}"
+            "{{\"kind\":{kind},\"range\":{range},\"error\":\"{error}\",\"times\":{times}{busy}}}"
         );
         Some((level, Pending { id: 0, msg: MESSAGE.to_owned(), attr }))
     }

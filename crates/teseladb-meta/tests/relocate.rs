@@ -102,6 +102,28 @@ fn a_core_change_is_recorded_then_completed() {
     assert_eq!(run(&mut sm, split), Group0Result::Range(GroupId(2)));
 }
 
+/// A change of replicas refused as busy says nothing of why: Group 0's state tells each cause
+/// that holds, for the log of the node whose balancer sent the order (007 FR-010).
+#[test]
+fn a_busy_range_tells_what_keeps_it_busy() {
+    let (mut sm, core) = cluster();
+    let epoch = sm.ranges[&G].replica_epoch;
+    assert!(sm.busy_causes(G, epoch).is_empty(), "free");
+    assert!(sm.busy_causes(GroupId(99), epoch).is_empty(), "not a range of Group 0");
+    assert_eq!(run(&mut sm, relocate(1 - core)), Group0Result::Ok);
+    assert_eq!(sm.busy_causes(G, epoch), [format!("it moves to core {}", 1 - core)]);
+    assert_eq!(run(&mut sm, complete(1 - core)), Group0Result::Ok);
+    let older = format!("its replicas are at epoch {epoch} and the order names {}", epoch - 1);
+    assert_eq!(sm.busy_causes(G, epoch - 1), [older]);
+    let change =
+        Group0Command::SetReplicas { group: G, epoch, add: vec![], remove: vec![NodeId(3)] };
+    assert_eq!(run(&mut sm, change), Group0Result::Ok);
+    assert_eq!(sm.busy_causes(G, epoch + 1), ["a change of its replicas has not settled"]);
+    let (mut sm, _) = cluster();
+    run(&mut sm, Group0Command::SplitRange { group: G, at: b"m".to_vec() });
+    assert_eq!(sm.busy_causes(G, epoch), ["it waits for its cut"]);
+}
+
 #[test]
 fn a_range_busy_with_another_change_does_not_move() {
     let (mut sm, core) = cluster();

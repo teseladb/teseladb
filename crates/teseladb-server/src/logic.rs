@@ -1739,10 +1739,15 @@ impl NodeLogic {
     fn op_done(&mut self, op: OpId, result: Result<Done<CoreOutput>, OpError>) {
         // An order of the balancer that Group 0 refused goes out again at the next round: the
         // log says so, or nothing would (007 FR-010).
-        if self.balance_op == Some(op)
-            && let Some((level, line)) = self.balance_refusals.answered(&result)
-        {
-            crate::log::defer_at(level, line);
+        if self.balance_op == Some(op) {
+            let busy = self
+                .balance_refusals
+                .replicas_order()
+                .and_then(|(g, epoch)| self.group0().map(|sm| sm.busy_causes(g, epoch)))
+                .unwrap_or_default();
+            if let Some((level, line)) = self.balance_refusals.answered(&result, &busy) {
+                crate::log::defer_at(level, line);
+            }
         }
         let mine = |slot: &mut Option<OpId>| {
             let hit = *slot == Some(op);
@@ -1811,9 +1816,12 @@ fn takes_away(cmd: &Group0Command) -> bool {
 }
 
 /// Whether Group 0's leader takes `cmd` forwarded by node `from`: a node's own `SetNodeAddrs`,
-/// `NodeBoot` and `SetNodeTags`, a range leader's `ReplicasSettled`, `SplitRange` and `CompleteSplit` (Group 0
-/// checks the epoch, the bounds and the recorded intent), and a range leader's publication of
-/// itself (`SetLeaderHint` with its term; a request, term 0, is the balancer's).
+/// `NodeBoot` and `SetNodeTags`, what a range's leader asks for its range (`ReplicasSettled`,
+/// the split, the core change and the merge with their completions: Group 0 checks the epoch,
+/// the bounds and the intent it recorded), and a range leader's publication of itself
+/// (`SetLeaderHint` with its term; a request, term 0, is the balancer's). A core change led from
+/// a node that did not lead Group 0 was never completed, and its range stayed busy: no replica
+/// could be added to it (007 FR-011).
 fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
     match cmd {
         Group0Command::SetNodeAddrs { node, .. }
@@ -1824,7 +1832,12 @@ fn forward_allowed(cmd: &Group0Command, from: NodeId) -> bool {
         Group0Command::SetLeaderHint { node, term, .. } => *node == from && *term > 0,
         Group0Command::ReplicasSettled { .. }
         | Group0Command::SplitRange { .. }
-        | Group0Command::CompleteSplit { .. } => true,
+        | Group0Command::CompleteSplit { .. }
+        | Group0Command::RelocateRange { .. }
+        | Group0Command::CompleteRelocate { .. }
+        | Group0Command::MergeRanges { .. }
+        | Group0Command::CompleteMerge { .. }
+        | Group0Command::AbortMerge { .. } => true,
         _ => false,
     }
 }
@@ -3037,7 +3050,15 @@ mod tests {
         let split = Group0Command::SplitRange { group: g, at: vec![1, 5] };
         let complete = Group0Command::CompleteSplit { group: g, at: vec![1, 5], at_index: 9 };
         let settled = Group0Command::ReplicasSettled { group: g, epoch: 2 };
-        for cmd in [split, complete, settled] {
+        // A range's core change and its merge are led by the range's leader too, wherever it
+        // runs: Group 0 checks each against its descriptors and the intent it recorded.
+        let right = teseladb_types::GroupId(5);
+        let relocate = Group0Command::RelocateRange { group: g, core: 1 };
+        let relocated = Group0Command::CompleteRelocate { group: g, core: 1 };
+        let merge = Group0Command::MergeRanges { left: g, right };
+        let merged = Group0Command::CompleteMerge { left: g, right };
+        let unmerged = Group0Command::AbortMerge { left: g, right };
+        for cmd in [split, complete, settled, relocate, relocated, merge, merged, unmerged] {
             assert!(forward_allowed(&cmd, NodeId(3)), "{cmd:?}");
         }
         let hint = Group0Command::SetLeaderHint { group: g, node: NodeId(3), term: 0 };

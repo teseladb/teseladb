@@ -22,10 +22,11 @@
 #                   them (023 FR-014), and gets its own counts back at the end
 #   --release       builds and runs the tests with the release profile
 #   --test <name>   (once or more) only those test files of the crates
+#   --lib           only the unit tests of the crates' libraries
 #   --lints         Clippy on the crates, every target, warnings as errors, instead of the tests
 #   --needed        builds the release `teseladb` and checks the libraries it needs with
 #                   `scripts/check-deps.sh --needed` (023 SC-015), instead of the tests
-#   scripts/test-linux.sh [--huge-pages] [--release] [--test <name>]... [--lints|--needed] [crate...]
+#   scripts/test-linux.sh [--huge-pages] [--release] [--lib] [--test <name>]... [--lints|--needed] [crate...]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,6 +39,7 @@ while [[ ${1:-} == --* ]]; do
   case $1 in
     --huge-pages) huge=1 ;;
     --release) cargo_args+=(--release) ;;
+    --lib) cargo_args+=(--lib) ;;
     --test)
       [[ $# -ge 2 ]] || { echo "test-linux: --test needs a name" >&2; exit 2; }
       cargo_args+=(--test "$2")
@@ -46,7 +48,7 @@ while [[ ${1:-} == --* ]]; do
     --lints) mode=lints ;;
     --needed) mode=needed ;;
     *)
-      echo "usage: scripts/test-linux.sh [--huge-pages] [--release] [--test <name>]... [--lints|--needed] [crate...]" >&2
+      echo "usage: scripts/test-linux.sh [--huge-pages] [--release] [--lib] [--test <name>]... [--lints|--needed] [crate...]" >&2
       exit 2
       ;;
   esac

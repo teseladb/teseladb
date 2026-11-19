@@ -45,7 +45,7 @@ fn a_refused_order_is_said_the_first_time_the_fifth_and_one_of_every_thirty() {
     let mut told = Vec::new();
     for time in 1..=65u32 {
         r.sent(&order());
-        if let Some((level, line)) = r.answered(&refused()) {
+        if let Some((level, line)) = r.answered(&refused(), &[]) {
             told.push((time, level, line));
         }
     }
@@ -63,12 +63,12 @@ fn a_refused_order_is_said_the_first_time_the_fifth_and_one_of_every_thirty() {
 fn an_order_group0_takes_leaves_no_line_and_the_count_starts_again() {
     let mut r = Refusals::default();
     r.sent(&order());
-    assert!(r.answered(&refused()).is_some());
+    assert!(r.answered(&refused(), &[]).is_some());
     r.sent(&order());
-    assert_eq!(r.answered(&taken()), None);
+    assert_eq!(r.answered(&taken(), &[]), None);
     // The next refusal is a first one again.
     r.sent(&order());
-    let (level, line) = r.answered(&refused()).expect("a first refusal");
+    let (level, line) = r.answered(&refused(), &[]).expect("a first refusal");
     assert_eq!((level, line.attr), (Level::Info, attr("RangeBusy", 1)));
 }
 
@@ -76,12 +76,28 @@ fn an_order_group0_takes_leaves_no_line_and_the_count_starts_again() {
 fn an_order_that_did_not_get_to_group0_is_said_too() {
     let mut r = Refusals::default();
     r.sent(&order());
-    let (_, line) = r.answered(&Err(OpError::Overloaded)).expect("its line");
+    let (_, line) = r.answered(&Err(OpError::Overloaded), &[]).expect("its line");
     assert_eq!(line.attr, attr("Overloaded", 1));
 }
 
 #[test]
 fn an_answer_without_an_order_sent_says_nothing() {
     let mut r = Refusals::default();
-    assert_eq!(r.answered(&refused()), None);
+    assert_eq!(r.answered(&refused(), &[]), None);
+}
+
+#[test]
+fn a_refusal_of_a_busy_range_says_what_keeps_it_busy() {
+    // `RangeBusy` covers a core change, a replica change that has not settled, another epoch
+    // and a pending cut: the line carries the causes Group 0's state gives for the order's
+    // range and epoch.
+    let mut r = Refusals::default();
+    assert_eq!(r.replicas_order(), None);
+    r.sent(&order());
+    assert_eq!(r.replicas_order(), Some((GroupId(RANGE), 2)));
+    let busy = ["it moves to core 0".to_owned(), "it waits for its cut".to_owned()];
+    let (_, line) = r.answered(&refused(), &busy).expect("a first refusal");
+    let causes = "\"busy\":[\"it moves to core 0\",\"it waits for its cut\"]";
+    assert_eq!(line.attr, format!("{},{causes}}}", attr("RangeBusy", 1).trim_end_matches('}')));
+    assert_eq!(r.replicas_order(), None, "answered");
 }
