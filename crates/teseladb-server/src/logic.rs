@@ -1341,6 +1341,17 @@ impl NodeLogic {
                     self.catalog.fence_last();
                 }
             }
+            // An entry that a node of an earlier version does not read is not proposed while
+            // that node runs (007 FR-027): it would stop applying Group 0 at the entry, and stop
+            // authorizing commands with it. Who asked goes on without the change.
+            CatalogReq::Write(cmd)
+                if self
+                    .group0()
+                    .is_some_and(|sm| !teseladb_meta::node_versions::all_read(sm, &cmd)) =>
+            {
+                let refused = teseladb_meta::group0::Group0Error::NotEveryNodeRunsIt;
+                let _ = reply.send(CatalogAnswer::Refused(refused));
+            }
             CatalogReq::Write(cmd) => self.catalog_change(CatalogOps::payload(cmd), reply),
             // Every change of the indexes waits for the barrier (009 FR-006): no node may still
             // run a write that read the indexes before it.
@@ -2549,6 +2560,62 @@ mod tests {
             &Group0Command::SetSetting { key: key(NodeId(1)), value: ours() },
             NodeId(2)
         ));
+    }
+
+    #[test]
+    fn an_entry_an_earlier_node_does_not_read_is_not_proposed_while_that_node_runs() {
+        use crate::node_versions::{key, ours};
+        use teseladb_meta::catalog::CatalogCommand;
+        use teseladb_meta::group0::{SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES};
+        use teseladb_meta::node_versions::{FORMAT, all_run};
+        let mut c = Cluster::new();
+        c.found();
+        c.run_until(|c| c.logic(1).view().bootstrapped);
+        c.join_node(1, 2);
+        c.run_until(|c| c.logic(2).view().bootstrapped);
+        let record = |c: &mut Cluster, value: Vec<u8>| {
+            let set = Group0Command::SetSetting { key: key(NodeId(2)), value };
+            let now = c.now;
+            c.logic(1).core.propose(GROUP0, &set.encode(), now).unwrap();
+        };
+        let every_node_reads =
+            |c: &mut Cluster| c.logic(1).group0().is_some_and(|sm| all_run(sm, SNAPSHOT_VERSION));
+        let names = || {
+            CatalogReq::Write(CatalogCommand::AddFieldNames {
+                collection: 9,
+                dictionary: 1,
+                names: vec![b"a".to_vec()],
+            })
+        };
+        // Node 2 runs the version before the dictionaries of field names, which does not decode
+        // their entry: it would stop applying Group 0 at it.
+        let earlier = teseladb_bson::Document::new()
+            .with(FORMAT, i64::from(SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES))
+            .to_bytes()
+            .unwrap();
+        record(&mut c, earlier);
+        c.run_until(|c| !every_node_reads(c));
+        let (tx, rx) = channel();
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(names(), tx), now);
+        // Refused at once, before any round of Group 0: nothing went to its log.
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(CatalogAnswer::Refused(Group0Error::NotEveryNodeRunsIt))
+        );
+        // Once node 2 runs this version the entry is proposed, and Group 0 answers it.
+        record(&mut c, ours());
+        c.run_until(every_node_reads);
+        let (tx, rx) = channel();
+        let now = c.now;
+        c.logic(1).on_message(NodeMsg::Catalog(names(), tx), now);
+        assert_eq!(rx.try_recv().ok(), None, "the answer waits for Group 0");
+        let mut answered = None;
+        c.run_until(|_| {
+            answered = rx.try_recv().ok();
+            answered.is_some()
+        });
+        assert_ne!(answered, Some(CatalogAnswer::Refused(Group0Error::NotEveryNodeRunsIt)));
     }
 
     #[test]

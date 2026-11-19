@@ -9,7 +9,7 @@ use teseladb_meta::command::{Group0Command, NodeAddrs};
 use teseladb_meta::group0::{
     Group0Error, Group0Result, Group0Sm, SNAPSHOT_VERSION, SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES,
 };
-use teseladb_meta::node_versions::{FORMAT, key as node_key};
+use teseladb_meta::node_versions::{FORMAT, all_read, key as node_key};
 use teseladb_multiraft::StateMachine;
 
 fn ns(db: &str, coll: &str) -> Namespace {
@@ -137,12 +137,17 @@ fn names_wait_until_every_node_reads_format_22() {
         assert_eq!(sm.apply_command(index, &cmd), Group0Result::Ok);
     };
     record(&mut sm, 3, SNAPSHOT_VERSION_WITHOUT_FIELD_NAMES);
+    // A node of that format does not decode the entry: who would propose it asks first, and
+    // the entries that node reads are not held back.
+    assert!(!all_read(&sm, &add(id, 41, &["a"])));
+    assert!(all_read(&sm, &create(ns("db", "d"), 2)));
     assert_eq!(
         apply(&mut sm, 4, add(id, 41, &["a"])),
         Group0Result::Err(Group0Error::NotEveryNodeRunsIt)
     );
     assert!(sm.catalog.fields.is_empty());
     record(&mut sm, 5, SNAPSHOT_VERSION);
+    assert!(all_read(&sm, &add(id, 41, &["a"])));
     assert_eq!(apply(&mut sm, 6, add(id, 41, &["a"])), Group0Result::Ok);
     assert_eq!(numbers(&sm, id, &["a"]), (Some(41), vec![Some(0)]));
 }
