@@ -133,6 +133,9 @@ pub struct Mem {
     pub ended: usize,
     /// How many times a running operation asked whether it goes on (`Backend::interrupted`).
     pub asked: std::cell::Cell<usize>,
+    /// When set, the documents of index entries are read by batches (`Backend::fetch_documents`),
+    /// and the keys of each batch asked for are counted here.
+    pub fetch_batches: Option<Vec<usize>>,
     /// Reads of the indexes since the last operation ended: a server pins each until then (009 FR-006).
     pub open_index_reads: usize,
     /// Where a second range starts: a write whose outcome reaches the other side of it from its
@@ -804,6 +807,24 @@ impl Backend for Mem {
     fn interrupted(&self) -> Result<(), CommandError> {
         self.asked.set(self.asked.get() + 1);
         Ok(())
+    }
+
+    fn fetch_documents(
+        &mut self,
+        keys: &[Vec<u8>],
+        _filter: Option<&[u8]>,
+        concern: ReadConcern,
+    ) -> Result<Option<Vec<teseladb_wire::commands::Fetched>>, CommandError> {
+        use teseladb_wire::commands::Fetched;
+        let Some(batches) = self.fetch_batches.as_mut() else { return Ok(None) };
+        batches.push(keys.len());
+        let mut found = Vec::with_capacity(keys.len());
+        for key in keys {
+            let next = [key.as_slice(), &[0]].concat();
+            let doc = self.scan(key, &next, 1, concern)?.into_iter().next();
+            found.push(doc.map_or(Fetched::Missing, |(_, d)| Fetched::Doc(d)));
+        }
+        Ok(Some(found))
     }
 
     // One range, with no intents: a read sees the committed documents.

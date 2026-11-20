@@ -68,14 +68,19 @@ pub(crate) struct Fetcher<'a> {
 impl<'a> Fetcher<'a> {
     /// A fetcher for the entries whose documents are in `pending`, in the scan's order, with the
     /// residual `filter` in BSON when the leaders may evaluate it and the read's `limit`.
+    /// `whole`: the read goes to its end, so every document is wanted and the batches are the
+    /// largest from the first; one that may stop early starts small and doubles.
     pub(crate) fn new(
         (coll, unbucketed): (&'a CollectionEntry, bool),
         pending: Vec<Vec<u8>>,
         filter: Option<Vec<u8>>,
-        (concern, limit): (ReadConcern, Option<u64>),
+        (concern, limit, whole): (ReadConcern, Option<u64>, bool),
     ) -> Fetcher<'a> {
-        let first =
-            limit.and_then(|l| usize::try_from(l).ok()).map_or(FIRST, |l| l.clamp(1, FIRST));
+        let first = match (whole, limit.and_then(|l| usize::try_from(l).ok())) {
+            (true, _) => MOST,
+            (false, Some(l)) => l.clamp(1, FIRST),
+            (false, None) => FIRST,
+        };
         Fetcher {
             coll,
             unbucketed,

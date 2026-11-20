@@ -967,7 +967,10 @@ fn run_reading<B: Backend + ?Sized>(
             _ => None,
         };
         let pending = scanned.ready_pending();
-        let mut fetcher = Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit));
+        // Neither a trial nor a limit stops this run: it reads every document of its entries.
+        let whole = budget.is_none() && limit.is_none();
+        let mut fetcher =
+            Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit, whole));
         let mut pull = first;
         // A multikey scan drops the other entries of a document it gave before fetching it
         // again (`dupsDropped` of its `IXSCAN`, measured on a reference replica set member 9.0.4).
