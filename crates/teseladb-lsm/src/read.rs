@@ -786,7 +786,12 @@ pub(crate) fn get_once<B: Blocks>(r: &mut B, v: &Version, key: &[u8], read: Hlc)
             // Also when the version found, from a newer source, is below a deletion the file
             // sent whole to its history file: it may be one of the key.
             let under = before.is_some_and(|b| t.props.apart.is_some_and(|a| b < a));
-            let wanted = of_level || (!gave && (read < t.props.max_ts || passed || under));
+            // And when a newer source retracted a mark at or below such a deletion's: it may be
+            // that deletion, and the version the read then shows is under it, in the history
+            // file alone. The file keeps no version of the key to pass over.
+            let unhidden = t.props.apart.is_some_and(|a| retracted.iter().any(|r| *r <= a));
+            let wanted =
+                of_level || (!gave && (read < t.props.max_ts || passed || under || unhidden));
             let newer = best.as_ref().is_none_or(|b| f.props.max_ts > b.ts);
             if !wanted || !newer || f.props.min_ts > read || !f.may_contain(hashes) {
                 continue;
@@ -894,7 +899,9 @@ fn skippable(
 }
 
 /// The first file older than source `i` whose history file is closed, that may hold `key` and
-/// sent there whole a deletion above `ts`, which may be one of the key.
+/// sent there whole a deletion at or above `ts`, which may be one of the key: above a version,
+/// it hides it; at the mark of a retraction, it is what the retraction takes away, and the
+/// versions under it are in that history file alone.
 fn closed_history_over(
     cursors: &[Cursor],
     asleep: &[Option<usize>],
@@ -906,7 +913,7 @@ fn closed_history_over(
         asleep[m].is_some()
             && match &cursors[m] {
                 Cursor::Table { table: t, .. } => {
-                    t.props.apart.is_some_and(|a| a > ts)
+                    t.props.apart.is_some_and(|a| a >= ts)
                         && t.props.lo.as_slice() <= key
                         && key <= t.props.hi.as_slice()
                 }

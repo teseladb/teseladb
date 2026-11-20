@@ -206,3 +206,39 @@ fn a_file_with_no_deletion_set_apart_wakes_no_history_for_newer_sources() {
     assert_eq!(after.history_woken, before.history_woken, "{after:?}");
     assert_eq!(after.history, before.history, "{after:?}");
 }
+
+/// A retraction hides every version of its mark in the older sources (FR-006), also a deletion
+/// that a compaction sent whole to its history file with the versions under it (FR-031): the
+/// read then shows what is under the deletion, which only that history file holds. The file
+/// keeps no version of the key, so the read met nothing to pass over there and left the history
+/// file closed (simulator, workload `lsm`, seeds 125 and 178 with two files of level 0
+/// starting a compaction: a key read as absent after its intent was aborted).
+#[test]
+fn a_retraction_of_the_mark_of_a_deletion_set_apart_shows_what_is_under_it() {
+    let mut disk = MemDisk::new();
+    let mut lsm = open(&small(), &mut disk);
+    lsm.put(G, 1, b"k", ts(10, 0), b"under").unwrap();
+    lsm.delete(G, 2, b"k", ts(20, 0)).unwrap();
+    lsm.put(G, 3, b"z", ts(10, 0), b"other").unwrap();
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    // Nothing below holds the key: the deletion and the value under it go to the history file.
+    compact(&mut lsm, &mut disk);
+    let v = lsm.view();
+    assert_eq!(get(&mut lsm, &mut disk, &v, b"k", ts(50, 0)), None);
+    // An intent at the deletion's mark, aborted: its retraction takes that mark away.
+    lsm.put_intent(G, 4, b"k", ts(20, 0), b"txn").unwrap();
+    lsm.resolve_intent(G, 5, b"k", ts(20, 0), None).unwrap();
+    let v = lsm.view();
+    let found = get(&mut lsm, &mut disk, &v, b"k", ts(50, 0)).expect("the value under it");
+    assert_eq!((found.1, found.3.as_slice()), (ts(10, 0), &b"under"[..]));
+    let rows = scan(&mut lsm, &mut disk, &v, b"a", b"y", ts(50, 0));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].0.as_slice(), rows[0].1), (&b"k"[..], ts(10, 0)));
+    // The same once the retraction is in a file of its own.
+    lsm.flush();
+    lsm.run_io(&mut disk, Nanos::ZERO);
+    let v = lsm.view();
+    assert!(get(&mut lsm, &mut disk, &v, b"k", ts(50, 0)).is_some());
+    assert_eq!(scan(&mut lsm, &mut disk, &v, b"a", b"y", ts(50, 0)).len(), 1);
+}
