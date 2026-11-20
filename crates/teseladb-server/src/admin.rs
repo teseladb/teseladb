@@ -711,6 +711,12 @@ fn lsm_metrics(out: &mut String, cores: &[(usize, crate::data::LsmSizes)]) {
     for (reason, n) in crate::backend::RETRY_REASONS.iter().zip(retries) {
         let _ = writeln!(out, "{name}{{reason=\"{reason}\"}} {n}");
     }
+    let name = "teseladb_lsm_column_blocks_total";
+    let _ = writeln!(out, "# HELP {name} Data blocks at which a scan that asks for columns chose.");
+    let _ = writeln!(out, "# TYPE {name} counter");
+    for (choice, n) in teseladb_lsm::ColumnChoice::ALL.iter().zip(teseladb_lsm::column_choices()) {
+        let _ = writeln!(out, "{name}{{choice=\"{}\"}} {n}", choice.label());
+    }
     let (gets, probes) = teseladb_lsm::outside_probes();
     let scans = teseladb_lsm::scan_totals();
     let took = teseladb_lsm::scan_breakdown();

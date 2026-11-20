@@ -123,7 +123,7 @@ pub(crate) fn serves_history(key: &[u8], kind: entry::Kind, value: &[u8]) -> boo
 /// First byte of the stored value of a document of a collection (and the type of a change
 /// stream's document, 014): what the zone maps summarise (FR-039).
 pub const DOCUMENT_VALUE: u8 = 1;
-pub use columnar::{ColumnStep, Columns};
+pub use columnar::{ColumnChoice, ColumnStep, Columns, column_choices};
 pub use entry::{Kind, RangeTombstone};
 pub use error::LsmError;
 pub use gc::GcTable;

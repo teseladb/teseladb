@@ -70,20 +70,88 @@ pub(crate) fn takes<'c>(
     ask: &Ask<'_>,
     mut others: impl Iterator<Item = &'c Cursor>,
 ) -> bool {
-    let Some(e) = table.column_entry(i) else { return false };
-    // The batch's last key comes from the index: a short one is not the block's last document.
-    if e.max_ts > ask.read || !table.exact_last(i) {
-        return false;
+    let choice = (|| {
+        let Some(e) = table.column_entry(i) else { return ColumnChoice::NoColumns };
+        // The batch's last key comes from the index: a short one is not the block's last
+        // document.
+        if e.max_ts > ask.read || !table.exact_last(i) {
+            return ColumnChoice::NotSeenWhole;
+        }
+        let (lo, hi) = table.block_span(i);
+        let from_start = match (target, i) {
+            (None, _) => true,
+            (Some(t), 0) => entry::compare(t, &entry::first_version(lo)).is_le(),
+            // The block's keys come after `lo`, the last of the block before it.
+            (Some(t), _) => entry::compare(t, &entry::after_all_versions(lo)).is_le(),
+        };
+        if !from_start || hi >= ask.end {
+            return ColumnChoice::Edge;
+        }
+        if ask.tombstones.iter().any(|t| t.start.as_slice() <= hi && t.end.as_slice() > lo) {
+            return ColumnChoice::Tombstone;
+        }
+        match others.find(|c| c.may_give(lo, hi, table)) {
+            Some(Cursor::Mem(_)) => ColumnChoice::Memtable,
+            Some(_) => ColumnChoice::OtherFile,
+            None => ColumnChoice::Taken,
+        }
+    })();
+    CHOICES[choice as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    choice == ColumnChoice::Taken
+}
+
+/// What a scan that asks for columns decided at a data block ([`takes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnChoice {
+    /// Its column block was taken.
+    Taken,
+    /// The block has no column block.
+    NoColumns,
+    /// A version of the block is above the read's mark, or its last key in the index is cut.
+    NotSeenWhole,
+    /// The scan starts inside the block or ends in it.
+    Edge,
+    /// A range tombstone touches the block.
+    Tombstone,
+    /// A memtable may give a key of the block.
+    Memtable,
+    /// Another file may give a key of the block.
+    OtherFile,
+}
+
+impl ColumnChoice {
+    /// Every choice, in the order of [`column_choices`].
+    pub const ALL: [ColumnChoice; 7] = [
+        ColumnChoice::Taken,
+        ColumnChoice::NoColumns,
+        ColumnChoice::NotSeenWhole,
+        ColumnChoice::Edge,
+        ColumnChoice::Tombstone,
+        ColumnChoice::Memtable,
+        ColumnChoice::OtherFile,
+    ];
+
+    /// Its label in the metrics.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ColumnChoice::Taken => "taken",
+            ColumnChoice::NoColumns => "no_columns",
+            ColumnChoice::NotSeenWhole => "not_seen_whole",
+            ColumnChoice::Edge => "edge",
+            ColumnChoice::Tombstone => "tombstone",
+            ColumnChoice::Memtable => "memtable",
+            ColumnChoice::OtherFile => "other_file",
+        }
     }
-    let (lo, hi) = table.block_span(i);
-    let from_start = match (target, i) {
-        (None, _) => true,
-        (Some(t), 0) => entry::compare(t, &entry::first_version(lo)).is_le(),
-        // The block's keys come after `lo`, the last of the block before it.
-        (Some(t), _) => entry::compare(t, &entry::after_all_versions(lo)).is_le(),
-    };
-    from_start
-        && hi < ask.end
-        && !ask.tombstones.iter().any(|t| t.start.as_slice() <= hi && t.end.as_slice() > lo)
-        && !others.any(|c| c.may_give(lo, hi, table))
+}
+
+static CHOICES: [std::sync::atomic::AtomicU64; 7] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+/// How many data blocks the scans of this process that ask for columns decided each way of
+/// [`ColumnChoice::ALL`] (010 FR-033).
+#[must_use]
+pub fn column_choices() -> [u64; 7] {
+    std::array::from_fn(|i| CHOICES[i].load(std::sync::atomic::Ordering::Relaxed))
 }
