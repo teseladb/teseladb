@@ -99,7 +99,7 @@ impl Default for LsmConfig {
             codec: Codec::None,
             dict_bytes: DICT_BYTES,
             dict_renew_bytes: DICT_RENEW_BYTES,
-            l0_trigger: 4,
+            l0_trigger: L0_TRIGGER,
             l0_down: None,
             l0_slow: 20,
             l0_reject: 36,
@@ -116,6 +116,15 @@ impl Default for LsmConfig {
         }
     }
 }
+
+/// Files in level 0 that start a compaction, by default: two. Each file of level 0 is one more
+/// source for every scan, with its own version of the keys that are rewritten. In the one-node
+/// load (002 runs p70c, p70t2 and p70t1, the same binary in the same hour) four files gave 3.0
+/// files of level 0 for each scan and 909 million versions of keys already decided; two gave
+/// 1.85 and 727 million, 2.8 % less CPU for each operation and the writes as they were, for 1.8
+/// times the bytes written instead of 1.3; one joined every flush at once, wrote 37.5 times
+/// the bytes and took twice the CPU.
+pub const L0_TRIGGER: usize = 2;
 
 /// The environment variable that sets the level 0 files that start a compaction, for a diagnosis
 /// run: fewer overlapping files mean fewer copies of a hot key for a scan to pass over (002 run
@@ -168,6 +177,14 @@ impl LsmConfig {
 #[cfg_attr(coverage, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_files_of_level_0_start_a_compaction_by_default() {
+        let c = LsmConfig::default();
+        assert_eq!(c.l0_trigger, 2);
+        // Level 0 still goes down to level 1 at half of the slow-down, whatever level 1 weighs.
+        assert_eq!(c.l0_down_files(), 10);
+    }
 
     #[test]
     fn levels_grow_tenfold() {

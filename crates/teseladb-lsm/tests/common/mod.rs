@@ -27,6 +27,9 @@ pub fn small() -> LsmConfig {
         target_file_bytes: 64 << 10,
         l1_bytes: 256 << 10,
         cache_bytes: 256 << 10,
+        // The tests count files and compactions with four files of level 0 starting one; the
+        // node's default is a measure of its load, not of the mechanics they check.
+        l0_trigger: 4,
         ..LsmConfig::default()
     }
 }
