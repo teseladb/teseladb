@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use teseladb::engine::core::coroutine::make_coroutine;
 use teseladb::engine::core::future::make_ready_future;
-use teseladb::engine::core::loop_::parallel_for_each;
+use teseladb::engine::core::loop_::{do_until, parallel_for_each};
 use teseladb::engine::core::memory;
 use teseladb::engine::core::reactor::{later, yield_};
 use teseladb::engine_test_case;
@@ -92,6 +92,40 @@ engine_test_case!(a_coroutine_that_suspends_allocates_nothing_once_warm, {
         if CACHE_ENABLED {
             let mallocs = s1.mallocs() - s0.mallocs();
             assert!(mallocs < 100, "{mallocs} allocations for {ROUNDS} coroutines");
+        }
+        Ok(())
+    })
+});
+
+engine_test_case!(a_loop_that_suspends_takes_its_state_from_the_pool_once_warm, {
+    make_coroutine(async move {
+        // The state of a loop whose body is not ready (its task, its promise and its
+        // functions, one block) comes from the thread's pool of blocks as well.
+        let step = || {
+            let left = Rc::new(Cell::new(2u32));
+            let l = Rc::clone(&left);
+            do_until(
+                move || left.get() == 0,
+                move || {
+                    l.set(l.get() - 1);
+                    yield_()
+                },
+            )
+        };
+        for _ in 0..64 {
+            step().await?;
+        }
+        let s0 = memory::stats();
+        for _ in 0..ROUNDS {
+            step().await?;
+        }
+        let s1 = memory::stats();
+        let live = s1.live_objects() as i64 - s0.live_objects() as i64;
+        assert!(live.abs() <= 2, "live objects after {ROUNDS} loops: {live}");
+        if CACHE_ENABLED {
+            // What is left is the counter each round shares between its two functions.
+            let mallocs = s1.mallocs() - s0.mallocs();
+            assert!(mallocs < ROUNDS + 100, "{mallocs} allocations for {ROUNDS} loops");
         }
         Ok(())
     })

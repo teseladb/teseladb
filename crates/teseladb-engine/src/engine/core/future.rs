@@ -2511,10 +2511,11 @@ impl<T: 'static> Default for HostedPromise<T> {
 /// Frees the memory of a host allocated by [`HostBox::new`].
 ///
 /// # Safety
-/// `p` must come from `Box::<H>::into_raw`, with the value already dropped.
+/// `p` must come from [`HostBox::new`], with the value already dropped.
 unsafe fn dealloc_host<H>(p: *mut u8) {
-    // SAFETY: guaranteed by the caller; Box allocates with Layout::new::<H>().
-    unsafe { crate::engine::core::memory::dealloc_direct(p, std::alloc::Layout::new::<H>()) };
+    // SAFETY: guaranteed by the caller; HostBox::new takes the block from the thread's pool
+    // with Layout::new::<H>().
+    unsafe { node_pool::dealloc(p, std::alloc::Layout::new::<H>()) };
 }
 
 /// Placeholder deallocation of an unbound hosted promise (never called: an unbound
@@ -2741,7 +2742,10 @@ impl<H: PromiseHost> HostBox<H> {
         // temporary copied whole into the allocation with 16-byte loads over narrower
         // stores (see `CoroutinePromise::alloc`). The handler aborts, so nothing is lost.
         let h = ManuallyDrop::new(h);
-        let p = Box::into_raw(crate::engine::core::memory::new_uninit_box::<H>()).cast::<H>();
+        // From the thread's pool of blocks (an improvement beyond the original, which
+        // allocates and frees the state of every loop that suspends).
+        const { assert!(mem::size_of::<H>() != 0) };
+        let p = node_pool::alloc(std::alloc::Layout::new::<H>()).cast::<H>();
         // SAFETY: p is a fresh, uninitialized allocation of an H, uniquely owned here.
         unsafe { p.write(ManuallyDrop::into_inner(h)) };
         // SAFETY: p was just allocated and is uniquely owned here; the promise pointer is
