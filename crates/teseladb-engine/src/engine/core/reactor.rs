@@ -5844,15 +5844,17 @@ impl Pollfn for SmpPollfn {
         Smp::pure_poll_queues() || self.alien().pure_poll_queues()
     }
     fn try_enter_interrupt_mode(&mut self) -> bool {
-        // systemwide_memory_barrier() is very slow if run concurrently,
-        // so don't go to sleep if it is running now.
-        self.sleeping().store(true, Ordering::Relaxed);
-        let barrier_done =
-            crate::engine::core::systemwide_memory_barrier::try_systemwide_memory_barrier();
-        if !barrier_done {
-            self.sleeping().store(false, Ordering::Relaxed);
-            return false;
-        }
+        // The reactor says it sleeps, executes a full barrier and then looks at its queues;
+        // whoever queues work for it queues, executes a full barrier and then looks at whether
+        // it sleeps ([`Reactor::wakeup_from`]). With a barrier between the write and the read on
+        // both sides, one of the two sees the other: the work is taken here, or the sender wakes
+        // the reactor. The original leaves the sender without a barrier and has the sleeper
+        // issue one for every thread of the process (`membarrier`), a system call that
+        // interrupts each CPU the process runs on; a node whose shards sleep thousands of
+        // times a second spent 3.9 % of its samples inside it, and its busy shards took the
+        // interrupts (002 run p71q).
+        self.sleeping().store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
         if self.poll() {
             // raced
             self.sleeping().store(false, Ordering::Relaxed);
@@ -5976,7 +5978,12 @@ impl Reactor {
                 (*std::ptr::addr_of!((*this)._notify_eventfd)).get(),
             )
         };
-        if !sleeping.load(Ordering::Relaxed) {
+        // What the caller queued for the reactor is written; a full barrier before the read, so
+        // that either this read sees a reactor that said it sleeps, or the reactor's look at
+        // its queues, after its own barrier, sees what was queued
+        // ([`SmpPollfn::try_enter_interrupt_mode`]).
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if !sleeping.load(Ordering::SeqCst) {
             return false;
         }
 
@@ -7351,12 +7358,9 @@ impl LfQueue {
     pub(crate) fn maybe_wakeup(&self) {
         // Called after lf_queue_base::push().
         //
-        // This is read-after-write, which wants memory_order_seq_cst,
-        // but we insert that barrier using systemwide_memory_barrier()
-        // because seq_cst is so expensive.
-        //
-        // However, we do need a compiler barrier:
-        std::sync::atomic::compiler_fence(Ordering::SeqCst);
+        // This is read-after-write, which wants memory_order_seq_cst: the barrier is in
+        // `Reactor::wakeup_from`, before it reads whether the reactor sleeps. The original
+        // leaves it out here and has the sleeper issue it for the whole process.
         // SAFETY: the remote reactor outlives the queues between shards.
         unsafe {
             // One that is awake is asked to poll its queues before its running tasks use up
