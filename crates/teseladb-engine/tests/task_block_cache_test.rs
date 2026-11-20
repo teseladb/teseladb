@@ -45,6 +45,58 @@ engine_test_case!(a_yield_loop_allocates_no_task_once_the_cache_is_warm, {
     })
 });
 
+engine_test_case!(a_continuation_on_a_future_that_is_not_ready_allocates_nothing_once_warm, {
+    make_coroutine(async move {
+        // The continuation of `then` on a future that is not ready is a task with its
+        // function and its promise: its memory comes from the thread's pool of blocks once
+        // a first round has left one there, as the task of the yield comes from its cache.
+        let step = || yield_().then(|()| make_ready_future(()));
+        for _ in 0..64 {
+            step().await?;
+        }
+        let s0 = memory::stats();
+        for _ in 0..ROUNDS {
+            step().await?;
+        }
+        let s1 = memory::stats();
+        let live = s1.live_objects() as i64 - s0.live_objects() as i64;
+        assert!(live.abs() <= 2, "live objects after {ROUNDS} continuations: {live}");
+        if CACHE_ENABLED {
+            let mallocs = s1.mallocs() - s0.mallocs();
+            assert!(mallocs < 100, "{mallocs} allocations for {ROUNDS} continuations");
+        }
+        Ok(())
+    })
+});
+
+engine_test_case!(a_coroutine_that_suspends_allocates_nothing_once_warm, {
+    make_coroutine(async move {
+        // A coroutine is one block (its task, its promise and its frame): it comes from the
+        // thread's pool of blocks once a first round has left one there.
+        let step = || {
+            make_coroutine(async move {
+                yield_().await?;
+                Ok(())
+            })
+        };
+        for _ in 0..64 {
+            step().await?;
+        }
+        let s0 = memory::stats();
+        for _ in 0..ROUNDS {
+            step().await?;
+        }
+        let s1 = memory::stats();
+        let live = s1.live_objects() as i64 - s0.live_objects() as i64;
+        assert!(live.abs() <= 2, "live objects after {ROUNDS} coroutines: {live}");
+        if CACHE_ENABLED {
+            let mallocs = s1.mallocs() - s0.mallocs();
+            assert!(mallocs < 100, "{mallocs} allocations for {ROUNDS} coroutines");
+        }
+        Ok(())
+    })
+});
+
 engine_test_case!(cached_tasks_still_run_in_order, {
     make_coroutine(async move {
         // Many tasks of the cached size alive at once (more than the cache keeps), then

@@ -845,7 +845,7 @@ mod node_pool {
             }
         }
         // SAFETY: `real` has a non-zero size.
-        let p = unsafe { std::alloc::alloc(real) };
+        let p = unsafe { crate::engine::core::memory::alloc_direct(real) };
         if p.is_null() {
             std::alloc::handle_alloc_error(real);
         }
@@ -880,6 +880,23 @@ mod node_pool {
             unsafe { std::alloc::dealloc(p, class_layout(c)) };
         }
     }
+}
+
+/// A block for `layout` from the thread's pool of blocks, for the tasks of other modules
+/// that live one block each (a coroutine): never null.
+#[inline(always)]
+pub(crate) fn pooled_alloc(layout: std::alloc::Layout) -> *mut u8 {
+    node_pool::alloc(layout)
+}
+
+/// Gives back a block from [`pooled_alloc`] with the same `layout`.
+///
+/// # Safety
+/// `p` must come from `pooled_alloc(layout)` and not be used afterwards.
+#[inline(always)]
+pub(crate) unsafe fn pooled_dealloc(p: *mut u8, layout: std::alloc::Layout) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { node_pool::dealloc(p, layout) }
 }
 
 /// Building blocks of futures and promises: the promise node and the writer handles.
@@ -1648,6 +1665,24 @@ where
     Func: 'static,
     Wrapper: FnOnce(internal::PromiseBaseWithType<U>, Func, FutureState<T>) + 'static,
 {
+    /// The block of a continuation, as the thread's pool of blocks takes it.
+    const LAYOUT: std::alloc::Layout = std::alloc::Layout::new::<Self>();
+
+    /// Destroys the continuation and gives its block back to the thread's pool.
+    ///
+    /// # Safety
+    /// `c` comes from [`Continuation::alloc`], is fully initialized and is not used after
+    /// the call.
+    #[inline(always)]
+    unsafe fn free(c: *mut Self) {
+        // SAFETY: guaranteed by the caller; the block was taken from the pool with this
+        // layout.
+        unsafe {
+            ptr::drop_in_place(c);
+            node_pool::dealloc(c.cast::<u8>(), Self::LAYOUT);
+        }
+    }
+
     /// Allocates the continuation; its node starts with the writer reference (owned by
     /// the continuation until it runs) and the future reference (owned by the caller's
     /// next future).
@@ -1662,11 +1697,14 @@ where
         let sg = current_scheduling_group();
         // Built in place on the heap, field by field (as other task runtimes do), so the
         // function object is written once and not built on the stack and copied.
-        let mut b = crate::engine::core::memory::new_uninit_box::<Self>();
-        let c = b.as_mut_ptr();
+        // From the thread's pool of blocks (an improvement beyond the original, which
+        // allocates and frees every continuation): a chain on futures that are not ready
+        // takes one block per link and gives it back when the link has run, so the block the
+        // last link freed serves the next one, a list pop away from the thread pointer.
+        let c = node_pool::alloc(Self::LAYOUT).cast::<Self>();
         // SAFETY: c is the uninitialized allocation of a Self, uniquely owned here; every
-        // field is written once before the box is given up as initialized, and the field
-        // pointers are derived from the pointer to the whole object.
+        // field is written once before the continuation is used, and the field pointers
+        // are derived from the pointer to the whole object.
         unsafe {
             ptr::addr_of_mut!((*c).task).write(TaskBase::new::<Self>(sg));
             ptr::addr_of_mut!((*c).state).write(FutureState::new());
@@ -1674,7 +1712,6 @@ where
                 .write(internal::PromiseNode::new_detached(true, Self::release_node));
             ptr::addr_of_mut!((*c).func).write(func);
             ptr::addr_of_mut!((*c).wrapper).write(wrapper);
-            let c = Box::into_raw(b).cast::<Self>();
             let n = ptr::addr_of_mut!((*c).node);
             (*n).state = ptr::addr_of_mut!((*n).local_state);
             (*c).task.make_backtrace();
@@ -1705,7 +1742,7 @@ where
             let c = n.byte_sub(mem::offset_of!(Self, node)).cast::<Self>();
             (*n).holder_node_live = false;
             if (*n).holder_done {
-                crate::engine::core::memory::drop_box_direct(c);
+                Self::free(c);
             }
         }
     }
@@ -1756,9 +1793,8 @@ where
                 (*n).holder_node_live = false;
             }
             if !(*n).holder_node_live {
-                // Continuations are boxed by new_uninit_box in alloc(); nothing refers to
-                // the node any more and `c` is not used after this point.
-                crate::engine::core::memory::drop_box_direct(c);
+                // Nothing refers to the node any more and `c` is not used after this point.
+                Self::free(c);
             }
         }
     }

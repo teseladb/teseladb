@@ -276,6 +276,9 @@ pub mod internal {
     where
         Fut: StdFuture<Output = Result<T, ExceptionPtr>> + 'static,
     {
+        /// The block of a coroutine, as the thread's pool of blocks takes it.
+        const LAYOUT: std::alloc::Layout = std::alloc::Layout::new::<Self>();
+
         /// The promise node, with the provenance of the whole coroutine.
         ///
         /// # Safety
@@ -409,17 +412,19 @@ pub mod internal {
         pub(super) fn alloc(with_future: bool, frame: Fut) -> *mut Self {
             let frame = ManuallyDrop::new(frame);
             let sg = current_scheduling_group();
-            let mut b = crate::engine::core::memory::new_uninit_box::<Self>();
-            let p = b.as_mut_ptr();
+            // From the thread's pool of blocks (an improvement beyond the original, which
+            // allocates and frees every coroutine frame): the block the last coroutine of
+            // this size gave back serves the next one.
+            let p = crate::engine::core::future::pooled_alloc(Self::LAYOUT).cast::<Self>();
             // SAFETY: `p` is the uninitialized allocation of a Self, uniquely owned here;
-            // every field is written once before the box is given up as initialized.
+            // every field is written once before the coroutine is used.
             unsafe {
                 ptr::addr_of_mut!((*p).core).write(CoroutineCore::new::<Self>(sg));
                 ptr::addr_of_mut!((*p).promise)
                     .write(PromiseNode::new_detached(with_future, Self::release_node));
                 ptr::addr_of_mut!((*p).frame).write(frame);
             }
-            Box::into_raw(b).cast::<Self>()
+            p
         }
 
         /// [`CoroutineCore::maybe_free`] for a caller that knows the type: the frame is
@@ -441,10 +446,7 @@ pub mod internal {
                 if CoroutineCore::unreferenced(this.cast::<CoroutineCore>()) {
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).core));
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).promise.local_state));
-                    crate::engine::core::memory::dealloc_direct(
-                        this.cast::<u8>(),
-                        std::alloc::Layout::new::<Self>(),
-                    );
+                    crate::engine::core::future::pooled_dealloc(this.cast::<u8>(), Self::LAYOUT);
                 }
             }
         }
@@ -536,10 +538,7 @@ pub mod internal {
                 CoroutineCore::retire_node(c);
                 if CoroutineCore::unreferenced(c) {
                     ptr::drop_in_place(ptr::addr_of_mut!((*this).core));
-                    crate::engine::core::memory::dealloc_direct(
-                        this.cast::<u8>(),
-                        std::alloc::Layout::new::<Self>(),
-                    );
+                    crate::engine::core::future::pooled_dealloc(this.cast::<u8>(), Self::LAYOUT);
                 }
             }
         }

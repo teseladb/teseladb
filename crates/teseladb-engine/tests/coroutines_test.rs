@@ -1483,14 +1483,18 @@ engine_test_case!(test_suspended_awaiter_leaks_nothing, {
         let s2 = memory::stats();
         let live_100 = s1.live_objects() as i64 - s0.live_objects() as i64;
         let live_10000 = s2.live_objects() as i64 - s1.live_objects() as i64;
-        // Every round allocates and frees its promise node and continuation: nothing stays
-        // live, whatever the number of rounds.
+        // Every round takes and gives back its promise node and its continuation (from the
+        // thread's pool of blocks once it is warm): nothing stays live, whatever the number
+        // of rounds.
         assert!(live_100.abs() <= 2, "live objects after 100 rounds: {live_100}");
         assert!(live_10000.abs() <= 2, "live objects after 10000 rounds: {live_10000}");
-        // The system allocator of a `--cfg engine_default_allocator` build counts nothing
+        // The counters the checks above read do count: an allocation made here shows. The
+        // system allocator of a `--cfg engine_default_allocator` build counts nothing
         // (memory::stats() is all zeros there, as with the original's default-allocator build).
         if cfg!(not(engine_default_allocator)) {
-            assert!(s2.mallocs() - s1.mallocs() >= 10_000);
+            let block = std::hint::black_box(vec![0u8; 4096]);
+            assert!(memory::stats().mallocs() > s2.mallocs());
+            drop(block);
         }
         Ok(())
     })
