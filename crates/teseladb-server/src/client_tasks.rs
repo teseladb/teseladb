@@ -26,7 +26,7 @@ pub const TASK_STOP_LIMIT: Duration = Duration::from_secs(10);
 /// What tells a task to stop, and what it pauses on.
 #[derive(Debug, Default)]
 pub struct TaskStop {
-    stopped: AtomicBool,
+    stopped: Arc<AtomicBool>,
     waiter: Waiter,
 }
 
@@ -34,6 +34,12 @@ impl TaskStop {
     /// Whether the port stops.
     pub fn stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
+    }
+
+    /// What says the port stops, for what the task hands its waits to: a backend it reads with
+    /// ends them then ([`crate::backend::ServerBackend::cancelled_by`]).
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stopped)
     }
 
     /// Pauses up to `d`, less if the port stops or [`TaskStop::wake`] comes.

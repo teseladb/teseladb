@@ -564,6 +564,11 @@ impl std::fmt::Debug for ClientListener {
     }
 }
 
+/// The longest a request of the statistics' pass waits (023 FR-019): the wait a stop that comes
+/// in the middle of one has to sit through, since a request under way keeps the deadline it
+/// started with.
+const STATS_REQUEST_LIMIT: Duration = Duration::from_secs(2);
+
 /// How many tasks resolve the intents of the finished transactions: a resolution waits for a
 /// write of the log, so a few run side by side.
 const RESOLVERS: usize = 4;
@@ -702,8 +707,13 @@ impl ClientListener {
         let hs = h.clone();
         let every = hooks.stats_every;
         let statistics = Box::new(move |stop: &crate::client_tasks::TaskStop| {
-            let mut backend =
-                ServerBackend::new(hs, seed(u64::MAX - 3 - RESOLVERS as u64)).yielding_reads();
+            // Its waits are short and end when the port stops: a pass that waited the request
+            // deadline for ranges without a leader kept the engine, which waits for its
+            // background work, from ending. A range it could not read waits for the next pass.
+            let mut backend = ServerBackend::new(hs, seed(u64::MAX - 3 - RESOLVERS as u64))
+                .yielding_reads()
+                .with_deadline(STATS_REQUEST_LIMIT)
+                .cancelled_by(stop.flag());
             let mut pause = || {
                 if teseladb::engine::core::thread::Thread::running_in_thread() {
                     teseladb::engine::core::thread::Thread::maybe_yield();

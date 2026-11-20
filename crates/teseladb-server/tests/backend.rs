@@ -332,6 +332,26 @@ fn a_command_deadline_cuts_the_waits_short() {
     b.set_deadline(None);
 }
 
+/// A backend of a periodic task ends its waits once the task's port stops (023 FR-019): a
+/// request that starts then gives up at its first look, instead of waiting its whole deadline
+/// for ranges that have no leader. The statistics' pass did, with the node stopping, and the
+/// engine, which waits for its background work, did not end in the 30 s its stop has (the
+/// `sessions` test, one run in three).
+#[test]
+fn a_cancelled_backend_gives_up_its_waits_at_once() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // No answers: each call would wait the request deadline, twenty seconds here.
+    let mut b = ServerBackend::new(cores(Arc::default(), Arc::default(), Arc::default()), 7)
+        .with_deadline(Duration::from_secs(20))
+        .cancelled_by(flag.clone());
+    flag.store(true, std::sync::atomic::Ordering::Release);
+    let start = std::time::Instant::now();
+    assert!(b.collections().is_err());
+    assert!(b.scan(&[1], &[2], 10, ReadConcern::Local).is_err());
+    assert!(b.route_entries().is_ok());
+    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+}
+
 #[test]
 fn cluster_parameters_are_group_0_settings() {
     use std::collections::BTreeMap;

@@ -170,6 +170,9 @@ pub struct ServerBackend {
     /// with its own node number, which in the same millisecond and sequence sorts below another
     /// node's, so the cluster time this backend reads at is never below it (017 SC-002).
     committed: Hlc,
+    /// When set, what ends this backend's waits at once: a task of the clients' port that
+    /// stops (023 FR-019).
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The marks the views of the ranges of the session's transactions have to reach before it
     /// reads them outside the cores (005 FR-028).
     pub(crate) across: outside::AcrossMarks,
@@ -215,6 +218,7 @@ impl ServerBackend {
             selection: None,
             read_mark: None,
             committed: Hlc { physical: 0, logical: 0 },
+            cancel: None,
             across: outside::AcrossMarks::default(),
             outside: outside::Outside::default(),
             statements: None,
@@ -294,6 +298,18 @@ impl ServerBackend {
     pub fn with_deadline(self, deadline: Duration) -> ServerBackend {
         let mut b = self;
         b.deadline = deadline;
+        b
+    }
+
+    /// The backend whose waits end once `flag` is set: each request that starts then has no
+    /// time left, and gives up at its first look. A periodic task of the clients' port reads
+    /// with one (023 FR-019): a pass that waited the whole request deadline for ranges without
+    /// a leader, with the node stopping, kept the engine from ending, which waits for its
+    /// background work.
+    #[must_use]
+    pub fn cancelled_by(self, flag: Arc<std::sync::atomic::AtomicBool>) -> ServerBackend {
+        let mut b = self;
+        b.cancel = Some(flag);
         b
     }
 
@@ -489,6 +505,11 @@ impl ServerBackend {
     }
 
     fn until(&self) -> Instant {
+        let cancelled =
+            self.cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire));
+        if cancelled {
+            return Instant::now();
+        }
         let own = Instant::now() + self.deadline;
         self.max_until.map_or(own, |m| m.min(own))
     }

@@ -449,7 +449,13 @@ impl NodeProc {
             Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
             Err(e) => format!("no debugger: {e}"),
         };
-        let _ = fs::write(path, format!("node {pid} did not end; its threads:\n{text}"));
+        let log = self.log_text();
+        let tail: Vec<&str> = log.lines().rev().take(40).collect();
+        let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        let _ = fs::write(
+            path,
+            format!("node {pid} did not end; its threads:\n{text}\nthe end of its log:\n{tail}\n"),
+        );
     }
 
     /// How the node's process ended, if it did, without waiting.
