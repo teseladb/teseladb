@@ -1123,6 +1123,11 @@ pub(crate) fn aggregate_from<B: Backend + ?Sized>(
         None => (None, None),
     };
     let by_index = scatter.is_some() && planned.is_some();
+    if by_index {
+        // What the read by the index took of the whole (012 FR-015): the rest is the pipeline.
+        let took = ctx.backend.now_micros().saturating_sub(began).saturating_mul(1_000);
+        teseladb_stages::record(teseladb_stages::Stage::AggIndexRead, took);
+    }
     let (docs, metas, sbe, applied) = match planned {
         Some((docs, metas, applied)) => (docs, metas, true, applied),
         None if scan.is_some() => (Vec::new(), None, true, 0),

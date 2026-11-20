@@ -126,6 +126,15 @@ pub enum Stage {
     StatsRead,
     /// The build of one range's statistics from the values read: their sort and histograms.
     StatsBuild,
+    /// An aggregation that reads by an index, from its plan to its documents read: the entries
+    /// of the index and the documents they name. The rest of [`Stage::AggByIndex`] is its
+    /// pipeline.
+    AggIndexRead,
+    /// The read of several spans of keys for one request of a command, such as the entries of
+    /// an index in each partition of a collection.
+    SpansRead,
+    /// The read of the documents the entries of an index name, for one request of a command.
+    DocumentsFetch,
     /// A write of a client's command on its connection's shard, from the request sent to its
     /// range's core to the answer back: both hops between the shards with the range's work.
     WriteAsk,
@@ -145,7 +154,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 50] = [
+    pub const ALL: [Stage; 53] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -190,6 +199,9 @@ impl Stage {
         Stage::StatsPass,
         Stage::StatsRead,
         Stage::StatsBuild,
+        Stage::AggIndexRead,
+        Stage::SpansRead,
+        Stage::DocumentsFetch,
         Stage::WriteAsk,
         Stage::LogAppendToSyncOut,
         Stage::IndexBuildStart,
@@ -245,6 +257,9 @@ impl Stage {
             Stage::StatsPass => "stats_pass",
             Stage::StatsRead => "stats_read",
             Stage::StatsBuild => "stats_build",
+            Stage::AggIndexRead => "agg_index_read",
+            Stage::SpansRead => "spans_read",
+            Stage::DocumentsFetch => "documents_fetch",
             Stage::WriteAsk => "write_ask",
             Stage::LogAppendToSyncOut => "log_append_to_sync_out",
             Stage::IndexBuildStart => "index_build_start",

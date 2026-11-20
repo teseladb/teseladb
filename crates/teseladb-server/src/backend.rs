@@ -1558,7 +1558,10 @@ impl Backend for ServerBackend {
         filter: Option<&[u8]>,
         concern: ReadConcern,
     ) -> Result<Option<Vec<teseladb_wire::commands::Fetched>>, CommandError> {
-        self.fetch_together(keys, filter, concern)
+        let began = Instant::now();
+        let fetched = self.fetch_together(keys, filter, concern);
+        stage_since(Stage::DocumentsFetch, began);
+        fetched
     }
 
     fn points(
@@ -1584,8 +1587,12 @@ impl Backend for ServerBackend {
         spans: &[teseladb_wire::commands::Span],
         concern: ReadConcern,
     ) -> Result<Vec<teseladb_wire::commands::Rows>, CommandError> {
-        self.scan_spans_stored(spans, concern)
-            .map(|all| all.into_iter().map(stored::document_rows).collect())
+        let began = Instant::now();
+        let rows = self
+            .scan_spans_stored(spans, concern)
+            .map(|all| all.into_iter().map(stored::document_rows).collect());
+        stage_since(Stage::SpansRead, began);
+        rows
     }
 
     fn kill_everywhere(&mut self, scope: &KillScope) -> Result<(), CommandError> {
