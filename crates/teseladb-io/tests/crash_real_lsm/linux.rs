@@ -49,6 +49,9 @@ fn value(index: u64) -> Vec<u8> {
     let mut rng = Rng::new(index);
     let mut v = vec![0u8; rng.range(1, 3000) as usize];
     rng.fill(&mut v);
+    // The first byte of a value says what it is (004 FR-047): a document. Random, one in 256
+    // was a value that only serves the history, which no read by key gives (entry 125).
+    v[0] = teseladb_lsm::DOCUMENT_VALUE;
     v
 }
 

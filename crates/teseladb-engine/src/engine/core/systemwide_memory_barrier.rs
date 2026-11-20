@@ -50,9 +50,20 @@ static HAS_NATIVE_MEMBARRIER: LazyLock<bool> = LazyLock::new(|| {
     true
 });
 
+/// Process-wide barriers issued since the process started, by either way.
+static ISSUED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many process-wide memory barriers the process has issued. A reactor that goes to sleep
+/// issues none: each interrupts every thread of the process.
+#[must_use]
+pub fn barriers_issued() -> u64 {
+    ISSUED.load(Ordering::Relaxed)
+}
+
 #[inline]
 fn try_native_membarrier() -> bool {
     if *HAS_NATIVE_MEMBARRIER {
+        ISSUED.fetch_add(1, Ordering::Relaxed);
         // SAFETY: plain membarrier system call.
         unsafe { syscall(SYS_MEMBARRIER, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0) };
         return true;
@@ -91,6 +102,7 @@ pub fn systemwide_memory_barrier() {
         return;
     }
 
+    ISSUED.fetch_add(1, Ordering::Relaxed);
     // FIXME: use sys_membarrier() when available
     let mem = MEM.with(|m| *m);
     // Force page into memory to make madvise() have real work to do

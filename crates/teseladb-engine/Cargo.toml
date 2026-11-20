@@ -131,6 +131,12 @@ name = "defect_smp_message_waits_for_quota"
 path = "tests/entry/defect_smp_message_waits_for_quota.rs"
 harness = false
 
+# Runs on two shards that do not poll before they sleep, which its main adds to the options.
+[[test]]
+name = "defect_sleep_interrupts_every_shard"
+path = "tests/entry/defect_sleep_interrupts_every_shard.rs"
+harness = false
+
 # Runs with the epoll reactor backend, which its main adds to the reactor options.
 [[test]]
 name = "defect_epoll_error_spin"
