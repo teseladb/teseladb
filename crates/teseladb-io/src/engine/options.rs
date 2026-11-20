@@ -45,6 +45,25 @@ pub fn stall_notify_ms(env: Option<&str>) -> u32 {
 /// that wants the polling back gives the option.
 pub const DEFAULT_IDLE_POLL_US: u32 = 0;
 
+/// The variable a diagnosis run sets to make an idle shard poll for that many microseconds
+/// before it sleeps, without `--idle-poll-us`: a message to a sleeping shard waits for the
+/// kernel to wake its thread (002 run p80b: one message in five took 256 µs or more to reach
+/// its shard).
+pub const IDLE_POLL_ENV: &str = "TESELADB_IDLE_POLL_US";
+
+/// The longest idle poll [`IDLE_POLL_ENV`] may ask for: the engine's own default on a virtual
+/// machine.
+const IDLE_POLL_MOST_US: u32 = 2_000;
+
+/// The idle poll from the value of [`IDLE_POLL_ENV`], if it is a whole number of microseconds
+/// up to [`IDLE_POLL_MOST_US`]; otherwise [`DEFAULT_IDLE_POLL_US`].
+#[must_use]
+pub fn idle_poll_us(env: Option<&str>) -> u32 {
+    env.and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&us| us <= IDLE_POLL_MOST_US)
+        .unwrap_or(DEFAULT_IDLE_POLL_US)
+}
+
 /// The engine's task quota, its default: the longest a task runs before the reactor polls.
 pub const TASK_QUOTA_MS: &str = "0.5";
 
@@ -170,7 +189,9 @@ impl EngineConfig {
             DirectIo::On => {}
             DirectIo::Off => a.extend(["--kernel-page-cache".to_owned(), "1".to_owned()]),
         }
-        let idle_poll = self.idle_poll_us.unwrap_or(DEFAULT_IDLE_POLL_US);
+        let idle_poll = self
+            .idle_poll_us
+            .unwrap_or_else(|| idle_poll_us(std::env::var(IDLE_POLL_ENV).ok().as_deref()));
         a.extend(["--idle-poll-time-us".to_owned(), idle_poll.to_string()]);
         a.extend([
             "--network-stack".to_owned(),
@@ -455,6 +476,16 @@ mod tests {
         let a = EngineConfig::default().args();
         let at = a.iter().position(|s| s == "--task-quota-ms").expect("given");
         assert_eq!(a[at + 1], task_quota_ms(std::env::var(TASK_QUOTA_ENV).ok().as_deref()));
+    }
+
+    #[test]
+    fn the_idle_poll_changes_for_a_diagnosis_and_within_bounds() {
+        assert_eq!(idle_poll_us(None), DEFAULT_IDLE_POLL_US);
+        assert_eq!(idle_poll_us(Some(" 200 ")), 200);
+        assert_eq!(idle_poll_us(Some("2000")), 2_000);
+        // More than the engine's own default, or no number, leaves the node's.
+        assert_eq!(idle_poll_us(Some("2001")), DEFAULT_IDLE_POLL_US);
+        assert_eq!(idle_poll_us(Some("x")), DEFAULT_IDLE_POLL_US);
     }
 
     #[test]
