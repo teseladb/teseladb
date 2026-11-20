@@ -141,6 +141,30 @@ pub enum Stage {
     /// An answer of the device log, from the log's shard to the core's shard taking it: the
     /// part of [`Stage::LogNotify`] before the core's own turn.
     LogNotifyTransit,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// the disk operations that ended: which part makes the long turns that messages wait behind.
+    TurnLongIo,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// the answers of the device log: which part makes the long turns that messages wait behind.
+    TurnLongLog,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// what the connections read: which part makes the long turns that messages wait behind.
+    TurnLongNet,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// the messages of its inbox: which part makes the long turns that messages wait behind.
+    TurnLongInputs,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// a background request: which part makes the long turns that messages wait behind.
+    TurnLongBackground,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// the work a turn before left to go on: which part makes the long turns that messages wait behind.
+    TurnLongResume,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// its tick: which part makes the long turns that messages wait behind.
+    TurnLongTick,
+    /// In a turn of a core that took a quarter of a millisecond or more, the part spent on
+    /// handing out disk operations and frames, with the storage's own steps: which part makes the long turns that messages wait behind.
+    TurnLongPump,
     /// A write of a client's command on its connection's shard, from the request sent to its
     /// range's core to the answer back: both hops between the shards with the range's work.
     WriteAsk,
@@ -160,7 +184,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 55] = [
+    pub const ALL: [Stage; 63] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -210,6 +234,14 @@ impl Stage {
         Stage::DocumentsFetch,
         Stage::MailboxTransit,
         Stage::LogNotifyTransit,
+        Stage::TurnLongIo,
+        Stage::TurnLongLog,
+        Stage::TurnLongNet,
+        Stage::TurnLongInputs,
+        Stage::TurnLongBackground,
+        Stage::TurnLongResume,
+        Stage::TurnLongTick,
+        Stage::TurnLongPump,
         Stage::WriteAsk,
         Stage::LogAppendToSyncOut,
         Stage::IndexBuildStart,
@@ -270,6 +302,14 @@ impl Stage {
             Stage::DocumentsFetch => "documents_fetch",
             Stage::MailboxTransit => "mailbox_transit",
             Stage::LogNotifyTransit => "log_notify_transit",
+            Stage::TurnLongIo => "turn_long_io",
+            Stage::TurnLongLog => "turn_long_log",
+            Stage::TurnLongNet => "turn_long_net",
+            Stage::TurnLongInputs => "turn_long_inputs",
+            Stage::TurnLongBackground => "turn_long_background",
+            Stage::TurnLongResume => "turn_long_resume",
+            Stage::TurnLongTick => "turn_long_tick",
+            Stage::TurnLongPump => "turn_long_pump",
             Stage::WriteAsk => "write_ask",
             Stage::LogAppendToSyncOut => "log_append_to_sync_out",
             Stage::IndexBuildStart => "index_build_start",

@@ -29,6 +29,65 @@ use crate::file_send::FileSend;
 use crate::peer::PeerMsg;
 use crate::service::ServiceClass;
 
+/// A turn this long or longer has its parts recorded: a message that reaches the shard while
+/// it runs waits for its end (002 run p80b: one turn in five).
+const LONG_TURN: Duration = Duration::from_micros(256);
+
+/// The parts of a turn, in the order of [`TurnParts::spent`].
+#[derive(Clone, Copy)]
+enum TurnPart {
+    Io,
+    Log,
+    Net,
+    Inputs,
+    Background,
+    Resume,
+    Tick,
+    Pump,
+}
+
+/// What each part of a turn took.
+struct TurnParts {
+    began: Instant,
+    last: Instant,
+    spent: [Duration; 8],
+}
+
+impl TurnParts {
+    fn start() -> TurnParts {
+        let now = Instant::now();
+        TurnParts { began: now, last: now, spent: [Duration::ZERO; 8] }
+    }
+
+    /// The time since the part before ended goes to `part`.
+    fn end(&mut self, part: TurnPart) {
+        let now = Instant::now();
+        self.spent[part as usize] += now.saturating_duration_since(self.last);
+        self.last = now;
+    }
+
+    /// Records the parts of a turn of [`LONG_TURN`] or more.
+    fn record(&self) {
+        use teseladb_stages::Stage;
+        if self.last.saturating_duration_since(self.began) < LONG_TURN {
+            return;
+        }
+        let stages = [
+            Stage::TurnLongIo,
+            Stage::TurnLongLog,
+            Stage::TurnLongNet,
+            Stage::TurnLongInputs,
+            Stage::TurnLongBackground,
+            Stage::TurnLongResume,
+            Stage::TurnLongTick,
+            Stage::TurnLongPump,
+        ];
+        for (stage, spent) in stages.into_iter().zip(self.spent) {
+            teseladb_stages::record(stage, nanos(spent));
+        }
+    }
+}
+
 /// How soon a core tries again to queue WAL operations for the device log when its queue was full.
 const LOG_QUEUE_RETRY: Nanos = Nanos::from_millis(1);
 /// How long a turn hands messages to the logic before it lets the shard run its other tasks, once
@@ -205,9 +264,12 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
     /// One turn.
     pub(crate) fn turn(&mut self) {
         let woke = self.now();
+        // Where a long turn goes (012 FR-015): each part's end, read once a part.
+        let mut parts = TurnParts::start();
         self.net.collect();
         // What the connections read goes first, as a poller's reads did.
         let mut worked = self.net.read(&mut self.logic, woke);
+        parts.end(TurnPart::Net);
         self.disk.reap(&mut self.reaped);
         let file_reads = std::mem::take(&mut *self.file_reads.borrow_mut());
         worked |= !file_reads.is_empty();
@@ -241,6 +303,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
         for (done, class) in std::mem::take(&mut self.reaped) {
             self.logic.on_io_done(done, class, now);
         }
+        parts.end(TurnPart::Io);
         let started = Instant::now();
         for (queued, done) in std::mem::take(&mut self.logs) {
             // How long the device log's answer waited for the core (012 FR-035).
@@ -249,9 +312,13 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             teseladb_stages::record(teseladb_stages::Stage::LogNotify, nanos(waited));
             self.logic.on_io_done(done, IoClass::Log, now);
         }
+        parts.end(TurnPart::Log);
         self.net.inputs(&mut self.logic, now);
+        parts.end(TurnPart::Net);
         self.take_inputs();
+        parts.end(TurnPart::Inputs);
         self.run_background();
+        parts.end(TurnPart::Background);
         // Work the last turn left for this one (a scan that stopped at its share of a turn) goes
         // on once the shard ran its other tasks, part after part until the engine asks for the
         // shard (its tasks' quota is used up, or another shard sent it a message), a message
@@ -264,6 +331,7 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
                 break;
             }
         }
+        parts.end(TurnPart::Resume);
         let now = self.now();
         if now >= self.next_tick {
             // How late it runs (012 FR-015): its groups' beats go out with it.
@@ -276,7 +344,10 @@ impl<L: CoreLogic, X: CoreDisk> Driver<L, X> {
             self.next_tick = Nanos(self.next_tick.0 + step.0).max(Nanos(now.0 + 1));
         }
         self.net.backoffs_done(&self.logic);
+        parts.end(TurnPart::Tick);
         self.pump(now);
+        parts.end(TurnPart::Pump);
+        parts.record();
         if worked {
             let busy = self.now().0.saturating_sub(woke.0);
             teseladb_stages::record(teseladb_stages::Stage::CoreStep, busy);
