@@ -135,6 +135,12 @@ pub enum Stage {
     SpansRead,
     /// The read of the documents the entries of an index name, for one request of a command.
     DocumentsFetch,
+    /// A message to a core, from its sender to the core's shard taking it off the queue between
+    /// the shards: the part of [`Stage::MailboxWait`] before the core's own turn.
+    MailboxTransit,
+    /// An answer of the device log, from the log's shard to the core's shard taking it: the
+    /// part of [`Stage::LogNotify`] before the core's own turn.
+    LogNotifyTransit,
     /// A write of a client's command on its connection's shard, from the request sent to its
     /// range's core to the answer back: both hops between the shards with the range's work.
     WriteAsk,
@@ -154,7 +160,7 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in the order `/metrics` gives them.
-    pub const ALL: [Stage; 53] = [
+    pub const ALL: [Stage; 55] = [
         Stage::WriteLatchWait,
         Stage::WriteProposeToApplied,
         Stage::WriteRange,
@@ -202,6 +208,8 @@ impl Stage {
         Stage::AggIndexRead,
         Stage::SpansRead,
         Stage::DocumentsFetch,
+        Stage::MailboxTransit,
+        Stage::LogNotifyTransit,
         Stage::WriteAsk,
         Stage::LogAppendToSyncOut,
         Stage::IndexBuildStart,
@@ -260,6 +268,8 @@ impl Stage {
             Stage::AggIndexRead => "agg_index_read",
             Stage::SpansRead => "spans_read",
             Stage::DocumentsFetch => "documents_fetch",
+            Stage::MailboxTransit => "mailbox_transit",
+            Stage::LogNotifyTransit => "log_notify_transit",
             Stage::WriteAsk => "write_ask",
             Stage::LogAppendToSyncOut => "log_append_to_sync_out",
             Stage::IndexBuildStart => "index_build_start",

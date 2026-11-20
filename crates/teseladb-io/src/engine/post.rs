@@ -136,7 +136,10 @@ impl ShardPost {
 
     /// Hands a result of the node's device log to the core of the shard.
     pub(crate) fn post_log(&self, at: Instant, done: IoDone) -> bool {
-        self.post(move || with_slot(|s| s.io.push_log(at, done)))
+        self.post(move || {
+            teseladb_stages::record(teseladb_stages::Stage::LogNotifyTransit, since(at));
+            with_slot(|s| s.io.push_log(at, done));
+        })
     }
 
     /// Hands an event of a connection that another shard holds to the core of the shard.
@@ -262,9 +265,16 @@ pub(crate) fn with_io(f: impl FnOnce(&CoreIo)) {
     with_slot(|s| f(&s.io));
 }
 
+/// The nanoseconds since `at`.
+fn since(at: Instant) -> u64 {
+    u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 fn deliver_input<M: 'static>(at: Instant, input: CoreInput<M>) {
     with_slot(|slot| {
         let Some(inbox) = slot.inbox.downcast_ref::<Inbox<M>>() else { return };
+        // How long it took to reach this shard (012 FR-015): the rest of its wait is the core's.
+        teseladb_stages::record(teseladb_stages::Stage::MailboxTransit, since(at));
         inbox.queue.borrow_mut().push_back((at, input));
         slot.io.wake.wake();
     });
