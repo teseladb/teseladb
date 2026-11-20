@@ -437,7 +437,9 @@ impl ServerBackend {
             match view.newest(&mut self.outside.caches[core], &op.keys) {
                 Newest::Versions(current) => {
                     let bound = Bound::decode(&op.mutation).ok()?;
-                    return bound.prepare(&op.keys, current);
+                    // A write of many documents gives the shard back as it goes: evaluated in
+                    // one go it held the shard's other work past a millisecond.
+                    return bound.prepare_pausing(&op.keys, current, &wait::yield_if_asked);
                 }
                 Newest::Need(need) => {
                     let dir = self.h.data_dir.as_deref()?;

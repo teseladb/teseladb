@@ -1357,6 +1357,10 @@ impl Evaluation {
 /// by a map of their places.
 const LINEAR_LOOKUP: usize = 16;
 
+/// The versions an evaluation looks up between two offers to pause: a document evaluated costs
+/// a few microseconds, so this is a few tens of them.
+const PAUSE_EVERY: usize = 8;
+
 impl Bound {
     /// What the mutation writes and answers on the versions `current` of the keys `latch`, at
     /// mark `mark`. Without a mark (005 FR-035: an evaluation prepared ahead of the write) it
@@ -1368,6 +1372,17 @@ impl Bound {
         current: &[Option<(u8, &[u8])>],
         mark: Option<Hlc>,
     ) -> Result<Evaluation, MutationError> {
+        self.evaluate_pausing(latch, current, mark, &|| ())
+    }
+
+    /// [`Bound::evaluate`], calling `pause` every [`PAUSE_EVERY`] versions it looks up.
+    fn evaluate_pausing(
+        &self,
+        latch: &[Vec<u8>],
+        current: &[Option<(u8, &[u8])>],
+        mark: Option<Hlc>,
+        pause: &dyn Fn(),
+    ) -> Result<Evaluation, MutationError> {
         // The place of each latched key, its first one, so that a write of many documents finds
         // each of them without going through all the others.
         let places = (latch.len() > LINEAR_LOOKUP).then(|| {
@@ -1377,7 +1392,12 @@ impl Bound {
             }
             m
         });
+        let looked = std::cell::Cell::new(0usize);
         let lookup = |k: &[u8]| {
+            looked.set(looked.get() + 1);
+            if looked.get().is_multiple_of(PAUSE_EVERY) {
+                pause();
+            }
             let i = match &places {
                 Some(m) => m.get(k).copied(),
                 None => latch.iter().position(|x| x == k),
@@ -1478,9 +1498,20 @@ impl Bound {
         latch: &[Vec<u8>],
         current: Vec<Option<(u8, Vec<u8>)>>,
     ) -> Option<Prepared> {
+        self.prepare_pausing(latch, current, &|| ())
+    }
+
+    /// [`Bound::prepare`], calling `pause` as it goes through the documents: whoever prepares
+    /// on a thread other work waits for gives way there.
+    pub fn prepare_pausing(
+        &self,
+        latch: &[Vec<u8>],
+        current: Vec<Option<(u8, Vec<u8>)>>,
+        pause: &dyn Fn(),
+    ) -> Option<Prepared> {
         let seen: Vec<Option<(u8, &[u8])>> =
             current.iter().map(|c| c.as_ref().map(|(t, v)| (*t, v.as_slice()))).collect();
-        let evaluation = self.evaluate(latch, &seen, None).ok()?;
+        let evaluation = self.evaluate_pausing(latch, &seen, None, pause).ok()?;
         let reads = index_maintenance::unique_keys(&self.rules().indexes, &evaluation.puts);
         Some(Prepared { keys: latch.to_vec(), basis: current, evaluation, reads })
     }

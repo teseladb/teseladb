@@ -165,3 +165,27 @@ fn a_refusal_is_prepared_as_any_result_and_bytes_that_do_not_decode_fail_in_the_
     assert!(broken.eval(&seen(&current), at(9)).is_err());
     assert!(broken.reads(&got).is_empty());
 }
+
+/// The evaluation of a write of many documents offers to pause as it goes (005 FR-035): on the
+/// connection's thread it holds the shard, and an update of hundreds of documents evaluated in
+/// one go kept the shard's other work waiting past a millisecond (002 run p75s: one stall in
+/// four). What it prepares is the same.
+#[test]
+fn the_evaluation_of_many_documents_offers_to_pause_as_it_goes() {
+    const DOCS: u8 = 100;
+    let docs = || (1..=DOCS).map(|i| Document::new().with("_id", i32::from(i)).with("n", 1));
+    let inserted = insert(docs().collect(), Rules::default());
+    let none: Vec<Option<(u8, &[u8])>> = vec![None; usize::from(DOCS)];
+    let out = inserted.eval(&none, at(1)).unwrap();
+    let documents = out.puts.iter().filter(|p| p.value_type != teseladb_range::HISTORY_VALUE);
+    let current: Vec<Version> = documents.map(|p| Some((p.value_type, p.value.clone()))).collect();
+    let b = Bound {
+        keys: inserted.keys.clone(),
+        ..update(Document::new().with("$inc", Document::new().with("n", 1)), Rules::default())
+    };
+    let pauses = std::cell::Cell::new(0usize);
+    let pause = || pauses.set(pauses.get() + 1);
+    let prepared = b.prepare_pausing(&b.keys, current.clone(), &pause).expect("prepared");
+    assert!(pauses.get() >= usize::from(DOCS) / 16, "{} pauses", pauses.get());
+    assert_eq!(Some(prepared), b.prepare(&b.keys, current));
+}
