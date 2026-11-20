@@ -100,7 +100,7 @@ impl Default for LsmConfig {
             dict_bytes: DICT_BYTES,
             dict_renew_bytes: DICT_RENEW_BYTES,
             l0_trigger: L0_TRIGGER,
-            l0_down: None,
+            l0_down: Some(L0_DOWN),
             l0_slow: 20,
             l0_reject: 36,
             l1_bytes: 64 << 20,
@@ -125,6 +125,15 @@ impl Default for LsmConfig {
 /// times the bytes written instead of 1.3; one joined every flush at once, wrote 37.5 times
 /// the bytes and took twice the CPU.
 pub const L0_TRIGGER: usize = 2;
+
+/// Files in level 0 that send it down to level 1 whatever level 1 weighs, by default: three.
+/// The tiers of level 0 are each one more source for every scan. In the one-node load (002 runs
+/// p73e, p73d4 and p73d3, the same binary in the same hour) ten files, half of the slow-down,
+/// gave 1.96 files of level 0 for each scan and 791 million versions of keys already decided;
+/// four gave 1.42 and 679 million; three, 1.15 and 582 million, with 1.5 % less CPU for each
+/// operation, the writes as they were and 14.7 kB written to disk for each operation instead of
+/// 12.0 (the reference writes 17.7).
+pub const L0_DOWN: usize = 3;
 
 /// The environment variable that sets the level 0 files that start a compaction, for a diagnosis
 /// run: fewer overlapping files mean fewer copies of a hot key for a scan to pass over (002 run
@@ -182,8 +191,10 @@ mod tests {
     fn two_files_of_level_0_start_a_compaction_by_default() {
         let c = LsmConfig::default();
         assert_eq!(c.l0_trigger, 2);
-        // Level 0 still goes down to level 1 at half of the slow-down, whatever level 1 weighs.
-        assert_eq!(c.l0_down_files(), 10);
+        // Level 0 goes down to level 1 at three files, whatever level 1 weighs.
+        assert_eq!(c.l0_down_files(), 3);
+        // Without its own value, at half of the slow-down.
+        assert_eq!(LsmConfig { l0_down: None, ..c }.l0_down_files(), 10);
     }
 
     #[test]

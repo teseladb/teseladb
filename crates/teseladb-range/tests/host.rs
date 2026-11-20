@@ -889,6 +889,7 @@ fn node_with_a_file_of_documents(docs: u32, deleted: u32) -> Node {
         cache_bytes: 0,
         // The blocks the tests count are those of the files four flushes leave apart.
         l0_trigger: 4,
+        l0_down: None,
         ..LsmConfig::default()
     };
     fill_a_file(Node::with_lsm(lcfg), docs, deleted)
