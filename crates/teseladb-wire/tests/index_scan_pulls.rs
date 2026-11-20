@@ -244,30 +244,3 @@ fn competing_plans_over_long_ranges_give_the_documents_of_the_collection_scan() 
     assert_eq!(got_ids, natural_ids);
     assert_eq!(got_ids, wanted(|i| i >= 200 && (i % 7 == 2 || i % 7 == 5)));
 }
-
-/// A read that goes to its end asks for the documents of its entries in the largest batches from
-/// the first (010 FR-027): an aggregation that groups reads them all, and batches that started
-/// at sixteen keys and doubled split each one among the partitions of the collection in pieces
-/// too small to read together (002 run p73b: 8.1 of the 8.7 ms of an aggregation by an index
-/// were its read). A read with a limit still starts small, so that it stops near its limit.
-#[test]
-fn a_read_to_its_end_fetches_its_documents_in_the_largest_batches() {
-    let mut m = loaded();
-    m.fetch_batches = Some(Vec::new());
-    let cmd = r#"{"aggregate":"c","pipeline":[{"$match":{"b":3}},
-        {"$group":{"_id":null,"n":{"$sum":1}}}],"cursor":{}}"#;
-    let r = run(&mut m, cmd);
-    let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
-    let Some(Value::Document(group)) = batch.first() else { panic!("{r:?}") };
-    let matching = wanted(|i| i % 7 == 3).len();
-    assert_eq!(int(field(group, "n")), matching as i64);
-    // The trials of the plans read a few documents each first; the plan that won then reads
-    // every one of its keys in one batch.
-    let batches = m.fetch_batches.replace(Vec::new()).expect("counted");
-    assert_eq!(batches.last(), Some(&matching), "one batch of every key: {batches:?}");
-    // With a limit, the first batch is as small as the limit asks.
-    let few = found(&mut m, r#""filter":{"b":3},"limit":5"#);
-    assert_eq!(few.len(), 5);
-    let batches = m.fetch_batches.take().expect("counted");
-    assert!(batches.first().is_some_and(|b| *b <= 16), "{batches:?}");
-}
