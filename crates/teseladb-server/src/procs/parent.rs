@@ -427,6 +427,7 @@ impl NodeProc {
                 Ok(Some(s)) => break s,
                 Ok(None) if Instant::now() < end => thread::sleep(POLL),
                 _ => {
+                    self.show_stacks();
                     let _ = self.child.kill();
                     break self.child.wait().expect("the node process ends");
                 }
@@ -434,6 +435,21 @@ impl NodeProc {
         };
         self.exited = Some(status);
         status
+    }
+
+    /// Writes the stacks of every thread of the node to the file `TESELADB_STOP_STACKS` names,
+    /// when it is set and a debugger is at hand: what a node that did not end in [`STOP_WAIT`]
+    /// was doing, before it is killed.
+    fn show_stacks(&self) {
+        let Some(path) = std::env::var_os("TESELADB_STOP_STACKS") else { return };
+        let pid = self.pid().to_string();
+        let args =
+            ["-p", &pid, "-batch", "-ex", "set pagination off", "-ex", "thread apply all bt 30"];
+        let text = match Command::new("gdb").args(args).output() {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            Err(e) => format!("no debugger: {e}"),
+        };
+        let _ = fs::write(path, format!("node {pid} did not end; its threads:\n{text}"));
     }
 
     /// How the node's process ended, if it did, without waiting.

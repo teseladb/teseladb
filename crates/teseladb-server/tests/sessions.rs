@@ -99,8 +99,14 @@ fn sessions_are_recorded_for_the_cluster_and_killed_on_every_node() {
     assert!(ok(&b.run("admin", kill_all)));
     let r = get_more(&mut c, on_c, 2);
     assert_eq!(r.get("code"), Some(&Value::Int32(43)), "{r:?}");
-    assert!(others.into_iter().map(NodeProc::stop).all(|s| s.success()));
-    assert!(first.stop().success());
+    // A node that does not end well says how it ended and what its log holds.
+    for n in others.into_iter().chain(std::iter::once(first)) {
+        let log = n.log_path().map(std::path::Path::to_owned);
+        let status = n.stop();
+        let text = log.and_then(|l| std::fs::read_to_string(l).ok()).unwrap_or_default();
+        let tail: String = text.lines().rev().take(60).collect::<Vec<_>>().join("\n");
+        assert!(status.success(), "a node ended with {status:?}; its log, newest first:\n{tail}");
+    }
 }
 
 /// The tests run on Linux only (D-177): elsewhere the program does nothing.
