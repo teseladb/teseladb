@@ -15,13 +15,12 @@ mod pushed_scan;
 mod scatter;
 mod span;
 mod spans;
-mod spread;
 mod together;
 mod txn_reaper;
 
 pub use lookups::{
     lookup_batches_sent, lookup_keys_filtered, lookup_keys_here, lookup_keys_in_runs,
-    lookup_keys_sent, lookup_keys_spread,
+    lookup_keys_sent,
 };
 pub use outside::{blocks_read_outside, declined_outside, served_outside, unchanged_outside};
 pub use pushed_scan::{filtered_parts_sent, parts_taken_ahead};

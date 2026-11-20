@@ -34,11 +34,6 @@ const RUN_PROBE: usize = 32;
 /// The most documents of one part of such a scan.
 const RUN_PART: usize = super::CORE_SCAN_PART;
 
-/// The fewest keys of a batch whose ranges are read each on the shard of its core, all at once
-/// ([`ServerBackend::fetch_spread`]): below it, posting the parts costs more than reading them
-/// one after the other on this thread.
-pub(super) const SPREAD_MIN: usize = 64;
-
 /// Batches of keys sent to the core of their range.
 static BATCHES: AtomicU64 = AtomicU64::new(0);
 /// Keys those batches carried.
@@ -49,16 +44,6 @@ static KEYS_FILTERED: AtomicU64 = AtomicU64::new(0);
 static KEYS_HERE: AtomicU64 = AtomicU64::new(0);
 /// Keys among those read with a scan of their span.
 static KEYS_IN_RUNS: AtomicU64 = AtomicU64::new(0);
-
-/// Keys among those read here that another shard read, at once with the other shards' (010
-/// FR-027).
-pub(super) static KEYS_SPREAD: AtomicU64 = AtomicU64::new(0);
-
-/// Document keys of index scans read on the shard of their range's core while the other
-/// ranges' were read on theirs, since the process started (010 FR-027).
-pub fn lookup_keys_spread() -> u64 {
-    KEYS_SPREAD.load(Ordering::Relaxed)
-}
 
 /// Batches of document keys of index scans this node sent to their range since the process
 /// started (010 FR-027).
@@ -179,30 +164,6 @@ impl ServerBackend {
         }
     }
 
-    /// What this thread reads of `keys` from the views of their ranges, in their places: those
-    /// that lie together with one scan forward of their span, the others one by one; `None`
-    /// for a key whose read goes to its range's core.
-    pub(super) fn fetch_here(
-        &mut self,
-        keys: &[Vec<u8>],
-        concern: ReadConcern,
-    ) -> Vec<Option<Fetched>> {
-        let mut found: Vec<Option<Fetched>> = vec![None; keys.len()];
-        self.fetch_runs(keys, concern, &mut found);
-        for (i, key) in keys.iter().enumerate() {
-            if found[i].is_some() {
-                continue;
-            }
-            // A long batch of point reads gives the shard back once its quota is used up.
-            teseladb_io::engine::wait::yield_if_asked();
-            if let Some(value) = self.read_outside(key, concern) {
-                KEYS_HERE.fetch_add(1, Ordering::Relaxed);
-                found[i] = Some(value.map_or(Fetched::Missing, Fetched::Doc));
-            }
-        }
-        found
-    }
-
     /// [`teseladb_wire::commands::Backend::fetch_documents`]: `None` for a read at a command's
     /// mark or with a read preference, which read key by key.
     pub(super) fn fetch_together(
@@ -216,11 +177,8 @@ impl ServerBackend {
             return Ok(None);
         }
         let mut found: Vec<Option<Fetched>> = vec![None; keys.len()];
-        // The keys of several cores are read on their shards at once; any other batch here,
-        // those that lie together in a range with one scan forward of their span.
-        if !self.fetch_spread(keys, concern, &mut found) {
-            self.fetch_runs(keys, concern, &mut found);
-        }
+        // The keys that lie together in a range come from one scan forward of their span.
+        self.fetch_runs(keys, concern, &mut found);
         let mut by_range: Vec<((GroupId, u16), Vec<usize>)> = Vec::new();
         for (i, key) in keys.iter().enumerate() {
             if found[i].is_some() {

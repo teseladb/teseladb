@@ -9,8 +9,8 @@ use teseladb_io::engine::disk::DiskPlace;
 
 use common::{Client, batch, config, docs, ok};
 use teseladb_bson::{Document, Value};
-use teseladb_server::backend::{lookup_keys_here, lookup_keys_in_runs, lookup_keys_spread};
-use teseladb_server::node::{Node, NodeConfig};
+use teseladb_server::backend::{lookup_keys_here, lookup_keys_in_runs};
+use teseladb_server::node::Node;
 
 const DB: &str = "runs";
 const DOCS: i32 = 2000;
@@ -89,42 +89,5 @@ fn keys_that_ascend_together_are_read_with_one_scan_and_the_others_one_by_one() 
     let want: Vec<i32> = (0..DOCS).filter(|i| (i * STEP) % DOCS < 100).collect();
     assert_eq!(ids_below(&mut c, "r", 100, "r_1"), want);
     assert_eq!(lookup_keys_in_runs(), in_runs);
-    n.stop();
-}
-
-/// A batch whose keys lie in the ranges of several cores is read by all of them at once, each
-/// range's keys on the shard of its core, instead of one range after the other on the
-/// command's thread (010 FR-027): the documents are the same.
-#[test]
-fn the_keys_of_several_cores_are_read_on_their_shards_at_once() {
-    let config = NodeConfig { cores: Some(4), ..config(Vec::new()) };
-    let n = Node::start(config, DiskPlace::Memory, None).expect("starts");
-    assert!(n.wait_ready(common::READY));
-    let mut c = Client::new(&n);
-    // A collection created on its own is spread over the node's cores (D-186).
-    run(&mut c, Document::new().with("create", "c"));
-    run(&mut c, Document::new().with("insert", "c").with("documents", docs(0..DOCS)));
-    let index = Document::new().with("key", Document::new().with("v", 1)).with("name", "v_1");
-    run(&mut c, Document::new().with("createIndexes", "c").with("indexes", vec![index.into()]));
-
-    // A thousand documents of a collection spread over the node's cores: once its partitions
-    // are on several of them, each batch past the small first ones has keys of several, and
-    // the shards of the others read theirs. The documents are the same every time.
-    let touch = Document::new().with("$inc", Document::new().with("w", 1));
-    let all = Document::new()
-        .with("q", Document::new())
-        .with("u", vec![Value::Document(touch)])
-        .with("multi", true);
-    common::until("a batch read by several shards", || {
-        // The partitions get their own ranges, on their cores, as the collection is written.
-        run(&mut c, Document::new().with("update", "c").with("updates", vec![all.clone().into()]));
-        let (here, spread) = (lookup_keys_here(), lookup_keys_spread());
-        assert_eq!(ids_below(&mut c, "v", 10_000, "v_1"), (0..1000).collect::<Vec<_>>());
-        let read = lookup_keys_here() - here;
-        let away = lookup_keys_spread() - spread;
-        assert!(away <= read, "{away} of {read} keys read here");
-        // While a partition moves to its core, that core reads its keys itself.
-        (read >= 1000 && away * 4 >= read).then_some(())
-    });
     n.stop();
 }
