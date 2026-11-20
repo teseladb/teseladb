@@ -185,7 +185,7 @@ fn look_until<T>(
 /// all of them to their cores after each commit and after each write split among the
 /// partitions of a collection (002 run p67: 1.67 million reads in 300 s, and almost no part of
 /// an aggregation folded from the views).
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct AcrossMarks(Vec<(GroupId, Hlc)>);
 
 impl AcrossMarks {
@@ -499,6 +499,13 @@ impl ServerBackend {
     /// routing table has it; `None` when no range holds it.
     pub(super) fn range_end_of(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         self.h.routes.span_of(&mut self.outside.routes, key).map(|(_, _, end)| end.to_vec())
+    }
+
+    /// The core of the range that holds `key` and where that range ends (empty: at the end of
+    /// the keys), as this worker's routing table has them; `None` when no range holds it.
+    pub(super) fn core_and_end_of(&mut self, key: &[u8]) -> Option<(u16, Vec<u8>)> {
+        let span = self.h.routes.span_of(&mut self.outside.routes, key);
+        span.map(|(_, core, end)| (core, end.to_vec()))
     }
 
     /// The documents of `[start, end)` that one range holds, at most `limit`, read on this thread

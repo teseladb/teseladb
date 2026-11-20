@@ -90,6 +90,7 @@ fn the_node_gives_its_disk_its_memory_and_how_long_commands_take() {
     for name in [
         "teseladb_lsm_scan_skipped_blocks_total",
         "teseladb_pushed_lookup_keys_in_runs_total",
+        "teseladb_pushed_lookup_keys_spread_total",
         "teseladb_core_fold_documents_total",
     ] {
         assert!(sample(&text, name).is_some(), "{name} in {text}");

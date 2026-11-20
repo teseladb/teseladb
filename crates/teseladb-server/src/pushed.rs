@@ -196,6 +196,11 @@ pub fn metrics(out: &mut String) {
             "Document keys among those read with one scan forward of their span.",
             crate::backend::lookup_keys_in_runs(),
         ),
+        (
+            "teseladb_pushed_lookup_keys_spread_total",
+            "Document keys read on the shard of their range's core, at once with the other ranges'.",
+            crate::backend::lookup_keys_spread(),
+        ),
     ];
     for (name, help, n) in counters {
         let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} counter\n{name} {n}");
