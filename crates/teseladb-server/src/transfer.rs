@@ -32,7 +32,7 @@ use std::sync::Arc;
 use teseladb_hlc::Hlc;
 use teseladb_lsm::{FileRef, Lsm, LsmError};
 use teseladb_multiraft::{Done, MultiRaftCore, OpError, OpId};
-use teseladb_raftlog::{FileId, IoDone, IoOp};
+use teseladb_raftlog::{Disk, FileId, IoDone, IoErrno, IoOp};
 use teseladb_range::sm::RangeSm;
 use teseladb_range::snapshot::{Assembler, CHUNK_BYTES, Chunk, trailer, unbundle, write_ops};
 use teseladb_types::{Bytes, GroupId, Nanos, NodeId};
@@ -155,6 +155,12 @@ pub struct Transfers {
     /// transfer at a time per core).
     queued: BTreeMap<GroupId, (u64, Vec<u8>, Nanos)>,
     sources: BTreeMap<ExportKey, Source>,
+    /// The exports the LSM still writes for a source that went meanwhile: their files are
+    /// removed as they come.
+    orphans: BTreeSet<u64>,
+    /// The files of sinks a newer snapshot replaced while the LSM ingested them or cleared the
+    /// way for them, by the LSM's job: they go when the job ends.
+    abandoned: BTreeMap<u64, Vec<FileRef>>,
     /// Ranges whose awaited snapshot a source called stale, for the core to reject.
     stale: Vec<GroupId>,
     ops: VecDeque<(IoOp, Tag)>,
@@ -186,6 +192,8 @@ impl Transfers {
             sink: None,
             queued: BTreeMap::new(),
             sources: BTreeMap::new(),
+            orphans: BTreeSet::new(),
+            abandoned: BTreeMap::new(),
             stale: Vec::new(),
             ops: VecDeque::new(),
             inflight: VecDeque::new(),
@@ -270,9 +278,13 @@ impl Transfers {
             return;
         }
         // The files of a replaced sink still being written go once written; those of one being
-        // ingested or cleared belong to the LSM's job until it ends.
-        if let Some(Sink { state: SinkState::Writing { refs, .. }, .. }) = self.sink.take() {
-            self.cleanup(&[], &refs);
+        // ingested or cleared belong to the LSM's job until it ends, and go then.
+        match self.sink.take().map(|s| s.state) {
+            Some(SinkState::Writing { refs, .. }) => self.cleanup(&[], &refs),
+            Some(SinkState::Ingesting { id, refs } | SinkState::Clearing { id, refs }) => {
+                self.abandoned.insert(id, refs);
+            }
+            Some(SinkState::Idle(_) | SinkState::Fetching { .. }) | None => {}
         }
         let serial = self.serial();
         let state = SinkState::Idle(now);
@@ -558,11 +570,15 @@ impl Transfers {
         self.ops.push_back((op, tag));
     }
 
-    /// Closes and removes the files of an export.
+    /// Closes and removes the files of an export. What the LSM has not written of it yet is
+    /// removed when it comes ([`Transfers::on_exported`]).
     fn drop_source(&mut self, key: ExportKey) {
         let s = self.sources.remove(&key).expect("an export of this module");
         let (open, files): (Vec<FileId>, Vec<FileRef>) = match s.state {
-            SourceState::Exporting { files, .. } => (Vec::new(), files),
+            SourceState::Exporting { pending, files } => {
+                self.orphans.extend(pending);
+                (Vec::new(), files)
+            }
             SourceState::Opening { files, .. } | SourceState::Ready(files) => {
                 files.into_iter().unzip()
             }
@@ -591,8 +607,16 @@ impl Transfers {
         }
     }
 
-    /// The LSM finished export `id` with these files.
+    /// The LSM finished export `id` with these files. Those of an export whose source went
+    /// while the LSM wrote them are removed: nothing would read or remove them later, and a
+    /// node whose exports went that way one after the other kept every one of them (a node of
+    /// one core and 256 MB that took a million documents on 23-11-2026: 26 GB in 4,760 files of
+    /// its transfer directory for 750 MB of data, and a full disk).
     pub fn on_exported(&mut self, id: u64, written: Vec<FileRef>) {
+        if self.orphans.remove(&id) {
+            self.cleanup(&[], &written);
+            return;
+        }
         let mut finished = None;
         for (key, s) in &mut self.sources {
             let SourceState::Exporting { pending, files } = &mut s.state else { continue };
@@ -635,6 +659,15 @@ impl Transfers {
         r: Result<(), LsmError>,
         now: Nanos,
     ) -> Option<GroupId> {
+        // The ingestion of a sink a newer snapshot replaced: the LSM moved its files in, or they
+        // stay unused and go.
+        if let Some(refs) = self.abandoned.remove(&id) {
+            match r {
+                Ok(()) => self.remove_dirs(&refs),
+                Err(_) => self.cleanup(&[], &refs),
+            }
+            return None;
+        }
         let sink = self.sink.as_mut()?;
         let SinkState::Ingesting { id: waiting, refs } = &mut sink.state else { return None };
         if *waiting != id {
@@ -672,6 +705,11 @@ impl Transfers {
 
     /// The LSM finished clearing `id`: the ingestion goes again.
     pub fn on_cleared(&mut self, core: &MultiRaftCore<CoreSm>, lsm: &mut Lsm, id: u64) {
+        // The way was cleared for a sink a newer snapshot replaced: its files are not ingested.
+        if let Some(refs) = self.abandoned.remove(&id) {
+            self.cleanup(&[], &refs);
+            return;
+        }
         let Some(sink) = &mut self.sink else { return };
         let SinkState::Clearing { id: waiting, refs } = &mut sink.state else { return };
         if *waiting != id {
@@ -797,6 +835,41 @@ pub fn transfer_dir(core_dir: &Path) -> PathBuf {
     core_dir.join("transfer")
 }
 
+/// Removes what an earlier life of the node left in a core's transfer directory `dir`, before
+/// the core runs: the exports and the files received that were on disk when the process ended.
+/// Each has a directory of its own, named with that life's number, so nothing of this life
+/// would use or remove them, and they stayed for good (the 26 GB of [`Transfers::on_exported`]
+/// were still there after the node started again).
+///
+/// # Errors
+///
+/// The error of the disk when the directory cannot be read or something in it removed.
+pub fn clear(disk: &mut dyn Disk, dir: &Path) -> Result<(), IoErrno> {
+    let done = |d: IoDone| match d {
+        IoDone::Err { errno, .. } => Err(errno),
+        IoDone::Ok(_) | IoDone::Read { .. } => Ok(()),
+    };
+    let entries = match disk.list(dir) {
+        Ok(entries) => entries,
+        // No transfer has made the directory yet.
+        Err(IoErrno::NotFound) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        match disk.list(&entry) {
+            Ok(files) => {
+                for path in files {
+                    done(disk.execute(IoOp::Remove { path }))?;
+                }
+                done(disk.execute(IoOp::RemoveDir { path: entry }))?;
+            }
+            // A file of its own, which no transfer writes there.
+            Err(_) => done(disk.execute(IoOp::Remove { path: entry }))?,
+        }
+    }
+    Ok(())
+}
+
 /// The intervals of a snapshot of range `group` that ends at `end` (empty: where the replica
 /// ends): its local keys and its data.
 fn intervals(core: &MultiRaftCore<CoreSm>, group: GroupId, end: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -835,7 +908,7 @@ mod tests {
     use teseladb_lsm::{EntryWrite, Kind, Lookup, LsmConfig};
     use teseladb_meta::bootstrap::{DATA_END, DATA_RANGE, DATA_START};
     use teseladb_multiraft::{ApplyCtx, CoreConfig, GroupDesc, PeerFrame, StateMachine};
-    use teseladb_raftlog::{CoreStore, Disk, IoErrno, MemDisk, StorageConfig};
+    use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
     use teseladb_range::command::Command;
     use teseladb_range::sm::RangeSm;
 
@@ -1699,5 +1772,73 @@ mod tests {
             None
         );
         src.t.on_cleared(&src.core, &mut lsm.borrow_mut(), 5);
+    }
+
+    /// An export whose source went while the LSM still wrote it leaves no file: on a busy core
+    /// the LSM may take longer to write an export than [`EXPORT_IDLE`], and the replica that
+    /// asked for it may by then wait for a newer snapshot.
+    #[test]
+    fn the_files_of_an_export_that_went_while_it_was_written_are_removed() {
+        let mut src = side(1, 30);
+        let lsm = src.lsm.clone();
+        // The first request starts the export; the LSM has not run yet.
+        let f = Fetch { group: G, index: 30, file: 0, offset: 0 };
+        src.t.on_fetch(&mut src.core, &mut lsm.borrow_mut(), (NodeId(2), 1), f, Nanos::ZERO);
+        assert_eq!(src.t.exports(), 1);
+        // Nobody asks again: the export goes.
+        src.t.tick(&mut src.core, &[], EXPORT_IDLE);
+        assert_eq!(src.t.exports(), 0);
+        // The LSM writes it now, for nobody.
+        src.io(EXPORT_IDLE);
+        assert!(!src.dirs.0.is_empty(), "the LSM wrote the export");
+        assert!(src.left_dirs().is_empty(), "{:?}", src.left_dirs());
+    }
+
+    /// The files of a snapshot a newer one replaced while the LSM ingested them go when the
+    /// ingestion ends, also when it fails and leaves them where they were written.
+    #[test]
+    fn the_files_of_a_replaced_snapshot_go_when_its_ingestion_ends() {
+        for fails in [false, true] {
+            let mut dst = side(2, 0);
+            let lsm = dst.lsm.clone();
+            dst.t.want(G, 5, Vec::new(), Nanos::ZERO);
+            dst.t.write(&dst.core, &mut lsm.borrow_mut(), &[vec![1, 2, 3]]);
+            // The file is written and its ingestion asked for, but the LSM has not run it.
+            while let Some(op) = dst.t.poll_io() {
+                let d = dst.run(op);
+                dst.t.on_io_done(&mut dst.core, &mut lsm.borrow_mut(), d, Nanos::ZERO);
+            }
+            let state = dst.t.sink.as_ref().map(|s| &s.state);
+            assert!(matches!(state, Some(SinkState::Ingesting { .. })));
+            dst.t.want(G, 9, Vec::new(), Nanos::ZERO);
+            dst.fail_ingest = fails;
+            dst.io(Nanos::ZERO);
+            assert_eq!(dst.t.sink.as_ref().map(|s| s.index), Some(9));
+            assert!(dst.ready.is_empty(), "the replaced snapshot's data is not announced");
+            assert!(dst.left_dirs().is_empty(), "fails={fails}: {:?}", dst.left_dirs());
+        }
+    }
+
+    /// What an earlier life left in the transfer directory goes before the core runs, on the
+    /// disk the node uses: directories of exports and of files received, and a file of its own.
+    #[test]
+    fn what_an_earlier_life_left_in_the_transfer_directory_goes_at_the_start() {
+        let root =
+            std::env::temp_dir().join(format!("teseladb-transfer-clear-{}", std::process::id()));
+        let dir = root.join("core-00").join("transfer");
+        let left =
+            [("export-0000000000000007-1", "000001.sst"), ("incoming-0000000000000007-2", "a")];
+        for (sub, file) in left {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            std::fs::write(dir.join(sub).join(file), [7u8; 100]).unwrap();
+        }
+        std::fs::write(dir.join("stray"), [1u8]).unwrap();
+        let mut disk = teseladb_io::files::BlockingDisk::open(root.clone()).unwrap();
+        let at = Path::new("core-00").join("transfer");
+        assert_eq!(clear(&mut disk, &at), Ok(()));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // A core that never transferred has no directory, and nothing to clear.
+        assert_eq!(clear(&mut disk, &Path::new("core-01").join("transfer")), Ok(()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

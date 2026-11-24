@@ -653,8 +653,13 @@ fn open_data<D: Disk>(spec: &CoreSpec, disk: &mut D) -> Result<DataCore, NodeErr
     // reserved (023 FR-014).
     let (lsm, _) = Lsm::recover(&cfg, disk).map_err(NodeError::Lsm)?;
     let lsm = Rc::new(RefCell::new(lsm));
-    let transfers = Transfers::new(spec.node_id, transfer_dir(&dir), random_u64())
-        .with_segments(spec.search.clone());
+    // What an earlier life left of its transfers goes before this one starts its own.
+    let left = transfer_dir(&dir);
+    crate::transfer::clear(disk, &left).map_err(|e| {
+        NodeError::Io(io::Error::other(format!("clearing {}: {e:?}", left.display())))
+    })?;
+    let transfers =
+        Transfers::new(spec.node_id, left, random_u64()).with_segments(spec.search.clone());
     let clock = spec.clock.clone();
     let data = DataCore::new(spec.node_id, spec.core, lsm, clock, transfers, spec.split_bytes)
         .with_cores(spec.node_cores);
