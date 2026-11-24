@@ -21,6 +21,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The stall detector's threshold (SC-013): a shard that does not yield for this long is reported.
 pub const STALL_NOTIFY_MS: u32 = 25;
@@ -139,6 +140,12 @@ pub enum Placement {
     List(Vec<usize>),
 }
 
+/// The longest a node's start waits for its engine, without [`EngineConfig::start_limit`]: for
+/// the engine to run its first task, and for a shard to run each request of the start. An engine
+/// of two shards runs its first task a tenth of a second after it starts with 256 MiB and three
+/// tenths with 24 GiB (measured on 24-11-2026).
+pub const START_LIMIT: Duration = Duration::from_secs(60);
+
 /// How a node's engine starts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineConfig {
@@ -157,6 +164,8 @@ pub struct EngineConfig {
     /// How long, in microseconds, an idle shard polls before it sleeps (`--idle-poll-us`);
     /// `None`: [`DEFAULT_IDLE_POLL_US`].
     pub idle_poll_us: Option<u32>,
+    /// The longest the node's start waits for the engine; `None`: [`START_LIMIT`].
+    pub start_limit: Option<Duration>,
 }
 
 impl EngineConfig {
@@ -412,6 +421,7 @@ mod tests {
             hugepages: Some(PathBuf::from("/dev/hugepages")),
             direct_io: DirectIo::Auto,
             idle_poll_us: None,
+            start_limit: None,
         };
         let a = cfg.args();
         assert_eq!(a[0], "teseladb");
@@ -506,6 +516,7 @@ mod tests {
             hugepages: Some(PathBuf::from("/mnt/huge")),
             direct_io: DirectIo::On,
             idle_poll_us: None,
+            start_limit: None,
         };
         assert_eq!(
             cfg.describe("io_uring").to_string(),

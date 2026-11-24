@@ -98,6 +98,7 @@ pub fn engine_config(
         hugepages,
         direct_io,
         idle_poll_us: None,
+        start_limit: None,
     };
     Ok((cfg, why_not))
 }

@@ -25,7 +25,7 @@ use teseladb::engine::core::thread::async_ as in_thread;
 use super::core_loop::{CoreLogic, CoreSender};
 use super::disk_port::{CoreDisk, DiskWaker};
 use super::driver::Driver;
-use super::options::EngineConfig;
+use super::options::{EngineConfig, START_LIMIT};
 use super::peers::{self, AcceptCtx, Net};
 use super::post::{self, CoreIo, Gate, Inbox, ShardPost, Wake};
 use super::stats::EngineProbe;
@@ -33,9 +33,6 @@ use crate::device_log::LogPort;
 use crate::handshake::AcceptorOptions;
 use crate::peer::Hello;
 use crate::secure::PeerTls;
-
-/// How long a start waits for the engine's shards to come up.
-const START_LIMIT: Duration = Duration::from_secs(60);
 
 /// What a core's task needs besides its logic and disk.
 #[derive(Clone, Debug)]
@@ -201,6 +198,8 @@ pub struct NodeEngine {
     thread: Option<JoinHandle<i32>>,
     gate: Arc<Gate>,
     shards: u16,
+    /// The longest a request of the node's start waits for its shard ([`NodeEngine::run_on`]).
+    limit: Duration,
     /// Released once the engine's thread ended.
     turn: Option<Turn>,
 }
@@ -292,14 +291,17 @@ impl NodeEngine {
             alien::internal::DEFAULT_INSTANCE.store(std::ptr::null_mut(), Ordering::Release);
             code
         })?;
-        match ready_rx.recv_timeout(START_LIMIT) {
+        let limit = cfg.start_limit.unwrap_or(START_LIMIT);
+        let engine_of = |thread, turn| NodeEngine {
+            thread: Some(thread),
+            gate: Arc::default(),
+            shards: cfg.shards.max(1),
+            limit,
+            turn: Some(turn),
+        };
+        match ready_rx.recv_timeout(limit) {
             Ok(Ok(())) => {
-                let engine = NodeEngine {
-                    thread: Some(thread),
-                    gate: Arc::default(),
-                    shards: cfg.shards.max(1),
-                    turn: Some(turn),
-                };
+                let engine = engine_of(thread, turn);
                 if node {
                     process().gate = Some(engine.gate.clone());
                     CHANGED.notify_all();
@@ -308,19 +310,50 @@ impl NodeEngine {
             }
             Ok(Err(e)) => {
                 // The engine runs: it is stopped like any other before the error goes back.
-                let failed = NodeEngine {
-                    thread: Some(thread),
-                    gate: Arc::default(),
-                    shards: cfg.shards.max(1),
-                    turn: Some(turn),
-                };
-                failed.stop();
+                engine_of(thread, turn).stop();
                 Err(e)
             }
-            Err(_) => {
+            // Its thread ended before its first task: its exit code is the reason.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let code = thread.join().unwrap_or(-1);
                 alien::internal::DEFAULT_INSTANCE.store(std::ptr::null_mut(), Ordering::Release);
                 Err(io::Error::other(format!("the engine did not start (exit code {code})")))
+            }
+            // The engine runs no task yet, and may never: the start fails now and says so. A
+            // thread of its own goes on waiting, with the process's turn, and stops the engine
+            // should it come up. Joining the engine's thread here, as before, never returned:
+            // an engine that comes up late waits for its stop, which nobody would ask for, so
+            // the node stayed there without a port, an error or a line in its log (a node that
+            // joined a cluster on 21-11-2026: five threads asleep for more than fifteen minutes).
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let shards = cfg.shards.max(1);
+                let waiter = thread::Builder::new().name("engine-late".into()).spawn(move || {
+                    match ready_rx.recv() {
+                        // It came up: it stops as any other engine does.
+                        Ok(_) => {
+                            let gate = Arc::default();
+                            let (thread, turn) = (Some(thread), Some(turn));
+                            NodeEngine { thread, gate, shards, limit, turn }.stop();
+                        }
+                        // It ended before its first task, as the arm above finds it.
+                        Err(_) => {
+                            let _ = thread.join();
+                            let none = std::ptr::null_mut();
+                            alien::internal::DEFAULT_INSTANCE.store(none, Ordering::Release);
+                            drop(turn);
+                        }
+                    }
+                });
+                // If that thread cannot start, the engine's thread and the turn are let go as
+                // they are: the process that asked for the start ends with its error.
+                drop(waiter);
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the engine did not run its first task within {} ms of its start",
+                        limit.as_millis()
+                    ),
+                ))
             }
         }
     }
@@ -355,11 +388,15 @@ impl NodeEngine {
         }
     }
 
-    /// Runs `f` on `shard` and waits for its result (from a thread that is not a shard).
+    /// Runs `f` on `shard` and waits for its result (from a thread that is not a shard), no
+    /// longer than the engine's start limit ([`EngineConfig::start_limit`]): the requests of a
+    /// node's start (its peer port, its listeners) are answered at once by a shard that runs,
+    /// and a shard that does not run them leaves the start with an error that names it instead
+    /// of a node asleep without a port.
     ///
     /// # Errors
     ///
-    /// When the engine stopped.
+    /// When the engine stopped, or the shard did not run `f` within the limit (`TimedOut`).
     pub fn run_on<T: Send + 'static>(
         &self,
         shard: u16,
@@ -369,7 +406,19 @@ impl NodeEngine {
         if !self.post(shard).post(move || drop(tx.send(f()))) {
             return Err(io::Error::other("the engine stopped"));
         }
-        rx.recv().map_err(|_| io::Error::other("the engine stopped"))
+        match rx.recv_timeout(self.limit) {
+            Ok(v) => Ok(v),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::other("the engine stopped"))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "shard {shard} of the engine did not run a request of the node within {} ms",
+                    self.limit.as_millis()
+                ),
+            )),
+        }
     }
 
     /// Opens a core on `shard`: `build` makes its logic, its disk executor and its part of the
