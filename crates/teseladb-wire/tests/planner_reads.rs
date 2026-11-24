@@ -953,3 +953,59 @@ fn an_id_read_plans_the_same_in_both_layouts_and_reads_one_span_in_id_order() {
     assert!(hashed.span_reads > 0, "the buckets are read together");
     assert_eq!(ordered.span_reads, 0, "one stretch of keys");
 }
+
+/// A collection whose `_id` are `ObjectId`s, as a driver makes them: `count` documents with
+/// `n` their position.
+fn with_object_ids(count: u32) -> Mem {
+    let mut m = Mem::new();
+    let docs: Vec<String> = (0..count)
+        .map(|i| format!(r#"{{"_id":{{"$oid":"6b058e26d3f93149{i:08x}"}},"n":{i}}}"#))
+        .collect();
+    let r = run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, docs.join(",")));
+    assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    m
+}
+
+/// The page after an `_id`, in `_id` order, reads its documents and no more: the index of `_id`
+/// starts at that `ObjectId` (the reference server 9.0.4 scans `(ObjectId('…'),
+/// ObjectId('ffffffffffffffffffffffff')]`, measured on 24-11-2026). Before, a range of
+/// `ObjectId`s had no interval: each page read the index from its start and every document
+/// before the page, so that going through a collection page by page read it once per page.
+#[test]
+fn a_page_after_an_object_id_reads_its_documents_and_no_more() {
+    let mut m = with_object_ids(600);
+    let after = r#"{"_id":{"$gt":{"$oid":"6b058e26d3f931490000018f"}}}"#;
+    for filter in [after.to_owned(), format!(r#"{{"$and":[{{}},{after}]}}"#)] {
+        let find = format!(r#"{{"find":"c","filter":{filter},"sort":{{"_id":1}},"limit":50}}"#);
+        let r = run(&mut m, &find);
+        let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+        let got: Vec<&Value> = batch
+            .iter()
+            .map(|d| match d {
+                Value::Document(d) => field(d, "n"),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let want: Vec<Value> = (400..450).map(Value::Int32).collect();
+        assert_eq!(got, want.iter().collect::<Vec<_>>(), "{filter}");
+        let explain = run(&mut m, &format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#));
+        let examined = match field(&explain, "executionStats.totalKeysExamined") {
+            Value::Int32(n) => *n,
+            other => panic!("{other:?}"),
+        };
+        // The 50 of the page and at most one more, where 451 were read before.
+        assert!(examined <= 51, "{filter}: {examined} keys examined: {explain:?}");
+    }
+    // Both ends of a range bound the scan too.
+    let between = r#"{"_id":{"$gte":{"$oid":"6b058e26d3f9314900000064"},"$lt":{"$oid":"6b058e26d3f931490000006e"}}}"#;
+    let find = format!(r#"{{"find":"c","filter":{between},"sort":{{"_id":-1}}}}"#);
+    let r = run(&mut m, &find);
+    let Value::Array(batch) = field(&r, "cursor.firstBatch") else { panic!("{r:?}") };
+    assert_eq!(batch.len(), 10, "{r:?}");
+    let explain = run(&mut m, &format!(r#"{{"explain":{find},"verbosity":"executionStats"}}"#));
+    assert_eq!(
+        field(&explain, "executionStats.totalKeysExamined"),
+        &Value::Int32(10),
+        "{explain:?}"
+    );
+}

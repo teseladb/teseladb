@@ -80,8 +80,22 @@ pub fn shown_value(v: &Value) -> String {
         // As the reference server's bounds write a date (measured on a reference replica set member
         // 9.0.4, 02-11-2026).
         Value::DateTime(ms) => format!("new Date({ms})"),
+        // These three, on the same member on 24-11-2026.
+        Value::ObjectId(id) => format!("ObjectId('{}')", hex(id)),
+        Value::Timestamp { time, increment } => format!("Timestamp({time}, {increment})"),
+        Value::Binary { subtype, bytes } => format!("BinData({subtype}, {})", hex(bytes)),
         other => format!("{other:?}"),
     }
+}
+
+/// `bytes` in lowercase hexadecimal.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+        // Writing to a `String` cannot fail.
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 /// The clauses of a parsed filter that all must hold: those of a top-level `$and`, or the
@@ -146,16 +160,18 @@ pub fn intervals(op: &str, arg: &Value) -> Option<(Vec<Bound>, bool)> {
         "$gt" | "$lt" if is_nan(arg) => Some((Vec::new(), true)),
         "$gte" | "$lte" if is_nan(arg) => Some((vec![Bound::point(Value::Double(f64::NAN))], true)),
         "$gt" | "$gte" | "$lt" | "$lte" => {
-            let (low, high) = bracket(arg)?;
+            let (low, high, high_inclusive) = bracket(arg)?;
             let inclusive = op.ends_with('e');
-            // The end past a type's values is out, unless it is a value of the type (`inf`).
-            let high_inclusive = !matches!(high, Value::Document(_) | Value::Array(_));
             let b = if op.starts_with("$g") {
                 Bound { low: arg.clone(), low_inclusive: inclusive, high, high_inclusive }
             } else {
                 Bound { low, low_inclusive: true, high: arg.clone(), high_inclusive: inclusive }
             };
-            Some((vec![b], true))
+            // Nothing lies above `true` nor below `false`: no interval (measured).
+            let nothing = matches!(arg, Value::Boolean(_))
+                && !(b.low_inclusive && b.high_inclusive)
+                && compare_values(&b.low, &b.high).is_eq();
+            Some((if nothing { Vec::new() } else { vec![b] }, true))
         }
         // What an `$expr` comparison implies compares across types, as the expression does:
         // the interval runs to the end of the whole index, the expression deciding (measured
@@ -214,20 +230,40 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
-/// The ends of the values of `v`'s type a comparison stays within; `None` for a type the reference
-/// server does not compare within a range this planner scans.
-fn bracket(v: &Value) -> Option<(Value, Value)> {
+/// The ends of the values of `v`'s type a comparison stays within, and whether the upper one is
+/// in: it is when it is a value of the type (`inf`, the last `ObjectId`), and not when it is the
+/// first value of the type that follows. `None` for a type the reference server does not compare
+/// within a range this planner scans.
+fn bracket(v: &Value) -> Option<(Value, Value, bool)> {
     match v {
         Value::Int32(_) | Value::Int64(_) | Value::Double(_) | Value::Decimal128(_) => {
-            Some((Value::Double(f64::NEG_INFINITY), Value::Double(f64::INFINITY)))
+            Some((Value::Double(f64::NEG_INFINITY), Value::Double(f64::INFINITY), true))
         }
-        Value::String(_) => Some((Value::String(String::new()), Value::Document(Document::new()))),
+        Value::String(_) => {
+            Some((Value::String(String::new()), Value::Document(Document::new()), false))
+        }
         // Dates from the least to the greatest one (`new Date(-9223372036854775808)` to
         // `new Date(9223372036854775807)` in the reference server's bounds).
-        Value::DateTime(_) => Some((Value::DateTime(i64::MIN), Value::DateTime(i64::MAX))),
+        Value::DateTime(_) => Some((Value::DateTime(i64::MIN), Value::DateTime(i64::MAX), true)),
         // Documents from the empty one to the arrays that follow them (`[{}, [])` in the reference
         // server's bounds, measured on 05-11-2026).
-        Value::Document(_) => Some((Value::Document(Document::new()), Value::Array(Vec::new()))),
+        Value::Document(_) => {
+            Some((Value::Document(Document::new()), Value::Array(Vec::new()), false))
+        }
+        // The four that follow were measured on a reference replica set member 9.0.4 on
+        // 24-11-2026. `ObjectId`s from the first to the last one: the type of the `_id` a driver
+        // makes, whose ranges are how a collection is read page by page.
+        Value::ObjectId(_) => Some((Value::ObjectId([0; 12]), Value::ObjectId([0xff; 12]), true)),
+        Value::Timestamp { .. } => Some((
+            Value::Timestamp { time: 0, increment: 0 },
+            Value::Timestamp { time: u32::MAX, increment: u32::MAX },
+            true,
+        )),
+        Value::Boolean(_) => Some((Value::Boolean(false), Value::Boolean(true), true)),
+        // Binary data from the empty one to the `ObjectId`s that follow it.
+        Value::Binary { .. } => {
+            Some((Value::Binary { subtype: 0, bytes: Vec::new() }, Value::ObjectId([0; 12]), false))
+        }
         _ => None,
     }
 }

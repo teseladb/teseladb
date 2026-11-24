@@ -307,7 +307,6 @@ fn intervals_follow_the_reference() {
     let (b, exact) = intervals("$in", &Value::Array(vec![Value::Null])).expect("an $in");
     assert!(!exact);
     assert_eq!(b, vec![Bound::point(Value::Null)]);
-    assert_eq!(intervals("$gt", &Value::Boolean(true)), None);
     // NaN is below every other number and only equal to itself (measured on the reference router
     // 9.0.4).
     for nan in [Value::Double(f64::NAN), Value::Decimal128(teseladb_bson::Decimal128::nan())] {
@@ -738,4 +737,49 @@ fn a_hashed_index_scans_the_hashes_of_an_equality() {
     assert!(
         candidates(&request, &hashed).iter().all(|a| !matches!(a, Access::Index(s) if s.sorts))
     );
+}
+
+/// A range comparison stays within the values of its argument's type (measured on a reference
+/// replica set member 9.0.4 on 24-11-2026 with an index on the field): an `ObjectId` up to the
+/// last one, a timestamp between the first and the last, a boolean between `false` and `true`
+/// with no interval when nothing lies there, and binary data from the empty one up to the
+/// `ObjectId`s, which follow it. The index decides each of them alone.
+#[test]
+fn ranges_stay_within_the_type_of_their_value() {
+    let shown = |op: &str, v: &Value| -> Vec<String> {
+        let (b, exact) = intervals(op, v).unwrap_or_else(|| panic!("{op} {v:?} has intervals"));
+        assert!(exact, "{op} {v:?}");
+        b.iter().map(Bound::shown).collect()
+    };
+    let id = Value::ObjectId([0x6b, 5, 0x8e, 0x26, 0xd3, 0xf9, 0x31, 0x49, 0x97, 0xe9, 0xf7, 0xb8]);
+    let (x, first, last) = (
+        "ObjectId('6b058e26d3f9314997e9f7b8')",
+        "ObjectId('000000000000000000000000')",
+        "ObjectId('ffffffffffffffffffffffff')",
+    );
+    assert_eq!(shown("$gt", &id), [format!("({x}, {last}]")]);
+    assert_eq!(shown("$gte", &id), [format!("[{x}, {last}]")]);
+    assert_eq!(shown("$lt", &id), [format!("[{first}, {x})")]);
+    assert_eq!(shown("$lte", &id), [format!("[{first}, {x}]")]);
+    let ts = Value::Timestamp { time: 5, increment: 6 };
+    assert_eq!(shown("$gt", &ts), ["(Timestamp(5, 6), Timestamp(4294967295, 4294967295)]"]);
+    assert_eq!(shown("$gte", &ts), ["[Timestamp(5, 6), Timestamp(4294967295, 4294967295)]"]);
+    assert_eq!(shown("$lt", &ts), ["[Timestamp(0, 0), Timestamp(5, 6))"]);
+    assert_eq!(shown("$lte", &ts), ["[Timestamp(0, 0), Timestamp(5, 6)]"]);
+    let (yes, no) = (Value::Boolean(true), Value::Boolean(false));
+    assert_eq!(shown("$gt", &yes), [""; 0]);
+    assert_eq!(shown("$gte", &yes), ["[true, true]"]);
+    assert_eq!(shown("$lt", &yes), ["[false, true)"]);
+    assert_eq!(shown("$lte", &yes), ["[false, true]"]);
+    assert_eq!(shown("$gt", &no), ["(false, true]"]);
+    assert_eq!(shown("$gte", &no), ["[false, true]"]);
+    assert_eq!(shown("$lt", &no), [""; 0]);
+    assert_eq!(shown("$lte", &no), ["[false, false]"]);
+    let bin = Value::Binary { subtype: 0, bytes: b"ab".to_vec() };
+    assert_eq!(shown("$gt", &bin), [format!("(BinData(0, 6162), {first})")]);
+    assert_eq!(shown("$gte", &bin), [format!("[BinData(0, 6162), {first})")]);
+    assert_eq!(shown("$lt", &bin), ["[BinData(0, ), BinData(0, 6162))"]);
+    assert_eq!(shown("$lte", &bin), ["[BinData(0, ), BinData(0, 6162)]"]);
+    // A type whose range the reference server scans otherwise keeps the documents deciding.
+    assert_eq!(intervals("$gt", &Value::Null), None);
 }
