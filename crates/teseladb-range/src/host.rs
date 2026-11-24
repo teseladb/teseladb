@@ -1140,7 +1140,7 @@ impl RangeHost {
             columns: None,
             prune: None,
         };
-        self.read(core, req, true, now)
+        self.read(core, req, (true, true), now)
     }
 
     /// A read of `key` at mark `ts` (contract `ReadSpec::ts`): once this node's wall clock reaches
@@ -1174,7 +1174,7 @@ impl RangeHost {
             columns: None,
             prune: None,
         };
-        self.read(core, req, true, now)
+        self.read(core, req, (true, true), now)
     }
 
     /// A read with what its reader knows about transactions (008): at the mark it gives, or at
@@ -1185,6 +1185,17 @@ impl RangeHost {
         spec: ReadSpec,
         now: Nanos,
         wall_ms: u64,
+    ) -> ReqId {
+        self.read_spec(core, spec, true, (now, wall_ms))
+    }
+
+    /// [`RangeHost::read_with`]; `alone` as in [`RangeHost::read`].
+    fn read_spec<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        spec: ReadSpec,
+        alone: bool,
+        (now, wall_ms): (Nanos, u64),
     ) -> ReqId {
         self.wall_ms = wall_ms;
         self.now = now;
@@ -1213,7 +1224,31 @@ impl RangeHost {
             columns: None,
             prune: None,
         };
-        self.read(core, req, ends_inside, now)
+        self.read(core, req, (ends_inside, alone), now)
+    }
+
+    /// The point reads of one request (the documents of an index scan's entries, 010 FR-027),
+    /// each with its own answer. For the range's load (007 FR-006) they are the one operation
+    /// their request is, on the keys from the first to the last of each range: counted one by
+    /// one, the lookups another node sent of an aggregation by index went past the threshold on
+    /// their own (002 run `c1n3`: 47 keys to a request, 20 cuts in 300 s).
+    pub fn read_batch<S: StateMachine + RangeState>(
+        &mut self,
+        core: &mut MultiRaftCore<S>,
+        specs: Vec<ReadSpec>,
+        now: Nanos,
+        wall_ms: u64,
+    ) -> Vec<ReqId> {
+        let mut keys: BTreeMap<GroupId, Vec<Vec<u8>>> = BTreeMap::new();
+        for spec in &specs {
+            if self.covers(spec.g, &spec.key) {
+                keys.entry(spec.g).or_default().push(spec.key.clone());
+            }
+        }
+        for (g, keys) in &keys {
+            self.count_load(*g, keys, now);
+        }
+        specs.into_iter().map(|spec| self.read_spec(core, spec, false, (now, wall_ms))).collect()
     }
 
     /// A scan.
@@ -1292,14 +1327,16 @@ impl RangeHost {
             columns,
             prune,
         };
-        self.read(core, req, ends_inside, now)
+        self.read(core, req, (ends_inside, true), now)
     }
 
+    /// Read `req`; `alone`: it is an operation of its own for the range's load (007 FR-006),
+    /// and not one of the reads of a request that was counted once ([`RangeHost::read_batch`]).
     fn read<S: StateMachine + RangeState>(
         &mut self,
         core: &mut MultiRaftCore<S>,
         req: GetReq,
-        ends_inside: bool,
+        (ends_inside, alone): (bool, bool),
         now: Nanos,
     ) -> ReqId {
         let id = self.new_id();
@@ -1307,7 +1344,9 @@ impl RangeHost {
             self.reply(id, Err(RangeError::OutOfRange));
             return id;
         }
-        self.count_load(req.g, std::slice::from_ref(&req.key), now);
+        if alone {
+            self.count_load(req.g, std::slice::from_ref(&req.key), now);
+        }
         // Faulty variant (005 T017): a node that believes it leads serves the read at once, without
         // a lease or ReadIndex, also after a partition took its leadership.
         #[cfg(teseladb_bug = "stale_lease_read")]
@@ -1481,21 +1520,14 @@ impl RangeHost {
         self.views = views;
     }
 
-    /// Notes `ops` reads of range `g` served on other threads, of which `keys` are a sample (005
-    /// FR-028), and counts them for its split by load (007 FR-006) when `for_load`: a split moves
-    /// work between cores and nodes, and these reads use neither the core nor, without other
-    /// nodes, anything a split could spread.
-    pub fn count_outside(
-        &mut self,
-        g: GroupId,
-        (ops, keys): (u64, &[Vec<u8>]),
-        for_load: bool,
-        now: Nanos,
-    ) {
+    /// Notes that reads of range `g` were served on other threads (005 FR-028). They are not
+    /// load for its split (007 FR-006): they use no core, and a split whose half went to lead
+    /// on another node would turn them into requests to that node. Counted, each key read as an
+    /// operation, they cut the ranges of a three-node load 29 times in 300 s, between documents
+    /// and their index entries, and the load lost 30 % of its operations (002 runs `d0n3` and
+    /// `d0n3L`).
+    pub fn read_outside(&mut self, g: GroupId, now: Nanos) {
         if let Some(l) = self.ranges.get_mut(&g).and_then(|r| r.leader.as_mut()) {
-            if for_load {
-                l.load.record_sampled(keys, ops, now);
-            }
             l.read_outside_at = Some(now);
         }
     }

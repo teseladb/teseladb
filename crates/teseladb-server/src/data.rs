@@ -683,14 +683,13 @@ impl DataCore {
         self
     }
 
-    /// Reads a client worker served of range `g` without this core: `ops` of them, sampled by
-    /// `keys` (005 FR-028). They count for the range's split by load (007 FR-006) only when it has
-    /// replicas on other nodes, whose leaders a split can spread: on one node they would split
-    /// the range and move its half to another core (FR-040) for reads that use no core, and
-    /// each move leaves its keys unserved for a moment (H-051 of the native tests).
-    pub fn count_outside(&mut self, g: GroupId, ops: u64, keys: &[Vec<u8>], now: Nanos) {
-        let spread = self.replicas.nodes(g).len() > 1;
-        self.host.count_outside(g, (ops, keys), spread, now);
+    /// A client worker served reads of range `g` without this core (005 FR-028). They are not
+    /// load for the range's split (007 FR-006): on one node the split would move its half to
+    /// another core (FR-040) for reads that use no core, each move leaving its keys unserved
+    /// for a moment (H-051 of the native tests), and with other nodes it would send those
+    /// reads to another node.
+    pub fn read_outside(&mut self, g: GroupId, now: Nanos) {
+        self.host.read_outside(g, now);
     }
 
     /// Backups and restores with their files under `dir`; `nonce` tells this life's file names
@@ -1223,9 +1222,10 @@ impl DataCore {
             })
             .collect();
         self.lookups.insert(id, Gather { client, keys, filter, reads, left });
-        // The host answers through `answer`, once every read is sent.
-        for (at, spec) in specs.into_iter().enumerate() {
-            let req = self.host.read_with(core, spec, now, wall_ms);
+        // The host answers through `answer`, once every read is sent. The reads are one
+        // operation for the range's load, as their request is one (007 FR-006).
+        let reqs = self.host.read_batch(core, specs, now, wall_ms);
+        for (at, req) in reqs.into_iter().enumerate() {
             self.clients.insert(req, Client::Looked(id, at));
         }
         if left == 0 {

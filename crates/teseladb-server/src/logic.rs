@@ -195,9 +195,8 @@ pub enum NodeMsg {
     /// A frame another core of the node received for a range this core runs (007 FR-011: the
     /// range moved between cores), with the node that sent it.
     Stray(NodeId, PeerFrame),
-    /// Reads a client worker served of a range of this core on its own thread: the range, how
-    /// many, and a sample of their keys, for its split by load (005 FR-028, 007 FR-006).
-    OutsideLoad(GroupId, u64, Vec<Vec<u8>>),
+    /// A client worker served reads of this range of this core on its own thread (005 FR-028).
+    OutsideReads(GroupId),
 }
 
 /// What answers an HTTP request another node forwards to this node's port: the node that sent
@@ -2154,9 +2153,9 @@ impl CoreLogic for NodeLogic {
                 }
             }
             NodeMsg::Stray(from, frame) => self.core.on_stray(from, frame, now),
-            NodeMsg::OutsideLoad(g, ops, keys) => {
+            NodeMsg::OutsideReads(g) => {
                 if let Some(data) = &mut self.data {
-                    data.count_outside(g, ops, &keys, now);
+                    data.read_outside(g, now);
                 }
             }
         }

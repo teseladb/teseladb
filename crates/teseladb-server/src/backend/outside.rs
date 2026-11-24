@@ -7,9 +7,10 @@
 //! reads it again and reports its error). A scan whose view lacks a write answered before the
 //! scan began waits here for the view that holds it (005 FR-034).
 //!
-//! The reads served here still count for their range's split by load (007 FR-006): the worker
-//! tallies them per range and reports each tally to the core in one message, with a sample of
-//! their keys, every [`REPORT_OPS`] reads or [`REPORT_AGE`].
+//! The worker tallies the reads it serves here per range and tells the range's core of them
+//! every [`REPORT_OPS`] reads or [`REPORT_AGE`]: a range read here waits before it merges into
+//! its neighbour (007 FR-009). They are not load for the range's split (007 FR-006): they use
+//! no core.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -99,9 +100,6 @@ const VIEW_LOOK: Duration = Duration::from_micros(200);
 pub(super) const REPORT_OPS: u64 = 64;
 /// Longest a tally waits before it is reported.
 pub(super) const REPORT_AGE: Duration = Duration::from_millis(10);
-/// Keys of each report's sample.
-const SAMPLES: usize = 8;
-
 /// Reads served outside the cores, as their tallies are reported.
 static SERVED: AtomicU64 = AtomicU64::new(0);
 /// Blocks the workers read from their files.
@@ -292,8 +290,6 @@ impl Outside {
 #[derive(Debug)]
 struct Tally {
     ops: u64,
-    /// A uniform sample of their keys (reservoir).
-    keys: Vec<Vec<u8>>,
     since: Instant,
 }
 
@@ -362,7 +358,7 @@ impl ServerBackend {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        self.tally(core, g, key, at);
+        self.tally(core, g, at);
         Some(value)
     }
 
@@ -405,7 +401,7 @@ impl ServerBackend {
                     // Its mark comes into the node's clock, as a write's does.
                     self.h.clock.0.update(ts);
                     self.committed = self.committed.max(ts);
-                    self.tally(core, g, first, Instant::now());
+                    self.tally(core, g, Instant::now());
                     UNCHANGED.fetch_add(1, Ordering::Relaxed);
                     return Some(result);
                 }
@@ -563,7 +559,7 @@ impl ServerBackend {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        self.tally(core, g, &lo, asked.get().unwrap_or_else(Instant::now));
+        self.tally(core, g, asked.get().unwrap_or_else(Instant::now));
         // A part that stopped at its blocks goes on from there (005 FR-033); any other ends at
         // the range's end, or at its number of documents.
         let boundary = read.next.unwrap_or(if backward { lo } else { hi });
@@ -619,7 +615,7 @@ impl ServerBackend {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        self.tally(core, g, start, asked.get().unwrap_or_else(Instant::now));
+        self.tally(core, g, asked.get().unwrap_or_else(Instant::now));
         // It stopped at its number of documents, or at the end of this range's part: the span
         // goes on in the next range unless that was its end.
         let next = m.next.or_else(|| (hi.as_slice() < end).then_some(hi));
@@ -679,7 +675,7 @@ impl ServerBackend {
             DECLINED.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        self.tally(core, g, start, asked.get().unwrap_or_else(Instant::now));
+        self.tally(core, g, asked.get().unwrap_or_else(Instant::now));
         // It stopped at its number of documents, or at the end of this range's part: the span
         // goes on in the next range unless that was its end.
         read.next = read.next.or_else(|| (hi.as_slice() < end).then_some(hi));
@@ -721,7 +717,7 @@ impl ServerBackend {
                 return None;
             };
             total = total.saturating_add(n);
-            self.tally(usize::from(core), g, &from, asked.get().unwrap_or_else(Instant::now));
+            self.tally(usize::from(core), g, asked.get().unwrap_or_else(Instant::now));
             if range_end.is_empty() || range_end.as_slice() >= end {
                 return Some(total);
             }
@@ -729,20 +725,11 @@ impl ServerBackend {
         }
     }
 
-    /// Counts a read of `key` served outside core `core` for range `g`'s load.
-    fn tally(&mut self, core: usize, g: GroupId, key: &[u8], now: Instant) {
-        let r = Backend::random(self);
-        let t = self.outside.tallies.entry((core, g)).or_insert_with(|| Tally {
-            ops: 0,
-            keys: Vec::with_capacity(SAMPLES),
-            since: now,
-        });
+    /// Counts a read of range `g` served outside core `core`.
+    fn tally(&mut self, core: usize, g: GroupId, now: Instant) {
+        let t =
+            self.outside.tallies.entry((core, g)).or_insert_with(|| Tally { ops: 0, since: now });
         t.ops += 1;
-        if t.keys.len() < SAMPLES {
-            t.keys.push(key.to_vec());
-        } else if let Some(slot) = usize::try_from(r % t.ops).ok().and_then(|j| t.keys.get_mut(j)) {
-            *slot = key.to_vec();
-        }
         let due = t.ops >= REPORT_OPS || now.saturating_duration_since(t.since) >= REPORT_AGE;
         if due && let Some(t) = self.outside.tallies.remove(&(core, g)) {
             self.report(core, g, t);
@@ -766,10 +753,10 @@ impl ServerBackend {
 
     fn report(&self, core: usize, g: GroupId, t: Tally) {
         SERVED.fetch_add(t.ops, Ordering::Relaxed);
-        // A full mailbox drops the report: the load is a sample of the range's traffic, and a
-        // worker that waited for a busy core would slow the reads this path makes fast.
+        // A full mailbox drops the report: the next one tells the core as much, and a worker
+        // that waited for a busy core would slow the reads this path makes fast.
         if let Some(tx) = self.cores.get(core) {
-            let _ = tx.send(CoreInput::App(NodeMsg::OutsideLoad(g, t.ops, t.keys)));
+            let _ = tx.send(CoreInput::App(NodeMsg::OutsideReads(g)));
         }
     }
 }

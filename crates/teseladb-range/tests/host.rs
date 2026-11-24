@@ -16,8 +16,8 @@ use teseladb_raftlog::{CoreStore, MemDisk, StorageConfig};
 use teseladb_range::ack::{W, WriteConcern};
 use teseladb_range::command::{DedupKey, Put};
 use teseladb_range::host::{
-    DeleteReq, Mutation, MutationError, RangeError, RangeHost, Reply, ReqId, ScanReq, VIEW_SPAN,
-    WriteReq,
+    DeleteReq, Mutation, MutationError, RangeError, RangeHost, ReadSpec, Reply, ReqId, ScanReq,
+    VIEW_SPAN, WriteReq,
 };
 use teseladb_range::mutate::Outcome;
 use teseladb_range::push::Row;
@@ -1448,24 +1448,20 @@ fn the_newest_versions_of_keys_are_read_on_a_view_without_a_mark() {
 }
 
 #[test]
-fn the_views_go_where_the_node_reads_them_and_reads_outside_count_as_load_when_asked() {
+fn the_views_go_where_the_node_reads_them_and_reads_outside_are_not_load() {
     let mut n = Node::new();
     let shared = teseladb_range::view::RangeViews::default();
     n.host.set_views(shared.clone());
     n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
     n.settle();
     assert!(shared.get(G).is_some(), "published where the node reads it");
-    // Reads that do not count for the load (a range on one node) leave it alone.
-    let keys = vec![b"\x01a".to_vec(), b"\x01b".to_vec()];
-    n.host.count_outside(G, (300, &keys), false, n.now);
-    n.host.count_outside(G, (1, &keys), false, n.now + Nanos::from_secs(1));
+    // The reads served on other threads are not load, whether the range has replicas on other
+    // nodes or not: they use no core (002 runs `d0n3` and `d0n3L`).
+    n.host.read_outside(G, n.now);
+    n.host.read_outside(G, n.now + Nanos::from_secs(1));
     assert_eq!(n.host.load(G), 0, "no load from reads that use no core");
-    // 300 reads in one second, then one more a second later closes it.
-    n.host.count_outside(G, (300, &keys), true, n.now + Nanos::from_secs(2));
-    n.host.count_outside(G, (1, &keys), true, n.now + Nanos::from_secs(3));
-    assert!(n.host.load(G) >= 300, "{}", n.host.load(G));
-    // A range this node does not lead counts nothing.
-    n.host.count_outside(GroupId(99), (300, &keys), true, n.now);
+    // A range this node does not lead notes nothing.
+    n.host.read_outside(GroupId(99), n.now);
 }
 
 #[test]
@@ -1564,4 +1560,41 @@ fn a_write_that_fails_on_a_pending_one_answers_only_after_it_commits() {
     let at = |id| n.replies.iter().position(|(r, _)| *r == id).expect("answered");
     assert!(at(w1) < at(w2), "the failure goes after the write it found");
     assert!(matches!(n.reply(w2), Some(Err(RangeError::Mutation(_)))), "{:?}", n.reply(w2));
+}
+
+/// The point reads one request brings (the documents of an index scan's entries, 010 FR-027) are
+/// one operation for the range's load (007 FR-006), as the request that asks for them is one.
+/// Counted one by one, the reads another node sent of an aggregation by index, 47 keys to a
+/// request, went past the threshold on their own and the load of three nodes cut its ranges 20
+/// times in 300 s (002 run `c1n3`).
+#[test]
+fn the_reads_of_one_request_are_one_operation_for_the_load() {
+    const SECOND: u64 = 1_000_000_000;
+    let mut n = Node::new();
+    n.mutate(b"\x01count", Box::new(Inc), MAJORITY);
+    n.settle();
+    // Early in a second of its own.
+    let base = (n.now.0 / SECOND + 2) * SECOND + SECOND / 10;
+    n.now = Nanos(base);
+    let specs: Vec<ReadSpec> = (0..300)
+        .map(|i| ReadSpec {
+            g: G,
+            key: format!("\x01k{i:04}").into_bytes(),
+            scan: None,
+            backward: false,
+            at: None,
+            concern: ReadConcern::Majority,
+            view: teseladb_range::push::TxnView::default(),
+            uncertain_to: None,
+        })
+        .collect();
+    let (now, wall) = (n.now, n.wall());
+    let ids = n.host.read_batch(&mut n.core, specs, now, wall);
+    assert_eq!(ids.len(), 300);
+    n.settle();
+    assert!(ids.iter().all(|id| matches!(n.reply(*id), Some(Ok(_)))), "every read is answered");
+    // A read in the next second closes that one.
+    n.now = Nanos(base + SECOND);
+    n.get(b"\x01k0000", ReadConcern::Majority);
+    assert_eq!(n.host.load(G), 1, "one request, one operation");
 }
