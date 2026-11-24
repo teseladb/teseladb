@@ -34,7 +34,7 @@ use teseladb_range::view::{
 use teseladb_stages::Stage;
 use teseladb_types::{GroupId, Nanos};
 use teseladb_wire::commands::mutation::{Bound, Prepared};
-use teseladb_wire::commands::{Backend, Rows, WriteOp};
+use teseladb_wire::commands::{Rows, WriteOp};
 
 use super::{ServerBackend, stage_since};
 use crate::logic::NodeMsg;
