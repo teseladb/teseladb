@@ -28,7 +28,7 @@ use super::index_maintenance::MULTIKEY_MARKS;
 use super::mutation::from_mql;
 use super::plan_fetch::{Fetched, Fetcher};
 use super::{Backend, Span, query};
-use crate::error::{CommandError, INTERNAL_ERROR};
+use crate::error::{CommandError, INTERNAL_ERROR, QUERY_PLAN_KILLED};
 
 mod scan;
 
@@ -469,6 +469,11 @@ pub(crate) struct ReadPlan<'a> {
     /// score gives it the bonus of a plan without `FETCH` (measured on the reference router 9.0.4
     /// on 05-11-2026).
     pub key_only: bool,
+    /// The documents a `find` takes for its first batch, its skip included, when the cursor may
+    /// read the rest later (010 FR-035): a plan over one index in its intervals, with no sort
+    /// in memory and an index that gives each document once, stops there and says where it goes
+    /// on ([`Ran::resume`]). `None`: the plan runs to its end.
+    pub batch: Option<u64>,
 }
 
 /// A plan and what running it counted.
@@ -509,6 +514,9 @@ pub(crate) struct Ran {
     /// Seeks of its scans: one each, and one more for each key outside the intervals of a scan
     /// that checks its keys.
     pub seeks: u64,
+    /// The key of the entry after which its scan goes on, when it stopped at its read's batch
+    /// ([`ReadPlan::batch`]).
+    pub resume: Option<Vec<u8>>,
 }
 
 /// What a plan counted at the end of the trial, and its score.
@@ -757,6 +765,7 @@ fn subplanned<B: Backend + ?Sized>(
         intersect: false,
         index_keys: false,
         key_only: false,
+        batch: None,
     };
     for scans in branches {
         if scans.len() < 2 {
@@ -838,7 +847,12 @@ fn first_pull(read: &ReadPlan<'_>, access: &Access, budget: Option<u64>) -> usiz
     let exact = matches!(access, Access::Index(s)
         if s.residual.is_none() && (read.sort.is_empty() || s.sorts));
     let size = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
-    let first = match (budget, read.limit) {
+    // A read that stops at its first batch reads the entries of that batch first.
+    let limit = match (read.limit, read.batch) {
+        (Some(l), Some(b)) => Some(l.min(b)),
+        (l, b) => l.or(b),
+    };
+    let first = match (budget, limit) {
         (Some(b), _) => size(b.saturating_add(1)),
         (None, Some(l)) if exact => size(l).max(1),
         (None, Some(l)) if in_order => size(l).clamp(1, FIRST_LIMITED_ENTRIES),
@@ -859,18 +873,19 @@ fn run<B: Backend + ?Sized>(
     budget: Option<u64>,
 ) -> Result<Ran, CommandError> {
     let first = first_pull(read, &access, budget);
-    run_reading(backend, coll, indexes, read, access, budget, first)
+    run_reading(backend, coll, indexes, read, access, (budget, first), None)
 }
 
-/// [`run`], whose index scans read `first` entries first.
+/// [`run`], whose index scans read `first` entries first; with `after`, the scan of a plan over
+/// one index goes on after the entry of that key (010 FR-035).
 fn run_reading<B: Backend + ?Sized>(
     backend: &mut B,
     coll: &CollectionEntry,
     indexes: &[PlanIndex],
     read: &ReadPlan<'_>,
     access: Access,
-    budget: Option<u64>,
-    first: usize,
+    (budget, first): (Option<u64>, usize),
+    after: Option<&[u8]>,
 ) -> Result<Ran, CommandError> {
     let collation = None;
     let plan_filter = |f: &Document| -> Result<teseladb_mql::Filter, CommandError> {
@@ -898,6 +913,7 @@ fn run_reading<B: Backend + ?Sized>(
         child_dups: Vec::new(),
         child_given: Vec::new(),
         seeks: 0,
+        resume: None,
     };
     let scans: Vec<IndexScan> = match &access {
         Access::Collscan => {
@@ -936,6 +952,20 @@ fn run_reading<B: Backend + ?Sized>(
     let blocking = !read.sort.is_empty() && !scans.iter().all(|s| s.sorts);
     let batch = if blocking { None } else { budget.map(|_| TRIAL_RESULTS) };
     let limit = if blocking { None } else { read.limit };
+    // A run (not a trial) of one scan, in the order the read wants, of an index that gives each
+    // document once, stops at the read's batch and leaves the rest for its cursor (FR-035).
+    let stop = read.batch.filter(|_| {
+        budget.is_none()
+            && !blocking
+            && scans.len() == 1
+            && !read.index_keys
+            && !read.key_only
+            && !indexes[scans[0].index].meta.multikey
+    });
+    let fetch_limit = match (limit, stop) {
+        (Some(l), Some(s)) => Some(l.min(s)),
+        (l, s) => l.or(s),
+    };
     let unbucketed = unbucketed(coll)?;
     let mut seen = teseladb_index::docset::Seen::new();
     // Only an `OR` of several scans can give a document twice: a scan gives each document once,
@@ -957,7 +987,7 @@ fn run_reading<B: Backend + ?Sized>(
         let residual = residual.map(|f| f.with_fields(fields.clone()));
         let decode = read.index_keys && !index.id_index;
         let mut scanned =
-            entries(backend, (coll.tenant, coll.id), index, s, (read.concern, decode))?;
+            entries(backend, (coll.tenant, coll.id), index, s, (read.concern, decode), after)?;
         // The documents of the entries go by batches, with the residual filter when the leaders
         // may evaluate it (010 FR-027); a plan's residual never runs with a collation.
         let sent = match (&s.residual, &residual) {
@@ -967,7 +997,8 @@ fn run_reading<B: Backend + ?Sized>(
             _ => None,
         };
         let pending = scanned.ready_pending();
-        let mut fetcher = Fetcher::new((coll, unbucketed), pending, sent, (read.concern, limit));
+        let mut fetcher =
+            Fetcher::new((coll, unbucketed), pending, sent, (read.concern, fetch_limit));
         let mut pull = first;
         // A multikey scan drops the other entries of a document it gave before fetching it
         // again (`dupsDropped` of its `IXSCAN`, measured on a reference replica set member 9.0.4).
@@ -990,7 +1021,7 @@ fn run_reading<B: Backend + ?Sized>(
             ran.keys += 1;
             ran.child_keys[child] += 1;
             last_past = entry.is_none();
-            let Some(Entry { pk, local, values, doc }) = entry else {
+            let Some(Entry { pk, local, values, at, doc }) = entry else {
                 ran.past += 1;
                 ran.child_past[child] += 1;
                 continue;
@@ -1054,6 +1085,12 @@ fn run_reading<B: Backend + ?Sized>(
                 ran.given_at.push(ran.keys);
                 let n = u64::try_from(ran.found.len()).unwrap_or(u64::MAX);
                 if batch.is_some_and(|b| n >= b) || limit.is_some_and(|l| n >= l) {
+                    ended = false;
+                    break;
+                }
+                if stop.is_some_and(|b| n >= b) && scanned.resumable() {
+                    // The cursor goes on after this entry at its next batch.
+                    ran.resume = Some(at);
                     ended = false;
                     break;
                 }
@@ -1163,9 +1200,15 @@ fn intersected<B: Backend + ?Sized>(
         .ok_or_else(|| CommandError::new(INTERNAL_ERROR, "an intersection without scans"))?;
     let mut sets: Vec<teseladb_index::docset::Held> = Vec::new();
     for s in held {
-        let read_entries =
-            entries(backend, (coll.tenant, coll.id), &indexes[s.index], s, (read.concern, false))?
-                .all(backend)?;
+        let read_entries = entries(
+            backend,
+            (coll.tenant, coll.id),
+            &indexes[s.index],
+            s,
+            (read.concern, false),
+            None,
+        )?
+        .all(backend)?;
         let n = u64::try_from(read_entries.len()).unwrap_or(u64::MAX);
         let outside = read_entries.iter().filter(|e| e.is_none()).count();
         let past = u64::try_from(outside).unwrap_or(u64::MAX);
@@ -1182,7 +1225,7 @@ fn intersected<B: Backend + ?Sized>(
     let (mut last_keys, mut last_past) = (0, 0);
     let last_index = &indexes[last.index];
     let scanned =
-        entries(backend, (coll.tenant, coll.id), last_index, last, (read.concern, false))?
+        entries(backend, (coll.tenant, coll.id), last_index, last, (read.concern, false), None)?
             .all(backend)?;
     // Which entries every held set may hold, walked with prefetch (009 FR-024).
     let walk: Vec<(&[u8], Option<u32>)> =
@@ -1246,11 +1289,18 @@ fn entries<'a, B: Backend + ?Sized>(
     index: &'a PlanIndex,
     scan: &IndexScan,
     (concern, decode): (ReadConcern, bool),
+    after: Option<&[u8]>,
 ) -> Result<Scanned<'a>, CommandError> {
     if checks_keys(scan) {
         return walked((tenant, collection), index, scan, concern, decode);
     }
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
+    // A scan that goes on from where a batch stopped reads the rest of its intervals (FR-035).
+    if let Some(at) = after {
+        let rest = from_position(ranges, at, scan.backward);
+        let read = (concern, decode);
+        return Ok(scan::intervals((tenant, collection), index, rest, read, scan.backward));
+    }
     let points = (ranges.as_slice(), scan.backward);
     if let Some(read) = point_entries(backend, (tenant, collection), index, points, concern)? {
         return Ok(read);
@@ -1260,6 +1310,71 @@ fn entries<'a, B: Backend + ?Sized>(
     }
     let read = (concern, decode);
     Ok(scan::intervals((tenant, collection), index, ranges, read, scan.backward))
+}
+
+/// What is left of the key intervals `ranges` of a scan after its entry at key `at` (010
+/// FR-035): forward, the intervals past it, the one that holds it from just after it; backward,
+/// those below it, the one that holds it up to it.
+fn from_position(ranges: Vec<KeyRange>, at: &[u8], backward: bool) -> Vec<KeyRange> {
+    if backward {
+        let below = |r: &KeyRange| r.start.as_slice() < at;
+        let cut = |r: KeyRange| {
+            let end = r.end.filter(|e| e.as_slice() < at).unwrap_or_else(|| at.to_vec());
+            KeyRange { start: r.start, end: Some(end) }
+        };
+        return ranges.into_iter().filter(below).map(cut).collect();
+    }
+    let next = [at, &[0]].concat();
+    let past = |r: &KeyRange| r.end.as_ref().is_none_or(|e| *e > next);
+    let cut = |r: KeyRange| KeyRange { start: r.start.max(next.clone()), end: r.end };
+    ranges.into_iter().filter(past).map(cut).collect()
+}
+
+/// Where a `find` over one index goes on at its next batch (010 FR-035): its scan, the catalog
+/// number of its index and the key of the entry it stopped after.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resume {
+    scan: IndexScan,
+    index: u32,
+    at: Vec<u8>,
+}
+
+/// The next documents, at most `want`, of the `find` that stopped at `resume`, in its order, and
+/// where it goes on after them; `None` once its scan reached its end. The cursor of an index
+/// dropped since its last batch ends with the error of a plan killed.
+pub(crate) fn resumed<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    resume: &Resume,
+    (concern, vars): (ReadConcern, Option<&Document>),
+    want: u64,
+) -> Result<(Vec<Vec<u8>>, Option<Resume>), CommandError> {
+    let indexes = plan_indexes(backend, coll)?;
+    let Some(at) = indexes.iter().position(|i| i.entry.id == resume.index) else {
+        let msg = "the index the cursor read was dropped";
+        return Err(CommandError::new(QUERY_PLAN_KILLED, msg));
+    };
+    let mut scan = resume.scan.clone();
+    scan.index = at;
+    let empty = Document::new();
+    let read = ReadPlan {
+        filter: &empty,
+        parsed: &empty,
+        sort: Vec::new(),
+        limit: None,
+        hint: None,
+        vars,
+        concern,
+        intersect: false,
+        index_keys: false,
+        key_only: false,
+        batch: Some(want.max(1)),
+    };
+    let access = Access::Index(scan);
+    let first = first_pull(&read, &access, None);
+    let ran = run_reading(backend, coll, &indexes, &read, access, (None, first), Some(&resume.at))?;
+    let next = ran.resume.map(|at| Resume { at, ..resume.clone() });
+    Ok((ran.found.into_iter().map(|(_, d)| d).collect(), next))
 }
 
 /// Whether a scan of `scan` checks each key against the intervals of a field after one with a
@@ -1330,6 +1445,9 @@ pub(crate) struct Entry {
     local: Option<u32>,
     /// The entry's values as stored, when decoded.
     values: Option<Vec<Value>>,
+    /// Its key in its scan's interval, after which a scan that stopped there goes on (010
+    /// FR-035).
+    at: Vec<u8>,
     /// The document's key and bytes, when the entry was read with them: an entry of the index of
     /// `_id` is its document.
     doc: Option<(Vec<u8>, Vec<u8>)>,
@@ -1480,7 +1598,8 @@ fn ordered_points<B: Backend + ?Sized>(
             if r.start.as_slice() <= key.as_slice() && key.as_slice() < end.as_slice() {
                 let pk = key.get(head..).unwrap_or_default().to_vec();
                 let local = given_document_id(&value);
-                out.push(Some(Entry { pk, local, values: None, doc: Some((key, value)) }));
+                let at = key.clone();
+                out.push(Some(Entry { pk, local, values: None, at, doc: Some((key, value)) }));
             } else {
                 held = true;
             }
@@ -1610,6 +1729,7 @@ fn point_entries<B: Backend + ?Sized>(
             pk: pks[i].clone(),
             local: given_document_id(v),
             values: None,
+            at: k.clone(),
             doc: Some((k.clone(), v.clone())),
         });
         out.extend(found.map(Some));
@@ -1739,6 +1859,7 @@ pub(crate) fn planned_keys<B: Backend + ?Sized>(
         intersect: false,
         index_keys: false,
         key_only: false,
+        batch: None,
     };
     let take = if m.multi { usize::MAX } else { 1 };
     let started = backend.now_micros();
@@ -1807,6 +1928,17 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     read: &ReadPlan<'_>,
     note: CacheNote<'_>,
 ) -> Result<Option<Planned>, CommandError> {
+    Ok(planned_resumable(backend, coll, read, note)?.map(|(p, _)| p))
+}
+
+/// [`planned_keyed`], with where the plan's scan goes on when it stopped at the read's batch
+/// ([`ReadPlan::batch`], 010 FR-035).
+pub(crate) fn planned_resumable<B: Backend + ?Sized>(
+    backend: &mut B,
+    coll: &CollectionEntry,
+    read: &ReadPlan<'_>,
+    note: CacheNote<'_>,
+) -> Result<Option<(Planned, Option<Resume>)>, CommandError> {
     let indexes = plan_indexes(backend, coll)?;
     let ns = super::names::full(note.ns);
     let started = backend.now_micros();
@@ -1872,6 +2004,12 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
         let now = i64::try_from(backend.now_ms()).unwrap_or(i64::MAX);
         super::lock(note.shared).plan_cache.learn(&ns, learned, now);
     }
+    let resume = match (chosen.winner.resume.take(), &chosen.winner.access) {
+        (Some(at), Access::Index(s)) => {
+            Some(Resume { scan: s.clone(), index: indexes[s.index].entry.id, at })
+        }
+        _ => None,
+    };
     // The documents go to the caller; the report keeps how many there were.
     let found = std::mem::take(&mut chosen.winner.found);
     chosen.winner.found = vec![(Vec::new(), Vec::new()); found.len()];
@@ -1881,7 +2019,7 @@ pub(crate) fn planned_keyed<B: Backend + ?Sized>(
     let shown = Shown { ns: note.ns.clone(), shape, parsed: read.parsed.clone() };
     let planning = ran.0.planning_micros;
     backend.note_plan_lazy(shown.pending(indexes, Some(ran), planning));
-    Ok(Some((found.into_iter().map(|(_, d)| d).collect(), keys, in_order)))
+    Ok(Some(((found.into_iter().map(|(_, d)| d).collect(), keys, in_order), resume)))
 }
 
 /// What a read's plan report shows, kept to build it when something reads it ([`Shown::pending`]).

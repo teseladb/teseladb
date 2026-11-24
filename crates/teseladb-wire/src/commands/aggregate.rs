@@ -1486,6 +1486,7 @@ fn plan_read<B: Backend + ?Sized>(
             .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: index_keys && !super::query::id_point(&filter),
         key_only: false,
+        batch: None,
     };
     // The planner builds the list of indexes itself: only whether there is one is asked here.
     if !super::plan_exec::plannable_kind(&coll)? || super::explain::matches_nothing(&parsed) {

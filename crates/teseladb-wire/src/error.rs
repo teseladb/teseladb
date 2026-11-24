@@ -168,6 +168,8 @@ codes! {
     WRITE_CONFLICT = 112, "WriteConflict";
     /// Command that exists but is not taken this way.
     COMMAND_NOT_SUPPORTED = 115, "CommandNotSupported";
+    /// The plan a cursor reads lost what it reads (an index dropped while the cursor was open).
+    QUERY_PLAN_KILLED = 175, "QueryPlanKilled";
     /// Schema validation failed.
     DOCUMENT_VALIDATION_FAILURE = 121, "DocumentValidationFailure";
     /// Client metadata without `driver` or `os`.

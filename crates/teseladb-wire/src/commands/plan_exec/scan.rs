@@ -31,6 +31,9 @@ pub(super) struct Scanned<'a> {
     rest: Option<Rest<'a>>,
     /// The seeks of the entries taken, the first one included.
     seeks: u64,
+    /// Whether it reads key intervals, which a scan that stops after an entry goes on with from
+    /// that entry (010 FR-035).
+    resumable: bool,
 }
 
 /// What a scan has left to read.
@@ -43,12 +46,19 @@ impl<'a> Scanned<'a> {
     /// A scan whose entries were all read, with its seeks.
     pub(super) fn listed(entries: Vec<Option<Entry>>, seeks: u64) -> Scanned<'a> {
         let ready = entries.into_iter().map(|e| (e, false)).collect();
-        Scanned { ready, rest: None, seeks }
+        Scanned { ready, rest: None, seeks, resumable: false }
     }
 
     /// A scan of what `rest` reads, which reads nothing until it is pulled.
     fn reading(rest: Rest<'a>) -> Scanned<'a> {
-        Scanned { ready: VecDeque::new(), rest: Some(rest), seeks: 1 }
+        let resumable = matches!(rest, Rest::Intervals(_));
+        Scanned { ready: VecDeque::new(), rest: Some(rest), seeks: 1, resumable }
+    }
+
+    /// Whether it reads key intervals, which a scan that stops after an entry goes on with from
+    /// that entry's key ([`Entry::at`]).
+    pub(super) fn resumable(&self) -> bool {
+        self.resumable
     }
 
     /// The entries read and not taken yet.
@@ -420,7 +430,7 @@ fn ordered<B: Backend + ?Sized>(
         for (key, value) in rows {
             let pk = key.get(head..).unwrap_or_default().to_vec();
             let local = given_document_id(&value);
-            out.push(Entry { pk, local, values: None, doc: Some((key, value)) });
+            out.push(Entry { pk, local, values: None, at: key.clone(), doc: Some((key, value)) });
         }
         match last {
             Some(k) if !short && backward => *hi = k,
@@ -447,6 +457,7 @@ fn point<B: Backend + ?Sized>(
         pk: pk.to_vec(),
         local: given_document_id(&v),
         values: None,
+        at: key.clone(),
         doc: Some((key.clone(), v)),
     }));
     Ok(())
@@ -506,7 +517,7 @@ fn key_entry(
     };
     let local = teseladb_keys::local_id::entry_id(value)
         .filter(|id| teseladb_keys::local_id::is_given(*id));
-    Ok(Entry { pk: pk.to_vec(), local, values, doc: None })
+    Ok(Entry { pk: pk.to_vec(), local, values, at: key.to_vec(), doc: None })
 }
 
 /// The entries each bucket of a read of the index of `_id` reads at a time for a pull of `want`:
@@ -576,6 +587,8 @@ fn merged<B: Backend + ?Sized>(
             pk: pk_of(&key, head).to_vec(),
             local: given_document_id(&value),
             values: None,
+            // The key in the index's interval: the documents' prefix and the primary key.
+            at: [&key[..head], pk_of(&key, head)].concat(),
             doc: Some((key, value)),
         });
         taken += 1;

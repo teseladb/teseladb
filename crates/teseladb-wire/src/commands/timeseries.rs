@@ -356,6 +356,7 @@ pub fn indexed_buckets<B: Backend + ?Sized>(
         intersect: false,
         index_keys: false,
         key_only: false,
+        batch: None,
     };
     let Some(chosen) = choose(backend, coll, &indexes, &read)? else { return Ok(None) };
     let names: Vec<Value> =

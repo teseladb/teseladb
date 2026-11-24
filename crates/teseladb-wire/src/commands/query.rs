@@ -94,6 +94,24 @@ pub enum Source {
         /// The command's `let` variables.
         vars: Option<Document>,
     },
+    /// The documents of a plan over one index from where its last batch stopped (010 FR-035),
+    /// projected as the command asked.
+    Index {
+        /// The collection.
+        coll: Box<CollectionEntry>,
+        /// Where the plan's scan goes on.
+        resume: Box<super::plan_exec::Resume>,
+        /// Filter.
+        filter: Document,
+        /// Projection.
+        projection: Option<Document>,
+        /// Read concern.
+        concern: ReadConcern,
+        /// The command's `let` variables, for its `getMore`s too.
+        vars: Option<Document>,
+        /// Documents the next refill reads, doubling up to [`SCAN_CHUNK`].
+        chunk: usize,
+    },
     /// The computed results wait in the node's temporary store from `offset` (012 FR-013).
     Spilled {
         /// The run.
@@ -719,6 +737,9 @@ impl QueryCursor {
         if let Source::Oplog { .. } = &self.source {
             return self.refill_oplog(backend);
         }
+        if let Source::Index { .. } = &self.source {
+            return self.refill_index(backend);
+        }
         if let Source::Spilled { run, offset } = &mut self.source {
             let (next, read) = super::cursor_spill::refill(run, *offset, &mut self.buffered)?;
             self.held += read;
@@ -735,7 +756,9 @@ impl QueryCursor {
                 *chunk = chunk.saturating_mul(2).min(SCAN_CHUNK);
                 (next, end, filter, projection, collation, concern, vars, size)
             }
-            Source::Done | Source::Spilled { .. } | Source::Oplog { .. } => return Ok(()),
+            Source::Done | Source::Spilled { .. } | Source::Oplog { .. } | Source::Index { .. } => {
+                return Ok(());
+            }
         };
         // A scan that is not tailable filters where its documents are read (010 FR-027); a
         // tailable one notes every key it reads.
@@ -811,6 +834,33 @@ impl QueryCursor {
 }
 
 impl QueryCursor {
+    /// Reads the next documents of a plan over one index into the buffer, from the entry its last
+    /// batch stopped after (010 FR-035); the source is done once the scan reaches its end.
+    fn refill_index<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
+        let Source::Index { coll, resume, filter, projection, concern, vars, chunk } =
+            &mut self.source
+        else {
+            return Ok(());
+        };
+        let want = self.left.map_or(*chunk as u64, |l| l.min(*chunk as u64)) + self.skip;
+        *chunk = chunk.saturating_mul(2).min(SCAN_CHUNK);
+        let read = (*concern, vars.as_ref());
+        let (rows, next) = super::plan_exec::resumed(backend, coll, resume, read, want)?;
+        let plan = Plan::new(filter, projection.as_ref(), None)?.with_vars(vars.as_ref());
+        for bytes in rows {
+            if self.skip > 0 {
+                self.skip -= 1;
+                continue;
+            }
+            self.buffered.push_back(plan.matched_row(bytes, None)?);
+        }
+        match next {
+            Some(r) => **resume = r,
+            None => self.source = Source::Done,
+        }
+        Ok(())
+    }
+
     /// Reads the oplog's entries past the cursor's mark into the buffer: a tailable cursor
     /// stays on the newest one, any other ends there.
     fn refill_oplog<B: Backend + ?Sized>(&mut self, backend: &mut B) -> Result<(), CommandError> {
@@ -1297,6 +1347,8 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         && a.natural.is_none()
         && a.tailable.is_none()
         && range == documents_of(&coll);
+    // Where the plan's scan goes on, when it stopped at the first batch (FR-035).
+    let mut resume = None;
     let planned = if plannable {
         let parsed = match &optimized {
             None => first.filter.parsed_query(),
@@ -1328,6 +1380,7 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
             index_keys: min_max.is_some()
                 || (reads_index_key(a.projection.as_ref()) && !id_point(&a.filter)),
             key_only: a.return_key,
+            batch: first_batch(&a),
         };
         let sort_doc = match ctx.cmd.get("sort") {
             Some(Value::Document(s)) => s.clone(),
@@ -1349,8 +1402,12 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
                 None,
             ),
         };
-        let planned =
-            super::plan_exec::planned_keyed(ctx.backend, &coll, &read, note).map_err(executor)?;
+        let found = super::plan_exec::planned_resumable(ctx.backend, &coll, &read, note)
+            .map_err(executor)?;
+        let planned = found.map(|(p, r)| {
+            resume = r.filter(|_| min_max.is_none());
+            p
+        });
         match (planned, &min_max) {
             (Some(p), Some((b, pattern))) => Some(bounded(p, b, pattern)?),
             (p, _) => p,
@@ -1404,6 +1461,18 @@ pub fn find<B: Backend + ?Sized>(ctx: &mut Ctx<'_, B>) -> Result<Document, Comma
         Some(sort) => sorted(ctx.backend, (first, range), &a, sort, collation.as_ref(), planned)
             .map_err(executor)?,
     };
+    // The plan stopped after its skip and its first batch: the cursor goes on from there.
+    if let Some(r) = resume {
+        state.source = Source::Index {
+            coll: Box::new(coll.clone()),
+            resume: Box::new(r),
+            filter: a.filter.clone(),
+            projection: a.projection.clone(),
+            concern: a.concern,
+            vars: a.vars.clone(),
+            chunk: DEFAULT_FIRST_BATCH,
+        };
+    }
     state.return_key = a.return_key;
     let size = Some(a.batch_size.unwrap_or(DEFAULT_FIRST_BATCH));
     let (docs, short) = state.batch(ctx.backend, size).map_err(executor)?;
@@ -1660,6 +1729,17 @@ fn bounded(
 }
 
 /// The command's filter and projection come parsed in `plan`.
+/// The documents a `find` takes for its first batch, its skip included, when its cursor may read
+/// the rest later (010 FR-035): none for a single batch, a limit within the batch, or a
+/// projection that shows the sort key, which the sort computes over every document.
+fn first_batch(a: &FindArgs) -> Option<u64> {
+    let size = a.batch_size.map_or(DEFAULT_FIRST_BATCH as u64, |b| b as u64).max(1);
+    let batch = a.skip.saturating_add(size);
+    let within = a.limit.is_some_and(|l| a.skip.saturating_add(l) <= batch);
+    let sort_key = reads_meta(a.projection.as_ref(), "sortKey");
+    (!a.single_batch && !within && !sort_key).then_some(batch)
+}
+
 fn planned_cursor(
     plan: Plan,
     (rows, keys, _): super::plan_exec::Planned,
@@ -2739,6 +2819,7 @@ fn planned<B: Backend + ?Sized>(
             .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
+        batch: None,
     };
     let note = super::plan_exec::CacheNote {
         shared: ctx.shared,

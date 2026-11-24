@@ -1009,3 +1009,90 @@ fn a_page_after_an_object_id_reads_its_documents_and_no_more() {
         "{explain:?}"
     );
 }
+
+/// The `k` of the documents of a batch of `r` (`firstBatch` or `nextBatch`), in its order, and the
+/// cursor's id.
+fn batch_k(r: &Document, name: &str) -> (Vec<i32>, i64) {
+    let Value::Array(b) = field(r, &format!("cursor.{name}")) else { panic!("{r:?}") };
+    let ks = b
+        .iter()
+        .map(|d| match d {
+            Value::Document(d) => match d.get("k") {
+                Some(Value::Int32(k)) => *k,
+                other => panic!("{other:?} in {d:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let id = match field(r, "cursor.id") {
+        Value::Int64(id) => *id,
+        other => panic!("{other:?}"),
+    };
+    (ks, id)
+}
+
+/// A `find` over one index, in the index's order and without `limit`, reads for its first batch
+/// only what that batch needs, and each `getMore` goes on from the last entry the batch before it
+/// gave (010 FR-035). Before, the plan ran to its end before the first batch: a `find` sorted by
+/// `_id` over a million documents took 4.2 s to answer, and a page of the REST API with it ran
+/// past its time limit.
+#[test]
+fn a_find_over_one_index_reads_each_batch_as_it_goes() {
+    const DOCS: i32 = 5_000;
+    let mut m = Mem::new();
+    let docs: Vec<String> =
+        (0..DOCS).map(|i| format!(r#"{{"_id":{i},"k":{}}}"#, DOCS - i)).collect();
+    for chunk in docs.chunks(1000) {
+        let r = run(&mut m, &format!(r#"{{"insert":"c","documents":[{}]}}"#, chunk.join(",")));
+        assert_eq!(field(&r, "ok"), &Value::Double(1.0), "{r:?}");
+    }
+    index(&mut m, r#"{"key":{"k":1},"name":"k_1"}"#);
+    let before = m.scanned_rows;
+    let r = run(&mut m, r#"{"find":"c","filter":{"k":{"$gte":0}},"sort":{"k":1}}"#);
+    let read = m.scanned_rows - before;
+    let (first, mut id) = batch_k(&r, "firstBatch");
+    assert_eq!(first, (1..=101).collect::<Vec<_>>());
+    // The 101 entries of the batch and their documents, with the pulls and batches growing from
+    // small ones; the whole index and its documents were 10,000 rows.
+    assert!(read < 1_200, "{read} rows read for the first batch");
+    let mut all = first;
+    while id != 0 {
+        let more =
+            run(&mut m, &format!(r#"{{"getMore":{{"$numberLong":"{id}"}},"collection":"c"}}"#));
+        let (ks, next) = batch_k(&more, "nextBatch");
+        all.extend(ks);
+        id = next;
+    }
+    assert_eq!(all, (1..=DOCS).collect::<Vec<_>>(), "every document once, in the index's order");
+    // Backward, with a skip and a filter the index does not answer.
+    let r = run(
+        &mut m,
+        r#"{"find":"c","filter":{"k":{"$gte":0},"_id":{"$mod":[2,0]}},"sort":{"k":-1},"skip":3,"batchSize":7}"#,
+    );
+    let (first, mut id) = batch_k(&r, "firstBatch");
+    let want: Vec<i32> = (1..=DOCS).rev().filter(|k| (DOCS - k) % 2 == 0).skip(3).collect();
+    assert_eq!(first, want[..7].to_vec());
+    let mut all = first;
+    while id != 0 {
+        let more = run(
+            &mut m,
+            &format!(r#"{{"getMore":{{"$numberLong":"{id}"}},"collection":"c","batchSize":500}}"#),
+        );
+        let (ks, next) = batch_k(&more, "nextBatch");
+        all.extend(ks);
+        id = next;
+    }
+    assert_eq!(all, want);
+    // A skip past the first batch: the plan read it with the batch, and nothing is skipped again.
+    let r = run(&mut m, r#"{"find":"c","filter":{"k":{"$gte":0}},"sort":{"k":1},"skip":150}"#);
+    let (first, mut id) = batch_k(&r, "firstBatch");
+    let mut all = first;
+    while id != 0 {
+        let more =
+            run(&mut m, &format!(r#"{{"getMore":{{"$numberLong":"{id}"}},"collection":"c"}}"#));
+        let (ks, next) = batch_k(&more, "nextBatch");
+        all.extend(ks);
+        id = next;
+    }
+    assert_eq!(all, (151..=DOCS).collect::<Vec<_>>());
+}

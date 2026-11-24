@@ -225,6 +225,7 @@ pub(super) fn aggregate<B: Backend + ?Sized>(
             .load(std::sync::atomic::Ordering::Relaxed),
         index_keys: false,
         key_only: false,
+        batch: None,
     };
     let chosen = match (&express, coll.as_ref()) {
         (Some(_), _) | (None, None) => None,
