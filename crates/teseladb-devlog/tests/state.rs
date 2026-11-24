@@ -1213,3 +1213,41 @@ fn a_failed_read_of_a_copy_forward_stops_the_log() {
     assert!(matches!(answers[..], [(0, IoDone::Err { errno: IoErrno::Io, .. })]), "{answers:?}");
     assert_eq!(s.failed(), Some(IoErrno::Io));
 }
+
+/// Placing a write looks at the extents it overlaps and at no other: a segment that thousands of
+/// writes filled takes the next one as an empty segment does. Before, each write walked every
+/// extent of its segment from the first one, so a segment cost the square of its writes to fill
+/// (002 run `c0n3p`: 4 % of a node's CPU, on the shard that writes the log, half-way through a
+/// segment), and the log got slower write after write until the next segment.
+#[test]
+fn a_write_looks_at_the_extents_it_overlaps_and_at_no_other() {
+    const WRITES: u64 = 2_000;
+    let mut disk = MemDisk::new();
+    let mut s = LogState::recover(&mut disk, 16 << 20).unwrap();
+    let mut model = Model::new();
+    s.create(0, 1, 0);
+    let data = varied(100);
+    for i in 0..WRITES {
+        s.write(0, 1, i * 100, &data);
+        put(&mut model, (0, 1), i * 100, &data);
+    }
+    s.sync(0, sync_op(1));
+    s.flush(&mut disk);
+    let appended = s.extents_examined();
+    assert!(appended <= WRITES, "{appended} extents examined by {WRITES} writes at the end");
+    // A write over the middle of others cuts those it covers, wherever they are.
+    let over = vec![9u8; 250];
+    s.write(0, 1, 100_050, &over);
+    put(&mut model, (0, 1), 100_050, &over);
+    s.truncate(0, 1, 150_020);
+    model.get_mut(&(0, 1)).unwrap().truncate(150_020);
+    s.sync(0, sync_op(2));
+    s.flush(&mut disk);
+    // The three extents the write covers and the one before its start, and those the truncation
+    // takes: the one it cuts and the 499 past it.
+    let examined = s.extents_examined() - appended;
+    assert!(examined <= 4 + 501, "{examined} extents examined");
+    check(&mut s, &mut disk, &model);
+    let mut again = LogState::recover(&mut disk, 16 << 20).unwrap();
+    check(&mut again, &mut disk, &model);
+}

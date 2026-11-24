@@ -183,6 +183,8 @@ pub struct LogState {
     failed: Option<IoErrno>,
     disk_full: bool,
     syncs: u64,
+    /// Extents of the cores' WAL segments looked at to place frames.
+    examined: u64,
     /// Whether old files may be copied forward and removed: not while cores recover.
     tidy: bool,
     /// Whether the log's directory may be new: its name in the data directory is synced with the
@@ -271,6 +273,7 @@ impl LogState {
             failed: None,
             disk_full: false,
             syncs: 0,
+            examined: 0,
             tidy: false,
             dir_new: false,
             bound: 0,
@@ -361,6 +364,13 @@ impl LogState {
     #[must_use]
     pub fn syncs(&self) -> u64 {
         self.syncs
+    }
+
+    /// Extents of the cores' WAL segments looked at to place frames since it started: those a
+    /// frame overlaps, and the one before its start.
+    #[must_use]
+    pub fn extents_examined(&self) -> u64 {
+        self.examined
     }
 
     /// Files of the log on disk.
@@ -482,8 +492,21 @@ impl LogState {
     /// outside the range.
     fn cut(&mut self, key: (u16, u64), start: u64, end: u64) {
         let Some(w) = self.wals.get_mut(&key) else { return };
-        let hit: Vec<(u64, Extent)> =
-            w.extents.range(..end).filter(|(_, e)| e.end > start).map(|(s, e)| (*s, *e)).collect();
+        // The extents of a segment share no byte (each write cuts what it covers before it goes
+        // in), so those that overlap the range are the one that starts before it, if it reaches
+        // into it, and those that start inside. Walking the segment from its first extent
+        // instead made every write at its end look at all of them.
+        let before = w.extents.range(..start).next_back();
+        let inside = w.extents.range(start..end);
+        let mut examined = 0;
+        let hit: Vec<(u64, Extent)> = before
+            .into_iter()
+            .chain(inside)
+            .inspect(|_| examined += 1)
+            .filter(|(_, e)| e.end > start)
+            .map(|(s, e)| (*s, *e))
+            .collect();
+        self.examined += examined;
         let mut refs = Vec::new();
         for (s, e) in hit {
             w.extents.remove(&s);
