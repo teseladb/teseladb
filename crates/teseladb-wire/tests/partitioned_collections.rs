@@ -14,7 +14,11 @@ use teseladb_wire::ops::{Guarded, Op, op_type};
 /// Runs `cmd` as the node runs a client's command: through the operation's guard, which sends
 /// the reads of a collection spread over partitions to each of them.
 fn guarded(m: &mut Mem, cmd: Document) -> Document {
-    let shared = Shared::default();
+    guarded_in(m, &Shared::default(), cmd)
+}
+
+/// [`guarded`] with the node's `shared` state, which keeps the cursors between two commands.
+fn guarded_in(m: &mut Mem, shared: &Shared, cmd: Document) -> Document {
     let op = Op {
         conn: 1,
         client: None,
@@ -35,9 +39,9 @@ fn guarded(m: &mut Mem, cmd: Document) -> Document {
         progress: None,
         metrics: None,
     };
-    let id = teseladb_wire::commands::hot::of(&shared).ops.begin(op);
-    let mut g = Guarded::new(m, &shared, id);
-    let r = run(&mut Ctx { backend: &mut g, shared: &shared, db: "db", cmd: &cmd })
+    let id = teseladb_wire::commands::hot::of(shared).ops.begin(op);
+    let mut g = Guarded::new(m, shared, id);
+    let r = run(&mut Ctx { backend: &mut g, shared, db: "db", cmd: &cmd })
         .expect("a command of the module");
     match r {
         Ok(d) => d,
@@ -158,6 +162,67 @@ fn answers(m: &mut Mem, coll: &str) -> Vec<Value> {
     let count = guarded(m, doc(&[("count", s(coll))]));
     out.push(field(&count, "n").clone());
     out
+}
+
+/// Every document `find` gives for `filter` and `sort` on `coll`, by batches of `size`: its first
+/// batch and then each `getMore`, until the cursor ends.
+fn found_by_batches(
+    m: &mut Mem,
+    coll: &str,
+    (filter, sort): (Value, Value),
+    size: i32,
+) -> Vec<Value> {
+    let shared = Shared::default();
+    let find =
+        doc(&[("find", s(coll)), ("filter", filter), ("sort", sort), ("batchSize", size.into())]);
+    let r = guarded_in(m, &shared, find.clone());
+    let mut out = batch(&r);
+    let mut id = field(&r, "cursor.id").clone();
+    while id != Value::Int64(0) {
+        let cmd = doc(&[("getMore", id), ("collection", s(coll)), ("batchSize", size.into())]);
+        let r = guarded_in(m, &shared, cmd);
+        let Some(Value::Document(cursor)) = r.get("cursor") else {
+            panic!("a getMore of {find:?} after {} documents answered {r:?}", out.len());
+        };
+        match cursor.get("nextBatch") {
+            Some(Value::Array(a)) => out.extend(a.iter().cloned()),
+            other => panic!("no next batch in {r:?}: {other:?}"),
+        }
+        id = field(&r, "cursor.id").clone();
+    }
+    out
+}
+
+/// A `find` over one index that a cursor reads by batches (010 FR-035) gives on a collection
+/// spread over partitions every document it gives in one batch, in the same order: its entries
+/// are under the partitions' numbers, and its `getMore` goes on from the last one in the
+/// interval of the collection's own number (25-11-2026, 0.2.1: the cursor compared the
+/// partition's key with the collection's intervals and ended after its first batch, or read the
+/// whole collection into one reply). A read backward that went past a chunk of entries took the
+/// rest of the partition's keys below the partition's own last key instead of each one's.
+#[test]
+fn a_cursor_over_four_partitions_reads_by_batches_what_one_batch_reads() {
+    let mut m = Mem::new();
+    fill(&mut m, "spread", 4);
+    fill(&mut m, "plain", 1);
+    let reads = [
+        (d(&[("v", 5.into())]), d(&[])),
+        (d(&[("v", d(&[("$gte", 3.into()), ("$lt", 9.into())]))]), d(&[("v", 1.into())])),
+        (d(&[("v", d(&[("$gte", 3.into())]))]), d(&[("v", (-1).into())])),
+        (d(&[]), d(&[("_id", 1.into())])),
+        (d(&[]), d(&[("_id", (-1).into())])),
+    ];
+    for (filter, sort) in reads {
+        let read = (filter.clone(), sort.clone());
+        let whole = found_by_batches(&mut m, "plain", read.clone(), 100_000);
+        assert!(whole.len() > 10, "{filter:?}: {} documents", whole.len());
+        // A read in one batch of the spread one goes past a scan's chunk too, backward as well.
+        for (coll, size) in [("spread", 10), ("plain", 10), ("spread", 100_000)] {
+            let by_batches = found_by_batches(&mut m, coll, read.clone(), size);
+            assert_eq!(by_batches.len(), whole.len(), "{coll} {size} {filter:?} {sort:?}");
+            assert_eq!(by_batches, whole, "{coll} {size} {filter:?} {sort:?}");
+        }
+    }
 }
 
 #[test]

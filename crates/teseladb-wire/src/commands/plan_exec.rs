@@ -1297,7 +1297,13 @@ fn entries<'a, B: Backend + ?Sized>(
     let ranges = key_ranges((tenant, collection), index, &scan.bounds)?;
     // A scan that goes on from where a batch stopped reads the rest of its intervals (FR-035).
     if let Some(at) = after {
-        let rest = from_position(ranges, at, scan.backward);
+        // The entry's key carries the number of the partition that holds it (D-186); the
+        // intervals carry the collection's own, and the partitions' reads take either as start.
+        let at =
+            teseladb_keys::partition::with_collection_number(at, collection).ok_or_else(|| {
+                CommandError::new(INTERNAL_ERROR, "a cursor's position that is not a data key")
+            })?;
+        let rest = from_position(ranges, &at, scan.backward);
         let read = (concern, decode);
         return Ok(scan::intervals((tenant, collection), index, rest, read, scan.backward));
     }

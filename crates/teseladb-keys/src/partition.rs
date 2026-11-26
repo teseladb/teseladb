@@ -93,9 +93,10 @@ impl Partitions {
 
     /// `[start, end)` read in every partition: the same interval after the collection number in
     /// each one's. `start` may carry any of the collection's numbers (a read that goes on from a
-    /// key it gave); `end` carries the first one with the rest of the key, or the next number with
-    /// nothing after it, the end of the collection, which is then the end of each partition.
-    /// `None` when the interval is not inside the collection's keys.
+    /// key it gave); `end` carries the first one, or any of them with the rest of a key (a read
+    /// backward that goes on below a key it gave), or the next number with nothing after it, the
+    /// end of the collection, which is then the end of each partition. `None` when the interval
+    /// is not inside the collection's keys.
     pub fn spans(&self, start: &[u8], end: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
         let (s, start_rest) = split_number(start)?;
         let (e, end_rest) = split_number(end)?;
@@ -105,6 +106,7 @@ impl Partitions {
         let past = match e.checked_sub(self.first)? {
             0 => false,
             1 if end_rest.is_empty() => true,
+            _ if self.contains(e) && !end_rest.is_empty() => false,
             _ => return None,
         };
         let spans = self
@@ -141,6 +143,14 @@ fn with_number(key: &[u8], n: u32, rest: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&n.to_be_bytes());
     out.extend_from_slice(rest);
     out
+}
+
+/// Data key `key` under collection number `n`, with the same bytes after the number: a key one of
+/// a collection's partitions gave, in the intervals of the collection's own number, which the
+/// partitions' reads take as their start. `None` when `key` is not a data key.
+pub fn with_collection_number(key: &[u8], n: u32) -> Option<Vec<u8>> {
+    let (_, rest) = split_number(key)?;
+    Some(with_number(key, n, rest))
 }
 
 /// The bytes of data key `key` after its collection number: what orders the keys of the

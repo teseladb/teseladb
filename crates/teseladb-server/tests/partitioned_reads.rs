@@ -108,3 +108,95 @@ fn a_client_s_aggregation_sees_each_transaction_over_partitions_it_committed() {
         assert_eq!(count_and_sum(&mut c).0, n, "round {round}");
     }
 }
+
+/// The `_id` and `v` of the documents a `find` of `filter` sorted by `sort` gives, by batches of
+/// `size`: its first batch, then each `getMore` until the cursor ends.
+fn read_by_batches(c: &mut Client, (filter, sort): (&Document, &Document), size: i32) -> Vec<i32> {
+    let find = Document::new()
+        .with("find", "c")
+        .with("filter", filter.clone())
+        .with("sort", sort.clone())
+        .with("batchSize", size);
+    let r = c.run("app", find);
+    assert!(ok(&r), "{r:?}");
+    let mut got = common::batch(&r, "firstBatch");
+    let id_of = |r: &Document| match r.get("cursor") {
+        Some(Value::Document(d)) => d.get("id").cloned().unwrap_or(Value::Int64(0)),
+        _ => panic!("no cursor in {r:?}"),
+    };
+    let mut id = id_of(&r);
+    while id != Value::Int64(0) {
+        let more =
+            Document::new().with("getMore", id).with("collection", "c").with("batchSize", size);
+        let r = c.run("app", more);
+        assert!(ok(&r), "a getMore after {} documents: {r:?}", got.len());
+        got.extend(common::batch(&r, "nextBatch"));
+        id = id_of(&r);
+    }
+    got.iter()
+        .map(|d| match d {
+            Value::Document(d) => match d.get("_id") {
+                Some(Value::Int32(i)) => *i,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+/// A collection spread over partitions read in key order, forward and backward, by `_id` and by
+/// an index, in one batch and by batches that `getMore` goes on with, gives each document once
+/// and in its order (25-11-2026, 0.2.1: a read backward took each partition's rows forward and
+/// gave repeated documents out of order, and a cursor's `getMore` read in the partition's
+/// numbers ended after its first batch).
+#[test]
+fn a_collection_over_partitions_reads_in_order_forward_and_backward_by_batches() {
+    let config = NodeConfig { cores: Some(4), ..common::config(Vec::new()) };
+    let node = Node::start(config, DiskPlace::Memory, None).unwrap();
+    assert!(node.wait_ready(READY));
+    let mut c = Client::new(&node);
+    assert!(ok(&c.run("app", Document::new().with("create", "c"))));
+    let index = Document::new().with("key", Document::new().with("v", 1)).with("name", "v_1");
+    let r = c.run(
+        "app",
+        Document::new()
+            .with("createIndexes", "c")
+            .with("indexes", Value::Array(vec![index.into()])),
+    );
+    assert!(ok(&r), "{r:?}");
+    const N: i32 = 3000;
+    for chunk in (0..N).collect::<Vec<_>>().chunks(500) {
+        let docs: Vec<Value> = chunk
+            .iter()
+            .map(|&i| Value::Document(Document::new().with("_id", i).with("v", i % 17)))
+            .collect();
+        let r =
+            c.run("app", Document::new().with("insert", "c").with("documents", Value::Array(docs)));
+        assert!(ok(&r), "{r:?}");
+    }
+    let by_id: Vec<i32> = (0..N).collect();
+    let by_v: Vec<i32> = {
+        let mut ids: Vec<i32> = (0..N).filter(|i| i % 17 >= 3).collect();
+        ids.sort_by_key(|i| (i % 17, *i));
+        ids
+    };
+    let none = Document::new();
+    let from_3 = Document::new().with("v", Document::new().with("$gte", 3));
+    let reads: [(&Document, Document, Vec<i32>); 4] = [
+        (&none, Document::new().with("_id", 1), by_id.clone()),
+        (&none, Document::new().with("_id", -1), by_id.iter().rev().copied().collect()),
+        (&from_3, Document::new().with("v", 1).with("_id", 1), by_v.clone()),
+        (
+            &from_3,
+            Document::new().with("v", -1).with("_id", -1),
+            by_v.iter().rev().copied().collect(),
+        ),
+    ];
+    for (filter, sort, want) in &reads {
+        for size in [100_000, 10] {
+            let got = read_by_batches(&mut c, (filter, sort), size);
+            assert_eq!(got.len(), want.len(), "{filter:?} {sort:?} by {size}");
+            assert_eq!(&got, want, "{filter:?} {sort:?} by {size}");
+        }
+    }
+}

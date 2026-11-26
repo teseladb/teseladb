@@ -100,6 +100,13 @@ fn an_interval_of_the_collection_is_read_in_every_partition() {
     let from = [entries(42).as_slice(), b"k7"].concat();
     let on = parts.spans(&from, &entries(40)).map(|s| s[0].0.clone());
     assert_eq!(on, Some([entries(40).as_slice(), b"k7"].concat()));
+    // A read backward that goes on below a key of partition 1 goes on below it in every
+    // partition, from the interval's start in each one's.
+    let below = [entries(41).as_slice(), b"k3"].concat();
+    let back = parts.spans(&entries(40), &below).expect("an interval of the collection");
+    let want: Vec<_> =
+        (40..43).map(|n| (entries(n), [entries(n).as_slice(), b"k3"].concat())).collect();
+    assert_eq!(back, want);
     // Outside the collection.
     assert_eq!(parts.spans(&docs(39), &docs(40)), None);
     assert_eq!(parts.spans(&docs(40), &docs(44)), None);
@@ -117,6 +124,18 @@ fn an_interval_of_the_collection_is_read_in_every_partition() {
         .collect();
     let got: Vec<u32> = merge(back, 2, true).into_iter().map(|(_, v)| v).collect();
     assert_eq!(got, vec![40, 42]);
+}
+
+#[test]
+fn a_key_a_partition_gave_goes_under_the_collection_number_with_the_same_rest() {
+    let entry = [KeyBuilder::index_prefix(TENANT, 42, 2).as_bytes(), b"v\x00pk"].concat();
+    let moved = teseladb_keys::partition::with_collection_number(&entry, 40).expect("a data key");
+    assert_eq!(collection_number(&moved), 40);
+    assert_eq!(moved.len(), entry.len());
+    assert_eq!(moved[..5], entry[..5]);
+    assert_eq!(teseladb_keys::partition::after_number(&moved), b"\x00\x00\x00\x02v\x00pk");
+    // A key that is not a data key has no collection number.
+    assert_eq!(teseladb_keys::partition::with_collection_number(b"\x02abc", 40), None);
 }
 
 #[test]
